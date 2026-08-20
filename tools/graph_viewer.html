@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenSeek Sparse Graph</title>
+  <script src="/plotly.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, "Noto Sans SC", system-ui, sans-serif;
+      color: #20262a;
+      background: #f2f4f5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 18px;
+      padding: 16px 22px 13px; background: #fff; border-bottom: 1px solid #d9dfe2;
+    }
+    h1 { margin: 0; font-size: 19px; letter-spacing: 0; }
+    #source { max-width: 65vw; color: #69737a; font: 12px ui-monospace, monospace; overflow-wrap: anywhere; text-align: right; }
+    nav {
+      position: sticky; top: 0; z-index: 20; display: flex; align-items: end; gap: 9px;
+      padding: 9px 22px; background: rgba(255,255,255,.97); border-bottom: 1px solid #d9dfe2;
+    }
+    label { display: grid; gap: 3px; color: #68727a; font-size: 11px; }
+    select, input {
+      height: 34px; min-width: 140px; padding: 0 9px; color: #20262a; background: #fff;
+      border: 1px solid #b9c2c7; border-radius: 5px; font: inherit; font-size: 13px;
+    }
+    input { width: 72px; min-width: 72px; }
+    button {
+      width: 36px; height: 34px; padding: 0; border: 1px solid #b9c2c7; border-radius: 5px;
+      color: #20262a; background: #fff; font-size: 19px; cursor: pointer;
+    }
+    button:hover { background: #edf1f3; }
+    button:disabled { color: #aeb5ba; background: #f7f8f8; cursor: default; }
+    #status { margin-left: auto; align-self: center; color: #68727a; font-size: 12px; }
+    #status.error { color: #b52e38; }
+    main { max-width: 1720px; margin: 0 auto; padding: 15px 22px 26px; }
+    .metrics {
+      display: grid; grid-template-columns: repeat(9, minmax(110px, 1fr)); gap: 1px;
+      margin-bottom: 14px; overflow: hidden; background: #dbe1e4; border: 1px solid #dbe1e4; border-radius: 6px;
+    }
+    .metric { min-width: 0; padding: 9px 11px; background: #fff; }
+    .metric span { display: block; margin-bottom: 3px; color: #707a80; font-size: 11px; }
+    .metric strong { display: block; font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(300px, .75fr); gap: 14px; }
+    .panel { min-width: 0; overflow: hidden; background: #fff; border: 1px solid #d9dfe2; border-radius: 6px; }
+    .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid #e2e6e8; }
+    .panel-head h2 { margin: 0; font-size: 14px; }
+    .panel-head span { color: #727c82; font-size: 11px; }
+    #graphPlot { height: min(72vh, 760px); min-height: 520px; }
+    #depthImage { display: block; width: 100%; aspect-ratio: 5 / 3; object-fit: contain; background: #090a0b; image-rendering: pixelated; }
+    #pearlImage { display: block; width: 100%; aspect-ratio: 5 / 3; object-fit: contain; background: #111820; image-rendering: auto; }
+    .unavailable { min-height: 120px; display: grid; place-items: center; padding: 16px; color: #788389; background: #f4f6f7; font: 12px/1.4 ui-monospace, monospace; text-align: center; }
+    .legend { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px; border-top: 1px solid #e2e6e8; font-size: 11px; }
+    .key { display: flex; align-items: center; gap: 6px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+    .details { margin: 0; padding: 0 12px 12px; color: #505a60; font: 12px/1.55 ui-monospace, monospace; white-space: pre-wrap; }
+    @media (max-width: 1050px) {
+      .metrics { grid-template-columns: repeat(4, 1fr); }
+      .workspace { grid-template-columns: 1fr; }
+      #graphPlot { height: 580px; min-height: 430px; }
+      #depthImage { max-height: 440px; }
+    }
+    @media (max-width: 650px) {
+      header { flex-direction: column; align-items: flex-start; padding: 13px; }
+      #source { max-width: 100%; text-align: left; }
+      nav { flex-wrap: wrap; padding: 9px 13px; }
+      #status { width: 100%; margin-left: 0; }
+      main { padding: 11px; }
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+      #graphPlot { height: 470px; min-height: 390px; }
+    }
+  </style>
+</head>
+<body>
+  <header><h1>OpenSeek Sparse Graph</h1><div id="source"></div></header>
+  <nav aria-label="帧导航">
+    <label>场景<select id="scene"></select></label>
+    <button id="previous" type="button" title="上一帧" aria-label="上一帧">←</button>
+    <label>帧<input id="frame" inputmode="numeric"></label>
+    <button id="next" type="button" title="下一帧" aria-label="下一帧">→</button>
+    <div id="status">初始化</div>
+  </nav>
+  <main>
+    <section class="metrics">
+      <div class="metric"><span>场景 / 帧</span><strong id="mFrame">-</strong></div>
+      <div class="metric"><span>局部候选节点 / 连接边</span><strong id="mSize">-</strong></div>
+      <div class="metric"><span>局部安全节点（含当前位置）</span><strong id="mCertified">-</strong></div>
+      <div class="metric"><span>未验证节点</span><strong id="mUnknown">-</strong></div>
+      <div class="metric"><span>当前帧被挡节点</span><strong id="mInvalid">-</strong></div>
+      <div class="metric"><span>下一步 waypoint [前,左,上]</span><strong id="mWaypoint">-</strong></div>
+      <div class="metric"><span>局部可执行 / 试探段</span><strong id="mPaths">-</strong></div>
+      <div class="metric"><span>障碍地图 / 当前深度 / PEARL</span><strong id="mObstacle">-</strong></div>
+      <div class="metric"><span>相机世界姿态</span><strong id="mPose">-</strong></div>
+    </section>
+    <section class="workspace">
+      <div class="panel">
+        <div class="panel-head"><h2>3D Graph（当前视点的局部候选）</h2><span>坐标已转换为机体 FLU：前 / 左 / 上</span></div>
+        <div id="graphPlot"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>DepthPlanar 校验视图</h2><span>黑近白远；彩色点是候选节点</span></div>
+        <img id="depthImage" alt="DepthPlanar with graph node projections">
+        <div class="legend">
+          <span class="key"><i class="dot" style="background:#25a55f"></i>局部安全</span>
+          <span class="key"><i class="dot" style="background:#e2a21b"></i>UNVALIDATED</span>
+          <span class="key"><i class="dot" style="background:#d84a4a"></i>当前帧碰撞</span>
+        </div>
+        <pre id="details" class="details"></pre>
+        <div class="panel-head"><h2>PEARL 语义热力图</h2><span id="pearlMeta">prompt: obstacle</span></div>
+        <img id="pearlImage" alt="PEARL obstacle probability heatmap">
+        <div id="pearlUnavailable" class="unavailable" hidden></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const ui = id => document.getElementById(id);
+    const state = { catalog: null, scene: null, frames: [], position: 0, request: 0 };
+    const fmt = vector => vector ? vector.map(value => value.toFixed(2)).join(", ") : "无";
+
+    function setStatus(message, error = false) {
+      ui("status").textContent = message;
+      ui("status").classList.toggle("error", error);
+    }
+    function currentScene() { return state.catalog.scenes.find(item => item.name === state.scene); }
+    function selectScene(name) {
+      state.scene = name;
+      state.frames = currentScene().frames;
+      state.position = 0;
+      loadCurrent();
+    }
+    async function loadCurrent() {
+      if (!state.frames.length) return;
+      const frame = state.frames[state.position];
+      const request = ++state.request;
+      setStatus(`计算 ${state.scene} / ${frame.id}...`);
+      ui("previous").disabled = state.position === 0;
+      ui("next").disabled = state.position === state.frames.length - 1;
+      ui("frame").value = frame.id;
+      try {
+        const response = await fetch(`/api/frame?scene=${encodeURIComponent(state.scene)}&frame=${frame.index}`);
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || response.statusText);
+        if (request !== state.request) return;
+        render(payload);
+        setStatus(`${state.position + 1} / ${state.frames.length}`);
+      } catch (error) {
+        if (request === state.request) setStatus(error.message, true);
+      }
+    }
+    function render(data) {
+      ui("mFrame").textContent = `${data.scene} / ${data.frame}`;
+      ui("mSize").textContent = `${data.nodeCount} / ${data.edgeCount}`;
+      ui("mCertified").textContent = data.stateCounts.CERTIFIED;
+      ui("mUnknown").textContent = data.stateCounts.UNVALIDATED;
+      ui("mInvalid").textContent = data.stateCounts.INVALID;
+      const waypoint = data.certifiedWaypointBody || data.optimisticWaypointBody;
+      ui("mWaypoint").textContent = fmt(waypoint);
+      ui("mPaths").textContent = `${data.certifiedPath.join("→") || "无"} / ${data.optimisticPath.join("→") || "无"}`;
+      ui("mPose").textContent = `yaw ${data.pose.yawDeg.toFixed(1)}° · FOV ${data.pose.horizontalFovDeg.toFixed(0)}°`;
+      ui("mObstacle").textContent = `${data.obstaclePointCount ?? 0} / ${data.observedDepthPointCount ?? 0} / ${data.pearlAvailable ? "可用" : "不可用"}`;
+      ui("depthImage").src = data.depthImage;
+      ui("pearlMeta").textContent = `prompt: ${data.pearlPrompt || "obstacle"}`
+        + (data.pearlAvailable ? ` · peak ${data.pearlPeak.toFixed(3)}` : "");
+      const pearlImage = ui("pearlImage");
+      const pearlUnavailable = ui("pearlUnavailable");
+      if (data.pearlAvailable && data.pearlImage) {
+        pearlImage.src = data.pearlImage;
+        pearlImage.hidden = false;
+        pearlUnavailable.hidden = true;
+      } else {
+        pearlImage.removeAttribute("src");
+        pearlImage.hidden = true;
+        pearlUnavailable.textContent = `PEARL 不可用：${data.pearlError || "未知原因"}`;
+        pearlUnavailable.hidden = false;
+      }
+      const stateNames = { CERTIFIED: "安全", UNVALIDATED: "未验证", INVALID: "被挡" };
+      const waypointDirection = waypoint
+        ? (waypoint[1] < -0.3 ? "右侧绕行" : waypoint[1] > 0.3 ? "左侧绕行" : "正前方")
+        : "没有可执行 waypoint";
+      const nodeLines = data.nodeDetails.map(node =>
+        `节点 ${node.id}: ${stateNames[node.state]}，前/左/上 ${fmt(node.positionBody)}`
+      );
+      const edgeLines = data.edgeDetails
+        .filter(edge => edge.target === 1 && edge.source !== 0)
+        .map(edge => `候选 ${edge.source} → Goal: ${stateNames[edge.state]}`);
+      ui("details").textContent = [
+        `本帧建议: ${waypointDirection}（只覆盖当前局部段）`,
+        `重要: CERTIFIED 只代表到候选点这一段在当前深度帧内未碰撞，不代表左/右侧全局畅通`,
+        `坐标含义: 前 + 是前方；左 + 是左侧；左 - 是右侧；上 + 是上方`,
+        `局部安全边: ${data.edgeStateCounts.CERTIFIED} · 未验证边: ${data.edgeStateCounts.UNVALIDATED} · 当前帧被挡边: ${data.edgeStateCounts.INVALID}`,
+        `障碍地图: ${data.obstaclePointCount ?? 0} 点；当前深度墙面: ${data.observedDepthPointCount ?? 0} 点；PEARL: ${data.pearlAvailable ? "可用" : "不可用"}`,
+        ...edgeLines,
+        `局部安全 waypoint: ${fmt(data.certifiedWaypointBody)}`,
+        `乐观 waypoint: ${fmt(data.optimisticWaypointBody)}`,
+        ...nodeLines,
+        `位置 NED: ${fmt(data.pose.positionNed)}`
+      ].join("\n");
+      Plotly.react("graphPlot", data.figure.data, data.figure.layout, {
+        displaylogo: false, responsive: true, scrollZoom: true
+      });
+    }
+    function move(delta) {
+      const next = Math.max(0, Math.min(state.frames.length - 1, state.position + delta));
+      if (next !== state.position) { state.position = next; loadCurrent(); }
+    }
+    ui("previous").addEventListener("click", () => move(-1));
+    ui("next").addEventListener("click", () => move(1));
+    ui("scene").addEventListener("change", event => selectScene(event.target.value));
+    ui("frame").addEventListener("change", event => {
+      const wanted = String(event.target.value).trim();
+      const index = state.frames.findIndex(frame => String(frame.id) === wanted);
+      if (index < 0) { event.target.value = state.frames[state.position].id; return; }
+      state.position = index; loadCurrent();
+    });
+    document.addEventListener("keydown", event => {
+      if (event.target.tagName === "INPUT" || event.target.tagName === "SELECT") return;
+      if (event.key === "ArrowLeft") move(-1);
+      if (event.key === "ArrowRight") move(1);
+    });
+    fetch("/api/index").then(response => response.json()).then(catalog => {
+      state.catalog = catalog;
+      ui("source").textContent = `${catalog.dataRoot} · ${catalog.frameCount} 帧 · goal ${catalog.goalDistanceM} m`;
+      for (const scene of catalog.scenes) {
+        const option = document.createElement("option");
+        option.value = scene.name;
+        option.textContent = `${scene.name} (${scene.frames.length})`;
+        ui("scene").appendChild(option);
+      }
+      const requestedScene = new URLSearchParams(location.search).get("scene");
+      const initialScene = catalog.scenes.find(scene => scene.name === requestedScene)
+        || catalog.scenes.find(scene => scene.name === "Scene_0002")
+        || catalog.scenes[0];
+      ui("scene").value = initialScene.name;
+      selectScene(initialScene.name);
+    }).catch(error => setStatus(error.message, true));
+  </script>
+</body>
+</html>

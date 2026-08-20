@@ -1,0 +1,19 @@
+# Default controller and rigid-body dynamics parameters.
+openseek_uav_sim:
+  ros__parameters:
+    simulation_rate: 500.0
+    odom_rate: 100.0
+    initial_position: [0.0, 0.0, 1.6]
+    position_gain: [4.0, 4.0, 6.0]
+    velocity_gain: [3.0, 3.0, 4.0]
+    attitude_gain: [2.0, 2.0, 1.0]
+    angular_rate_gain: [0.15, 0.15, 0.10]
+    command_timeout: 0.5
+    minimum_altitude: 0.15
+    maximum_acceleration: 12.0
+    maximum_linear_speed: 6.0
+    maximum_yaw_rate: 1.0
+    maximum_command_acceleration: 4.0
+    maximum_yaw_acceleration: 2.0
+    world_frame: world_enu
+    body_frame: base_link

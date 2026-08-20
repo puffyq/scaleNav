@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenSeek baseline 离线测试</title>
+  <script src="/plotly.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, "Noto Sans SC", system-ui, sans-serif;
+      color: #202529;
+      background: #f4f6f7;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 18px 24px 14px;
+      background: #fff;
+      border-bottom: 1px solid #dce1e4;
+    }
+    h1 { margin: 0; font-size: 20px; letter-spacing: 0; }
+    #modelPath {
+      max-width: 65vw;
+      color: #687178;
+      font: 12px ui-monospace, monospace;
+      overflow-wrap: anywhere;
+      text-align: right;
+    }
+    .toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      align-items: end;
+      gap: 10px;
+      padding: 10px 24px;
+      background: rgba(255, 255, 255, 0.97);
+      border-bottom: 1px solid #dce1e4;
+    }
+    label { display: grid; gap: 4px; color: #687178; font-size: 11px; }
+    select, input[type="text"] {
+      height: 34px;
+      min-width: 140px;
+      padding: 0 9px;
+      color: #202529;
+      background: #fff;
+      border: 1px solid #bfc7cc;
+      border-radius: 5px;
+      font: inherit;
+      font-size: 13px;
+    }
+    input[type="text"] { min-width: 92px; width: 92px; }
+    .icon-button {
+      width: 36px;
+      height: 34px;
+      padding: 0;
+      border: 1px solid #bfc7cc;
+      border-radius: 5px;
+      color: #202529;
+      background: #fff;
+      font-size: 20px;
+      cursor: pointer;
+    }
+    .icon-button:hover { background: #edf2f4; }
+    .icon-button:disabled { color: #aeb5ba; cursor: default; background: #f7f8f8; }
+    .check { display: flex; align-items: center; gap: 7px; height: 34px; font-size: 13px; color: #343a3f; }
+    #status { margin-left: auto; align-self: center; color: #687178; font-size: 12px; }
+    main { max-width: 1680px; margin: 0 auto; padding: 18px 24px 30px; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(11, minmax(105px, 1fr));
+      gap: 1px;
+      margin-bottom: 16px;
+      overflow: hidden;
+      background: #dce1e4;
+      border: 1px solid #dce1e4;
+      border-radius: 6px;
+    }
+    .metric { min-width: 0; padding: 10px 12px; background: #fff; }
+    .metric span { display: block; margin-bottom: 4px; color: #707980; font-size: 11px; }
+    .metric strong { display: block; font-size: 14px; overflow-wrap: anywhere; }
+    .inputs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px; }
+    figure { margin: 0; overflow: hidden; background: #fff; border: 1px solid #dce1e4; border-radius: 6px; }
+    figure img { display: block; width: 100%; height: 230px; object-fit: contain; background: #111; }
+    #heatmapImage { image-rendering: pixelated; background: #f5f5f5; }
+    figcaption { padding: 9px 12px; font-size: 13px; border-top: 1px solid #e4e8ea; }
+    .plot, .scores { overflow: hidden; background: #fff; border: 1px solid #dce1e4; border-radius: 6px; }
+    .scores { margin-top: 14px; overflow-x: auto; }
+    .scores h2 { margin: 0; padding: 13px 14px; font-size: 15px; border-bottom: 1px solid #e4e8ea; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+    th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid #edf0f2; white-space: nowrap; }
+    th:first-child, td:first-child { text-align: center; }
+    th { color: #667078; font-weight: 600; background: #fafbfb; }
+    tr.predicted td { background: #fff0f1; }
+    tr.oracle td { box-shadow: inset 0 -2px #00897b; }
+    .note { margin: 0; padding: 12px 14px; color: #59636b; font-size: 12px; line-height: 1.55; }
+    .error { color: #b4232f !important; }
+    @media (max-width: 1000px) {
+      .metrics { grid-template-columns: repeat(4, 1fr); }
+      .toolbar { flex-wrap: wrap; padding: 10px 14px; }
+      #status { width: 100%; margin-left: 0; }
+    }
+    @media (max-width: 720px) {
+      header { align-items: flex-start; flex-direction: column; padding: 14px; }
+      #modelPath { max-width: 100%; text-align: left; }
+      main { padding: 12px; }
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+      .inputs { grid-template-columns: 1fr; }
+      figure img { height: auto; max-height: 320px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OpenSeek baseline 离线测试</h1>
+    <div id="modelPath"></div>
+  </header>
+  <nav class="toolbar" aria-label="帧导航">
+    <label>场景<select id="sceneSelect"></select></label>
+    <button id="previousButton" class="icon-button" type="button" title="上一张" aria-label="上一张">←</button>
+    <label>帧<input id="frameInput" type="text" inputmode="numeric"></label>
+    <button id="nextButton" class="icon-button" type="button" title="下一张" aria-label="下一张">→</button>
+    <label class="check"><input id="visibleOnly" type="checkbox">只看目标可见</label>
+    <div id="status">初始化</div>
+  </nav>
+  <main>
+    <section class="metrics">
+      <div class="metric"><span>场景 / 帧</span><strong id="metricFrame">-</strong></div>
+      <div class="metric"><span>模式</span><strong id="metricMode">-</strong></div>
+      <div class="metric"><span>Prompt</span><strong id="metricPrompt">-</strong></div>
+      <div class="metric"><span>PEARL 目标可见</span><strong id="metricVisible">-</strong></div>
+      <div class="metric"><span>目标距离</span><strong id="metricDistance">-</strong></div>
+      <div class="metric"><span>Goal body [x,y,z]</span><strong id="metricGoalVector">-</strong></div>
+      <div class="metric"><span>Heatmap 强度</span><strong id="metricHeatmap">-</strong></div>
+      <div class="metric"><span>Heatmap peak [x,y,z]</span><strong id="metricHeatmapVector">-</strong></div>
+      <div class="metric"><span>PEARL 置信度</span><strong id="metricPearl">-</strong></div>
+      <div class="metric"><span>预测 / Oracle</span><strong id="metricChoice">-</strong></div>
+      <div class="metric"><span>深度点云（机体系 FLU）</span><strong id="metricPoints">-</strong></div>
+    </section>
+    <section class="inputs">
+      <figure><img id="rgbImage" alt="RGB input"><figcaption>前视 RGB（仅 PEARL 使用）</figcaption></figure>
+      <figure><img id="depthImage" alt="Depth input"><figcaption>Depth 输入，固定范围；暖色更近</figcaption></figure>
+      <figure><img id="heatmapImage" alt="Heatmap input"><figcaption id="heatmapCaption">PEARL 原始 Heatmap（网络第二通道）</figcaption></figure>
+    </section>
+    <section class="plot"><div id="trajectoryPlot"></div></section>
+    <section class="scores">
+      <h2>候选轨迹分数</h2>
+      <table>
+        <thead><tr><th>#</th><th>预测</th><th>真实</th><th>终点距离(m)</th><th>平滑</th><th>安全</th><th>加速度</th><th>3D Goal代价</th></tr></thead>
+        <tbody id="scoreRows"></tbody>
+      </table>
+      <p class="note">红色行为模型预测最低 score；绿色下划线行为按 ESDF、平滑、加速度和原版 3D Goal 代价重新计算后的最低真实代价。PEARL Heatmap 是网络输入，也用于可见时选择 Goal 方向，但不直接加入真实代价。</p>
+    </section>
+  </main>
+  <script>
+    const state = { catalog: null, scene: null, frames: [], position: 0, request: 0 };
+    const byId = id => document.getElementById(id);
+
+    function setStatus(message, error = false) {
+      byId("status").textContent = message;
+      byId("status").classList.toggle("error", error);
+    }
+
+    function currentScene() {
+      return state.catalog.scenes.find(scene => scene.name === state.scene);
+    }
+
+    function refreshFrames(preferredId = null) {
+      const scene = currentScene();
+      const visibleOnly = byId("visibleOnly").checked;
+      state.frames = scene.frames.filter(frame => !visibleOnly || frame.visible);
+      if (!state.frames.length) {
+        state.position = 0;
+        setStatus("当前筛选没有帧", true);
+        return;
+      }
+      const match = preferredId === null ? -1 : state.frames.findIndex(frame => frame.id === String(preferredId));
+      state.position = match >= 0 ? match : Math.min(state.position, state.frames.length - 1);
+      loadCurrent();
+    }
+
+    async function loadCurrent() {
+      if (!state.frames.length) return;
+      const frame = state.frames[state.position];
+      const request = ++state.request;
+      setStatus(`计算 ${state.scene} / ${frame.id}...`);
+      byId("previousButton").disabled = state.position <= 0;
+      byId("nextButton").disabled = state.position >= state.frames.length - 1;
+      byId("frameInput").value = frame.id;
+      try {
+        const response = await fetch(`/api/frame?index=${frame.index}`);
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || response.statusText);
+        if (request !== state.request) return;
+        renderFrame(payload);
+        setStatus(`${state.position + 1} / ${state.frames.length}`);
+      } catch (error) {
+        if (request === state.request) setStatus(error.message, true);
+      }
+    }
+
+    function renderFrame(data) {
+      byId("metricFrame").textContent = `${data.scene} / ${data.frame}`;
+      byId("metricMode").textContent = data.mode;
+      byId("metricPrompt").textContent = data.prompt || "-";
+      byId("metricVisible").textContent = data.visible ? "是" : "否";
+      byId("metricDistance").textContent = `${data.targetDistance.toFixed(2)} m`;
+      byId("metricGoalVector").textContent = data.targetVectorBody.map(value => value.toFixed(2)).join(", ");
+      byId("metricHeatmap").textContent = data.heatmapStrength.toFixed(4);
+      byId("metricHeatmapVector").textContent = data.heatmapPeakBody.map(value => value.toFixed(2)).join(", ");
+      byId("metricPearl").textContent = data.pearlConfidence.toFixed(4);
+      const agreement = data.predictedBest === data.oracleBest ? "一致" : "不一致";
+      byId("metricChoice").textContent = `#${data.predictedBest} / #${data.oracleBest} (${agreement})`;
+      byId("metricPoints").textContent = `${data.pointCount.toLocaleString()} 点`;
+      byId("rgbImage").src = data.images.rgb;
+      byId("depthImage").src = data.images.depth;
+      byId("heatmapImage").src = data.images.heatmap;
+      const rawSize = data.heatmapResolution || [];
+      const networkSize = data.networkHeatmapResolution || [];
+      byId("heatmapCaption").textContent = rawSize.length === 2 && networkSize.length === 2
+        ? `PEARL 原始 ${rawSize[0]}×${rawSize[1]}；网络第二通道 ${networkSize[0]}×${networkSize[1]}（可见阈值 0.08）`
+        : "PEARL 概率 Heatmap";
+      Plotly.react("trajectoryPlot", data.figure.data, data.figure.layout, {
+        displaylogo: false,
+        responsive: true,
+        scrollZoom: true
+      });
+      byId("scoreRows").replaceChildren(...data.candidates.map(candidate => {
+        const row = document.createElement("tr");
+        if (candidate.predictedBest) row.classList.add("predicted");
+        if (candidate.oracleBest) row.classList.add("oracle");
+        const values = [
+          candidate.id,
+          candidate.predicted,
+          candidate.total,
+          candidate.endpointDistance,
+          candidate.smooth,
+          candidate.safety,
+          candidate.acceleration,
+          candidate.goalCost
+        ];
+        for (const [index, value] of values.entries()) {
+          const cell = document.createElement("td");
+          cell.textContent = index === 0 ? value : value.toFixed(4);
+          row.appendChild(cell);
+        }
+        return row;
+      }));
+    }
+
+    function move(delta) {
+      const next = Math.max(0, Math.min(state.frames.length - 1, state.position + delta));
+      if (next !== state.position) {
+        state.position = next;
+        loadCurrent();
+      }
+    }
+
+    async function initialize() {
+      try {
+        const response = await fetch("/api/index");
+        state.catalog = await response.json();
+        if (!response.ok) throw new Error(state.catalog.error || response.statusText);
+        byId("modelPath").textContent = state.catalog.model;
+        byId("sceneSelect").replaceChildren(...state.catalog.scenes.map(scene => {
+          const option = document.createElement("option");
+          option.value = scene.name;
+          option.textContent = `${scene.name} (${scene.frames.length})`;
+          return option;
+        }));
+        state.scene = state.catalog.scenes[0].name;
+        refreshFrames();
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    }
+
+    byId("previousButton").addEventListener("click", () => move(-1));
+    byId("nextButton").addEventListener("click", () => move(1));
+    byId("sceneSelect").addEventListener("change", event => {
+      state.scene = event.target.value;
+      state.position = 0;
+      refreshFrames();
+    });
+    byId("visibleOnly").addEventListener("change", () => refreshFrames(byId("frameInput").value));
+    byId("frameInput").addEventListener("keydown", event => {
+      if (event.key !== "Enter") return;
+      const match = state.frames.findIndex(frame => frame.id === event.target.value.trim());
+      if (match < 0) {
+        setStatus(`找不到帧 ${event.target.value}`, true);
+        return;
+      }
+      state.position = match;
+      loadCurrent();
+    });
+    window.addEventListener("keydown", event => {
+      if (["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
+      if (event.key === "ArrowLeft") move(-1);
+      if (event.key === "ArrowRight") move(1);
+    });
+    initialize();
+  </script>
+</body>
+</html>

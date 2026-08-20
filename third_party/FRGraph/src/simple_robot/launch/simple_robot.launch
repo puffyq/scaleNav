@@ -1,0 +1,34 @@
+<launch>
+    <arg name="if_3D_Lidar" default="1" doc="if_3D_Lidar: [0, 1]"/>
+
+    <param name="robot_description" command="$(find xacro)/xacro '$(find simple_robot)/urdf/simple_robot.xacro' if_3D_Lidar:=$(arg if_3D_Lidar)"/>
+
+    <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" output="screen" />
+
+    <node pkg="rviz" type="rviz" name="rviz" output="screen" args="-d $(find simple_robot)/rviz/simple_robot.rviz"/>
+
+    <node pkg="simple_robot" type="simple_robot_controller" name="simple_robot_controller"/>
+
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+        <!-- <arg name="world_name" value="$(find simple_robot)/worlds/sixboxes.world"/> -->
+        <!-- <arg name="world_name" value="$(find simple_robot)/worlds/2d_006.world"/> -->
+        <!-- <arg name="world_name" value="$(find simple_robot)/worlds/2d_008.world"/> -->
+        <!-- <arg name="world_name" value="$(find simple_robot)/worlds/2d_010.world"/> -->
+        <arg name="world_name" value="$(find simple_robot)/worlds/2d_012.world"/>
+        <!-- <arg name="world_name" value="$(find simple_robot)/worlds/3d.world"/> -->
+        <arg name="gui" value="true"/>
+    </include>
+
+    <!-- <node name="spawn_urdf" pkg="gazebo_ros" type="spawn_model" clear_params="true"
+            args="-z 0.2 -param robot_description -urdf -model simple_robot" output="screen"/> -->
+    <!-- 2d exp -->
+    <node name="spawn_urdf" pkg="gazebo_ros" type="spawn_model" clear_params="true"
+        args="-z 0.5 -x 2.2 -y -2.2 -Y 3.14 -param robot_description -urdf -model simple_robot" output="screen"/>
+    <!-- 3d exp -->
+    <!-- <node name="spawn_urdf" pkg="gazebo_ros" type="spawn_model" clear_params="true"
+        args="-z 3.0 -param robot_description -urdf -model simple_robot" output="screen"/> -->
+
+    <node pkg="simple_robot" name="simple_robot" type="simple_robot_node" output="screen">
+    </node>
+
+</launch>

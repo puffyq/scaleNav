@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1040" viewBox="0 0 1800 1040">
+  <defs>
+    <marker id="a-gray" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L0 6L9 3Z" fill="#66737d"/></marker>
+    <marker id="a-green" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L0 6L9 3Z" fill="#168a50"/></marker>
+    <marker id="a-blue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L0 6L9 3Z" fill="#2767d4"/></marker>
+    <marker id="a-orange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L0 6L9 3Z" fill="#d97706"/></marker>
+    <style>
+      text { font-family: "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #19232c; letter-spacing: 0; }
+      .title { font-size: 34px; font-weight: 700; }
+      .subtitle { font-size: 17px; fill: #5b6872; }
+      .group-title { font-size: 22px; font-weight: 700; }
+      .node-title { font-size: 17px; font-weight: 700; }
+      .label { font-size: 14px; fill: #52616d; }
+      .tiny { font-size: 12px; fill: #65727c; }
+      .flow { fill: none; stroke: #66737d; stroke-width: 2.8; marker-end: url(#a-gray); }
+      .semantic { fill: none; stroke: #168a50; stroke-width: 3; marker-end: url(#a-green); }
+      .depth { fill: none; stroke: #2767d4; stroke-width: 3; marker-end: url(#a-blue); }
+      .guidance { fill: none; stroke: #d97706; stroke-width: 3.5; marker-end: url(#a-orange); }
+      .edge { fill: none; stroke: #6f7d87; stroke-width: 1.8; }
+      .gray { fill: #cfd5da; stroke: #74818a; stroke-width: 1.1; }
+      .green { fill: #31b96b; stroke: #137c45; stroke-width: 1.2; }
+      .hot { fill: #d83c48; stroke: #922630; stroke-width: 1.5; }
+      .avoid { fill: #a45bd4; stroke: #6d2998; stroke-width: 1.5; }
+    </style>
+    <symbol id="map-base" viewBox="0 0 360 270">
+      <rect width="360" height="270" rx="5" fill="#f5f8f6" stroke="#94a29a"/>
+      <g class="gray">
+        <circle cx="22" cy="26" r="5"/><circle cx="75" cy="26" r="5"/><circle cx="128" cy="26" r="5"/><circle cx="232" cy="26" r="5"/><circle cx="285" cy="26" r="5"/><circle cx="338" cy="26" r="5"/>
+        <circle cx="338" cy="62" r="5"/><circle cx="285" cy="62" r="5"/><circle cx="232" cy="62" r="5"/><circle cx="128" cy="62" r="5"/><circle cx="75" cy="62" r="5"/><circle cx="22" cy="62" r="5"/>
+        <circle cx="22" cy="98" r="5"/><circle cx="75" cy="98" r="5"/><circle cx="128" cy="98" r="5"/><circle cx="232" cy="98" r="5"/><circle cx="285" cy="98" r="5"/><circle cx="338" cy="98" r="5"/>
+        <circle cx="338" cy="134" r="5"/><circle cx="285" cy="134" r="5"/><circle cx="232" cy="134" r="5"/><circle cx="128" cy="134" r="5"/><circle cx="75" cy="134" r="5"/><circle cx="22" cy="134" r="5"/>
+        <circle cx="22" cy="170" r="5"/><circle cx="75" cy="170" r="5"/><circle cx="128" cy="170" r="5"/><circle cx="232" cy="170" r="5"/><circle cx="285" cy="170" r="5"/><circle cx="338" cy="170" r="5"/>
+        <circle cx="338" cy="206" r="5"/><circle cx="285" cy="206" r="5"/><circle cx="232" cy="206" r="5"/><circle cx="128" cy="206" r="5"/><circle cx="75" cy="206" r="5"/><circle cx="22" cy="206" r="5"/>
+        <circle cx="22" cy="242" r="5"/><circle cx="75" cy="242" r="5"/><circle cx="128" cy="242" r="5"/><circle cx="232" cy="242" r="5"/><circle cx="285" cy="242" r="5"/><circle cx="338" cy="242" r="5"/>
+      </g>
+      <rect x="133" y="70" width="96" height="122" rx="6" fill="#efd9da" stroke="#c47479" stroke-width="2" stroke-dasharray="6 4"/>
+      <rect x="151" y="88" width="60" height="86" rx="3" fill="#59656e" stroke="#354049"/>
+      <text x="181" y="135" text-anchor="middle" font-size="12" fill="#fff">障碍物</text>
+    </symbol>
+    <symbol id="target-building" viewBox="0 0 360 270">
+      <path d="M284 34L306 18L328 34Z" fill="#a91f2b" stroke="#7c1720"/><rect x="288" y="34" width="36" height="28" fill="#d84a47" stroke="#8d2528"/><rect x="302" y="44" width="9" height="18" fill="#74242a"/>
+      <text x="306" y="14" text-anchor="middle" font-size="12" font-weight="700" fill="#a8202c">red building</text>
+    </symbol>
+    <symbol id="visibility" viewBox="0 0 360 270">
+      <g class="edge">
+        <path d="M22 26H128M22 62H128M22 98H128M22 134H128M22 170H128M22 206H128M22 242H128"/>
+        <path d="M232 26H338M232 62H338M232 98H338M232 134H338M232 170H338M232 206H338M232 242H338"/>
+        <path d="M22 26V242M75 26V242M128 26V242M232 26V242M285 26V242M338 26V242"/>
+        <path d="M128 26H232M128 62H232M128 206H232M128 242H232"/>
+        <path d="M22 242L75 206M75 206L128 242M232 242L285 206M285 206L338 242M22 206L75 170M232 206L285 170M128 26L232 62M128 62L232 26M128 206L232 242M128 242L232 206"/>
+      </g>
+      <g class="avoid"><circle cx="124" cy="62" r="7"/><circle cx="238" cy="62" r="7"/><circle cx="124" cy="200" r="7"/><circle cx="238" cy="200" r="7"/></g>
+    </symbol>
+  </defs>
+
+  <rect width="1800" height="1040" fill="#f8fafc"/>
+  <text x="900" y="46" text-anchor="middle" class="title">指定区域开放词汇目标搜索架构</text>
+  <text x="900" y="76" text-anchor="middle" class="subtitle">均匀基础节点与膨胀边界避障节点共同构图；三类节点得分驱动实时 TSP 与 R_plan 局部规划</text>
+
+  <!-- Column 1: Inputs -->
+  <g>
+    <rect x="24" y="112" width="258" height="820" rx="8" fill="#fffdf5" stroke="#c58a3f" stroke-width="2" stroke-dasharray="8 6"/>
+    <text x="50" y="150" class="group-title" fill="#95591a">输入</text>
+    <rect x="48" y="184" width="210" height="76" rx="6" fill="#fff0b8" stroke="#b69747"/>
+    <text x="153" y="215" text-anchor="middle" class="node-title">文本目标</text><text x="153" y="241" text-anchor="middle" class="label">“red building”</text>
+    <rect x="48" y="292" width="210" height="76" rx="6" fill="#fff0b8" stroke="#b69747"/>
+    <text x="153" y="323" text-anchor="middle" class="node-title">RGB</text><text x="153" y="349" text-anchor="middle" class="label">开放词汇语义</text>
+    <rect x="48" y="430" width="210" height="92" rx="6" fill="#e5effc" stroke="#7394bd"/>
+    <text x="153" y="463" text-anchor="middle" class="node-title">Depth + 状态</text><text x="153" y="491" text-anchor="middle" class="label">深度 / 速度 / 加速度</text>
+    <rect x="48" y="640" width="210" height="130" rx="6" fill="#fff6d6" stroke="#b69747"/>
+    <text x="153" y="675" text-anchor="middle" class="node-title">指定探索区域</text><text x="153" y="703" text-anchor="middle" class="label">可选先验地图</text>
+    <text x="153" y="732" text-anchor="middle" class="tiny">有地图：使用建筑轮廓</text><text x="153" y="753" text-anchor="middle" class="tiny">无地图：在线更新障碍</text>
+  </g>
+
+  <!-- Column 2: semantic over global map -->
+  <g>
+    <rect x="318" y="112" width="728" height="354" rx="8" fill="#f3fbf5" stroke="#3b9962" stroke-width="2" stroke-dasharray="8 6"/>
+    <text x="344" y="150" class="group-title" fill="#167744">开放词汇语义</text>
+    <rect x="348" y="184" width="210" height="86" rx="7" fill="#dff4e6" stroke="#65a27a"/>
+    <text x="453" y="218" text-anchor="middle" class="node-title">冻结视觉语言模型</text><text x="453" y="246" text-anchor="middle" class="label">RGB × 文本目标</text>
+    <path d="M558 227H608" class="semantic"/>
+    <rect x="608" y="174" width="406" height="250" rx="7" fill="#fff" stroke="#65a27a"/>
+    <text x="811" y="205" text-anchor="middle" class="node-title">signed semantic heatmap</text>
+    <g transform="translate(636,227)">
+      <rect width="350" height="156" rx="5" fill="#b9d9ee" stroke="#8799a5"/>
+      <rect y="92" width="350" height="64" fill="#73975d"/>
+      <rect x="244" y="38" width="82" height="94" fill="#b83d3d" stroke="#762629" stroke-width="2"/><path d="M234 42L285 12L336 42Z" fill="#8e252a"/><rect x="259" y="63" width="18" height="22" fill="#dbe8ef"/><rect x="293" y="63" width="18" height="22" fill="#dbe8ef"/><rect x="278" y="96" width="18" height="36" fill="#68242a"/>
+      <rect x="143" y="68" width="16" height="72" fill="#5f4937"/><circle cx="151" cy="55" r="42" fill="#395b3d"/><circle cx="120" cy="67" r="29" fill="#456b45"/>
+      <g opacity="0.48"><rect x="0" y="0" width="50" height="39" fill="#457dc1"/><rect x="50" y="39" width="50" height="39" fill="#6ea0d3"/><rect x="100" y="39" width="50" height="39" fill="#3e70b5"/><rect x="100" y="78" width="50" height="39" fill="#3970b8"/><rect x="150" y="78" width="50" height="39" fill="#6d9fce"/><rect x="250" y="0" width="50" height="39" fill="#ef8b4a"/><rect x="300" y="0" width="50" height="39" fill="#dc3d45"/><rect x="250" y="39" width="50" height="39" fill="#e84c43"/><rect x="300" y="39" width="50" height="39" fill="#c92938"/><rect x="250" y="78" width="50" height="39" fill="#f0713e"/><rect x="300" y="78" width="50" height="39" fill="#d9363d"/></g>
+      <path d="M50 0V156M100 0V156M150 0V156M200 0V156M250 0V156M300 0V156M0 39H350M0 78H350M0 117H350" stroke="#fff" stroke-width="1" opacity="0.72"/>
+      <text x="10" y="148" font-size="11" fill="#fff">ViT patches　冷 −1</text><text x="335" y="148" text-anchor="end" font-size="11" fill="#fff">暖 +1</text>
+    </g>
+    <text x="811" y="443" text-anchor="middle" class="tiny">有效 Depth：热区回投到最近活动节点</text><text x="811" y="460" text-anchor="middle" class="tiny">无有效 Depth：不造世界得分，只把图送入快系统</text>
+
+    <rect x="318" y="496" width="728" height="436" rx="8" fill="#fff8f3" stroke="#cf774d" stroke-width="2" stroke-dasharray="8 6"/>
+    <text x="344" y="534" class="group-title" fill="#aa4f2e">持久全局图、活动子图与实时 TSP</text>
+    <text x="344" y="560" class="label">全局图保留访问历史；活动子图随平台移动并局部增删节点与边</text>
+    <g transform="translate(342,590)">
+      <use href="#map-base" width="200" height="150"/>
+      <text x="100" y="171" text-anchor="middle" class="node-title">持久全局基础节点</text><text x="100" y="192" text-anchor="middle" class="tiny">间距 ≥ R_plan；访问历史保留</text>
+    </g>
+    <path d="M544 665H562" class="flow"/>
+    <g transform="translate(570,590)">
+      <use href="#map-base" width="200" height="150"/><use href="#visibility" width="200" height="150"/>
+      <text x="100" y="171" text-anchor="middle" class="node-title">膨胀后可见图</text><text x="100" y="192" text-anchor="middle" class="tiny">膨胀边界生成避障节点与可见边</text>
+    </g>
+    <path d="M772 665H790" class="flow"/>
+    <g transform="translate(798,590)">
+      <use href="#map-base" width="200" height="150"/><use href="#visibility" width="200" height="150"/>
+      <g transform="scale(0.5556)"><path d="M22 242L75 206" fill="none" stroke="#d97706" stroke-width="5"/><path d="M75 206L128 242L232 242" fill="none" stroke="#d97706" stroke-width="3" stroke-dasharray="7 5"/><circle cx="22" cy="242" r="8" fill="#2767d4"/><circle cx="75" cy="206" r="10" fill="#d94a43" stroke="#922630"/><circle cx="75" cy="206" r="16" fill="none" stroke="#d97706" stroke-width="4"/><circle cx="128" cy="242" r="9" fill="#ef7b38" stroke="#a94a18"/><circle cx="232" cy="242" r="9" fill="#e5bd59" stroke="#9a7620"/></g>
+      <text x="100" y="171" text-anchor="middle" class="node-title">移动中的活动子图</text><text x="100" y="192" text-anchor="middle" class="tiny">局部增删；不清除全局访问状态</text>
+    </g>
+    <rect x="350" y="812" width="190" height="72" rx="6" fill="#fff" stroke="#d6a18a"/><text x="445" y="841" text-anchor="middle" class="node-title">安全硬筛选</text><text x="445" y="866" text-anchor="middle" class="tiny">先剔除不可行节点与边</text>
+    <path d="M540 848H574" class="flow"/>
+    <rect x="582" y="812" width="190" height="72" rx="6" fill="#fff" stroke="#d6a18a"/><text x="677" y="841" text-anchor="middle" class="node-title">实时 TSP 排序</text><text x="677" y="866" text-anchor="middle" class="tiny">弱语义最高分置前；再排其余</text>
+    <path d="M772 848H806" class="flow"/>
+    <rect x="814" y="812" width="192" height="72" rx="6" fill="#ffe0cf" stroke="#c87852"/><text x="910" y="841" text-anchor="middle" class="node-title">引力斥力图编码</text><text x="910" y="866" text-anchor="middle" class="tiny">固定尺度 −1…+1</text>
+  </g>
+
+  <!-- Column 3: local trajectory planning -->
+  <g>
+    <rect x="1082" y="112" width="694" height="820" rx="8" fill="#f4f8ff" stroke="#4778b7" stroke-width="2" stroke-dasharray="8 6"/>
+    <text x="1108" y="150" class="group-title" fill="#245fa9">三态引导局部轨迹规划</text>
+    <rect x="1114" y="184" width="630" height="76" rx="7" fill="#dfeafb" stroke="#7898c1"/>
+    <text x="1429" y="215" text-anchor="middle" class="node-title">局部规划输入：Depth + signed 引力斥力图 + state</text>
+    <text x="1429" y="241" text-anchor="middle" class="tiny">s&lt;τ_low：覆盖节点变暖　|　弱语义：最高语义节点变暖　|　s≥τ_confirm：视觉 signed map 接管</text>
+    <rect x="1114" y="292" width="630" height="502" rx="7" fill="#fff" stroke="#7898c1"/>
+    <text x="1429" y="324" text-anchor="middle" class="node-title">明确语义示例：RGB 已看到 red building</text>
+    <g transform="translate(1160,350)">
+      <use href="#map-base" width="538" height="404" opacity="0.82"/>
+      <use href="#visibility" width="538" height="404" opacity="0.22"/>
+      <use href="#target-building" width="538" height="404"/>
+      <circle cx="135" cy="292" r="105" fill="#e8f7ed" fill-opacity="0.18" stroke="#c45a08" stroke-width="2.5" stroke-dasharray="5 5"/>
+      <g stroke="#54c98a" stroke-width="2"><path d="M135 292L135 198M135 292L202 225M135 292L230 310M135 292L202 359M135 292L68 225M135 292L40 292"/></g>
+      <circle cx="230" cy="310" r="72" fill="#ef573f" fill-opacity="0.16"/><circle cx="230" cy="310" r="42" fill="#d83c48" fill-opacity="0.18"/>
+      <circle cx="270" cy="184" r="76" fill="#477fc0" fill-opacity="0.16"/><circle cx="270" cy="184" r="44" fill="#326db3" fill-opacity="0.18"/>
+      <circle cx="135" cy="198" r="8" fill="#477fc0" stroke="#275e9f"/><circle cx="202" cy="225" r="8" fill="#ef7b38" stroke="#a94a18"/><circle cx="230" cy="310" r="10" fill="#d83c48" stroke="#922630" stroke-width="2"/><circle cx="202" cy="359" r="8" class="gray"/><circle cx="68" cy="225" r="8" fill="#477fc0" stroke="#275e9f"/><circle cx="40" cy="292" r="8" class="gray"/>
+      <circle cx="135" cy="292" r="13" fill="#07966a" stroke="#075b49" stroke-width="3"/>
+      <path d="M135 292C158 337 205 337 230 310" fill="none" stroke="#1ca55c" stroke-width="6" marker-end="url(#a-green)"/>
+      <text x="230" y="384" class="tiny" fill="#b44f08">R_plan：局部轨迹长度上限</text>
+      <text x="269" y="402" text-anchor="middle" class="tiny">暖区吸引、冷区排斥；Depth 生成无碰撞短轨迹</text>
+    </g>
+    <rect x="1114" y="824" width="630" height="72" rx="7" fill="#cfe0f7" stroke="#7898c1"/>
+    <text x="1295" y="854" text-anchor="middle" class="node-title">R_plan 内安全短轨迹</text><text x="1295" y="879" text-anchor="middle" class="tiny">执行后立即重新规划</text>
+    <g transform="translate(1508,836)" stroke="#245fa9" stroke-width="2" fill="none"><circle cx="24" cy="22" r="5" fill="#dfeafb"/><path d="M24 22L8 7M24 22L40 7M24 22L8 37M24 22L40 37"/><circle cx="7" cy="6" r="5"/><circle cx="41" cy="6" r="5"/><circle cx="7" cy="38" r="5"/><circle cx="41" cy="38" r="5"/></g>
+    <g transform="translate(1604,832)" stroke="#245fa9" stroke-width="2" fill="none"><ellipse cx="28" cy="38" rx="25" ry="9" fill="#edf4ff"/><circle cx="10" cy="45" r="4" fill="#fff"/><circle cx="46" cy="45" r="4" fill="#fff"/><path d="M28 31V8M28 12L42 18L51 9"/><circle cx="28" cy="8" r="3"/><circle cx="42" cy="18" r="3"/><circle cx="51" cy="9" r="3"/></g>
+  </g>
+
+  <!-- Non-crossing flows -->
+  <path d="M258 222H348" class="semantic"/><path d="M258 330H300V246H348" class="semantic"/>
+  <path d="M258 705H302V780H318" class="flow"/>
+  <path d="M1006 848H1062V690H1082" class="semantic"/>
+  <path d="M1014 299H1060V98H1429V184" class="semantic"/>
+  <path d="M811 424V478H904V496" class="semantic"/>
+  <path d="M258 476H292V970H1070V234H1114" class="depth"/>
+  <path d="M1744 860H1788V958H760V932" class="semantic"/>
+  <text x="1280" y="953" text-anchor="middle" class="tiny" fill="#168a50">位姿、访问状态、节点和边持续反馈更新</text>
+
+  <g transform="translate(40,1004)">
+    <circle cx="0" cy="0" r="6" class="gray"/><circle cx="20" cy="0" r="6" class="gray"/><circle cx="40" cy="0" r="6" class="gray"/><text x="56" y="5" class="tiny">均匀基础节点</text><circle cx="184" cy="0" r="7" class="avoid"/><text x="202" y="5" class="tiny">膨胀边界避障节点</text>
+    <path d="M358 0H406" class="edge"/><text x="418" y="5" class="tiny">无碰撞可见边</text><circle cx="544" cy="0" r="7" class="green"/><text x="560" y="5" class="tiny">已访问</text><circle cx="644" cy="0" r="9" class="hot"/><text x="664" y="5" class="tiny">节点得分</text>
+    <path d="M772 0H830" fill="none" stroke="#d97706" stroke-width="3"/><text x="844" y="5" class="tiny">TSP 全局路径</text><circle cx="990" cy="0" r="10" fill="#d83c48" fill-opacity="0.75"/><circle cx="1018" cy="0" r="10" fill="#477fc0" fill-opacity="0.75"/><text x="1040" y="5" class="tiny">signed 引力 / 斥力</text><path d="M1190 8C1214 -12 1240 16 1270 0" fill="none" stroke="#1ca55c" stroke-width="5"/><text x="1286" y="5" class="tiny">R_plan 局部短轨迹</text>
+  </g>
+</svg>

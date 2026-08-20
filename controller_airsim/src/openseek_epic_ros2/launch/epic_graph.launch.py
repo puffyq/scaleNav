@@ -1,0 +1,103 @@
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+    return LaunchDescription([
+        DeclareLaunchArgument("cloud_topic", default_value="/frgraph/points"),
+        DeclareLaunchArgument("depth_image_topic", default_value="/camera/depth/image"),
+        DeclareLaunchArgument("semantic_heatmap_topic", default_value="/openseek/text_heatmap_raw"),
+        DeclareLaunchArgument("odom_topic", default_value="/sim/odom"),
+        DeclareLaunchArgument("goal_topic", default_value="/goal"),
+        DeclareLaunchArgument("next_goal_topic", default_value="/epic/yopo_goal"),
+        DeclareLaunchArgument("next_goal_frame", default_value="world_enu"),
+        DeclareLaunchArgument("visualization_frame", default_value="odom"),
+        DeclareLaunchArgument("graph_fixed_layer", default_value="true"),
+        DeclareLaunchArgument("graph_layer_z", default_value="1.6"),
+        DeclareLaunchArgument("map_voxel_size", default_value="0.25"),
+        DeclareLaunchArgument("map_history_radius_m", default_value="20.0"),
+        DeclareLaunchArgument("map_max_points", default_value="20000"),
+        DeclareLaunchArgument("map_prune_distance_m", default_value="0.5"),
+        DeclareLaunchArgument("update_period_ms", default_value="100"),
+        DeclareLaunchArgument("skeleton_rebuild_period_ms", default_value="500.0"),
+        DeclareLaunchArgument("local_goal_min_advance_m", default_value="0.75"),
+        DeclareLaunchArgument("local_goal_lookahead_m", default_value="5.0"),
+        DeclareLaunchArgument("goal_path_cost_weight", default_value="0.2"),
+        DeclareLaunchArgument("previous_path_cost_factor", default_value="0.0"),
+        DeclareLaunchArgument("route_remap_distance_m", default_value="1.25"),
+        DeclareLaunchArgument("route_reuse_horizon_m", default_value="6.0"),
+        DeclareLaunchArgument("route_reuse_lateral_distance_m", default_value="1.5"),
+        DeclareLaunchArgument("route_terminal_release_distance_m", default_value="1.0"),
+        DeclareLaunchArgument("goal_connect_distance_m", default_value="6.0"),
+        DeclareLaunchArgument("goal_connect_timeout_ms", default_value="20.0"),
+        DeclareLaunchArgument("odom_reconnect_distance_m", default_value="1.0"),
+        DeclareLaunchArgument("odom_reconnect_yaw_deg", default_value="20.0"),
+        DeclareLaunchArgument("odom_fallback_radius_m", default_value="15.0"),
+        DeclareLaunchArgument("odom_fallback_candidates", default_value="24"),
+        DeclareLaunchArgument("semantic_pose_tolerance_ms", default_value="100.0"),
+        DeclareLaunchArgument("semantic_max_age_ms", default_value="500.0"),
+        DeclareLaunchArgument("semantic_association_radius_m", default_value="3.0"),
+        DeclareLaunchArgument("semantic_voxel_size_m", default_value="0.5"),
+        DeclareLaunchArgument("semantic_camera_translation_flu.x", default_value="0.5"),
+        DeclareLaunchArgument("semantic_camera_translation_flu.y", default_value="0.0"),
+        DeclareLaunchArgument("semantic_camera_translation_flu.z", default_value="-0.1"),
+        DeclareLaunchArgument("semantic_horizontal_fov_deg", default_value="90.0"),
+        DeclareLaunchArgument("semantic_vertical_fov_deg", default_value="60.0"),
+        Node(
+            package="openseek_epic_ros2",
+            executable="epic_graph_node",
+            name="epic_graph",
+            output="screen",
+            parameters=[{
+                "cloud_topic": LaunchConfiguration("cloud_topic"),
+                "depth_image_topic": LaunchConfiguration("depth_image_topic"),
+                "semantic_heatmap_topic": LaunchConfiguration("semantic_heatmap_topic"),
+                "odom_topic": LaunchConfiguration("odom_topic"),
+                "goal_topic": LaunchConfiguration("goal_topic"),
+                "next_goal_topic": LaunchConfiguration("next_goal_topic"),
+                "next_goal_frame": LaunchConfiguration("next_goal_frame"),
+                "visualization_frame": LaunchConfiguration("visualization_frame"),
+                "graph_fixed_layer": LaunchConfiguration("graph_fixed_layer"),
+                "graph_layer_z": LaunchConfiguration("graph_layer_z"),
+                "map_voxel_size": LaunchConfiguration("map_voxel_size"),
+                "map_history_radius_m": LaunchConfiguration("map_history_radius_m"),
+                "map_max_points": LaunchConfiguration("map_max_points"),
+                "map_prune_distance_m": LaunchConfiguration("map_prune_distance_m"),
+                "update_period_ms": LaunchConfiguration("update_period_ms"),
+                "skeleton_rebuild_period_ms": LaunchConfiguration("skeleton_rebuild_period_ms"),
+                "local_goal_min_advance_m": LaunchConfiguration("local_goal_min_advance_m"),
+                "local_goal_lookahead_m": LaunchConfiguration("local_goal_lookahead_m"),
+                "goal_path_cost_weight": LaunchConfiguration("goal_path_cost_weight"),
+                "previous_path_cost_factor": LaunchConfiguration("previous_path_cost_factor"),
+                "route_remap_distance_m": LaunchConfiguration("route_remap_distance_m"),
+                "route_reuse_horizon_m": LaunchConfiguration("route_reuse_horizon_m"),
+                "route_reuse_lateral_distance_m": LaunchConfiguration(
+                    "route_reuse_lateral_distance_m"),
+                "route_terminal_release_distance_m": LaunchConfiguration(
+                    "route_terminal_release_distance_m"),
+                "goal_connect_distance_m": LaunchConfiguration("goal_connect_distance_m"),
+                "goal_connect_timeout_ms": LaunchConfiguration("goal_connect_timeout_ms"),
+                "odom_reconnect_distance_m": LaunchConfiguration("odom_reconnect_distance_m"),
+                "odom_reconnect_yaw_deg": LaunchConfiguration("odom_reconnect_yaw_deg"),
+                "odom_fallback_radius_m": LaunchConfiguration("odom_fallback_radius_m"),
+                "odom_fallback_candidates": LaunchConfiguration("odom_fallback_candidates"),
+                "semantic_pose_tolerance_ms": LaunchConfiguration("semantic_pose_tolerance_ms"),
+                "semantic_max_age_ms": LaunchConfiguration("semantic_max_age_ms"),
+                "semantic_association_radius_m": LaunchConfiguration(
+                    "semantic_association_radius_m"),
+                "semantic_voxel_size_m": LaunchConfiguration("semantic_voxel_size_m"),
+                "semantic_camera_translation_flu.x": LaunchConfiguration(
+                    "semantic_camera_translation_flu.x"),
+                "semantic_camera_translation_flu.y": LaunchConfiguration(
+                    "semantic_camera_translation_flu.y"),
+                "semantic_camera_translation_flu.z": LaunchConfiguration(
+                    "semantic_camera_translation_flu.z"),
+                "semantic_horizontal_fov_deg": LaunchConfiguration(
+                    "semantic_horizontal_fov_deg"),
+                "semantic_vertical_fov_deg": LaunchConfiguration(
+                    "semantic_vertical_fov_deg"),
+            }],
+        ),
+    ])

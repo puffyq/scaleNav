@@ -1,0 +1,55 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+devel/
+install/
+log/
+controller/build_ros2/
+controller/install_ros2/
+controller/log_ros2/
+runs/
+*.egg-info/
+*.html
+!tools/*.html
+*.engine
+*.onnx
+*.trt
+.DS_Store
+
+# Local datasets, captured frames, point clouds and generated experiment data.
+data/TrainingData/
+data/TestingData/
+data/Map2GraphData/
+.dataset_*/
+.correct_static.ply
+*.ply
+*.exr
+*.bag
+
+# Local model checkpoints and training outputs.
+models/
+saved/
+.script_train_*/
+*.pt
+*.pth
+*.ckpt
+
+# Runtime event captures and local tool output.
+log_event/
+*.jsonl
+*.crdownload
+
+# Large third-party demo media and generated artifacts.
+*.gif
+*.dae
+*.pcd
+*.mesh
+*.mat
+third_party/**/.git/
+third_party/**/.git.openseek-nested/
+third_party/**/build/
+third_party/**/bin/

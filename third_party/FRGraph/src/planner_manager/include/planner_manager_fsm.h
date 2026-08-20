@@ -1,0 +1,116 @@
+#ifndef PLANNER_MANAGER_FSM
+#define PLANNER_MANAGER_FSM
+
+#include <ros/ros.h>
+#include <nav_msgs/Odometry.h>
+#include <nav_msgs/Path.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Twist.h>
+#include <visualization_msgs/Marker.h>
+
+#include <unordered_set>
+#include <cmath>
+
+#include <Eigen/Dense>
+
+#include "planner_manager.h"
+
+static ros::Publisher cmd_vel;
+
+class PlannerManagerFSM {
+    private:
+    enum FSM_EXEC_STATE {
+        INIT,
+        WAIT_GOAL,
+        PLAN_TRAJECTORY,
+        EXEC_TRAJECTORY
+    };
+    FSM_EXEC_STATE current_state_;
+
+    PlannerManager::Ptr planner_manager_;
+
+    int env_type_;
+
+    bool have_odom_, have_goal_;
+    bool graph_inited_ = false;
+    double size_of_cropped_pointcloud_;
+
+    Eigen::Vector3d odom_pos_, odom_vel_, odom_omega_;
+    Eigen::Quaterniond odom_ori_;
+    double odom_roll_, odom_pitch_, odom_yaw_;
+    Eigen::Vector3d goal_pos_;
+    Eigen::Quaterniond goal_ori_;
+    double goal_roll_, goal_pitch_, goal_yaw_;
+    double goal_z_pos_;
+
+    Eigen::Vector3d start_pos_;
+
+    /* ROS utils */
+    ros::NodeHandle node_;
+
+    /* ROS publishers */
+    ros::Publisher cmd_vel_pub_;
+    ros::Publisher goal_marker_pub_;
+
+    ros::Publisher global_graph_pub_;        // edges (LINE_LIST)
+    ros::Publisher global_graph_nodes_pub_;  // nodes (SPHERE_LIST)
+
+    ros::Publisher trajectory_pub_;
+    nav_msgs::Path trajectory_msg_;
+    double traj_min_dist_ = 0.05; // minimum distance to append new point in trajectory visualization
+
+    /* ROS subscribers */
+    ros::Subscriber odom_sub_;
+    ros::Subscriber goal_sub_;
+
+    ros::Timer FSM_timer_;
+    ros::Timer cmd_timer_;
+    ros::Timer replan_check_timer_;
+    ros::Timer visualization_timer_;
+
+    /* callback functions */
+    void odomCallback(const nav_msgs::OdometryConstPtr &msg);
+    void goalCallback(const geometry_msgs::PoseStampedPtr &msg);
+    void FSMCallback(const ros::TimerEvent &e);
+    void publishCmdCallback(const ros::TimerEvent &e);
+    void replanCheckCallback(const ros::TimerEvent &e);
+    void visualizationCallback(const ros::TimerEvent &e);
+
+    /* FSM function */
+    void changeFSMState(FSM_EXEC_STATE new_state, std::string pos_call);
+    void printFSMCurrentState();
+
+    /* Helper functions */
+    void quaternionToRPY(const Eigen::Quaterniond &q, double &roll, double &pitch, double &yaw);
+    void stopRobot();
+    double clampd(double x, double lo, double hi);
+    double wrapToPi(double a);
+    double projectToBezierSE2(const BezierSE2& traj, const Eigen::Vector2d& p, int M = 80);
+    double projectToBezierSE3(const BezierSE3& traj, const Eigen::Vector3d& p, int M = 80);
+    Eigen::Vector3d so3Log(const Eigen::Matrix3d& R);
+    double so3Angle(const Eigen::Matrix3d& R);
+    double so2Angle(const Eigen::Matrix2d& R);
+
+    /* */
+    double computePathLength2D();
+    double computePathLength3D();
+    double computeDecompAverageTime();
+    double computeTrajOptAverageTime();
+    double computePoseSelectionAverageTime();
+
+    /* Visualization */
+    void publishGoalMarker();
+    void publishGlobalGraph();
+    void publishPath();
+
+    public:
+    PlannerManagerFSM(/* args */) {}
+    ~PlannerManagerFSM() {}
+
+
+    void init(ros::NodeHandle &nh);
+
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+
+#endif  // PLANNER_MANAGER_FSM
