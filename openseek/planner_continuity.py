@@ -26,6 +26,17 @@ def is_final_subgoal(
     return bool(np.linalg.norm(local_goal - mission_goal) <= tolerance)
 
 
+def mission_goal_for_local_goal(
+    local_goal: np.ndarray,
+    mission_goal: np.ndarray | None,
+    has_separate_mission_goal: bool,
+) -> np.ndarray | None:
+    """Treat a direct local goal as final when no global planner owns it."""
+    if has_separate_mission_goal:
+        return mission_goal
+    return np.asarray(local_goal).copy()
+
+
 def mission_arrived(
     position: np.ndarray,
     velocity: np.ndarray,

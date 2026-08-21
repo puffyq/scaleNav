@@ -48,6 +48,20 @@ TEST(RouteMemory, HoldsTheRollingTerminalUntilItIsActuallyReached)
   EXPECT_FALSE(openseek_epic::shouldReuseTerminal(point(1.2F), point(2.0F), 1.0F));
 }
 
+TEST(RouteLookahead, KeepsTheConfiguredMinimumAtLowSpeed)
+{
+  EXPECT_FLOAT_EQ(
+    openseek_epic::velocityCompensatedLookahead(10.0F, 1.0F, 2.0F, 5.0F), 10.0F);
+}
+
+TEST(RouteLookahead, PreservesReserveUntilTheNextPlanningCycle)
+{
+  EXPECT_FLOAT_EQ(
+    openseek_epic::velocityCompensatedLookahead(10.0F, 4.0F, 2.0F, 5.0F), 13.0F);
+  EXPECT_FLOAT_EQ(
+    openseek_epic::velocityCompensatedLookahead(10.0F, 5.0F, 2.0F, 5.0F), 15.0F);
+}
+
 TEST(RouteMemory, ReleasesAStaleTerminalAfterLeavingTheDirectedRoute)
 {
   const std::vector<Eigen::Vector3f> route = {point(0.0F), point(0.0F, 2.0F)};
@@ -57,6 +71,111 @@ TEST(RouteMemory, ReleasesAStaleTerminalAfterLeavingTheDirectedRoute)
     point(2.0F, 1.0F), route, 0.5F, 1.0F));
   EXPECT_FALSE(openseek_epic::canReuseForwardRoute(
     point(0.0F, 2.0F), route, 0.5F, 1.0F));
+}
+
+TEST(RouteMemory, ExtendsBeforeTheLookaheadReachesTheRememberedTerminal)
+{
+  const std::vector<Eigen::Vector3f> route = {point(0.0F), point(20.0F)};
+  const float lookahead =
+    openseek_epic::velocityCompensatedLookahead(10.0F, 4.0F, 2.0F, 5.0F);
+
+  EXPECT_TRUE(openseek_epic::canReuseForwardRoute(
+    point(0.0F), route, lookahead, 1.0F));
+  EXPECT_FALSE(openseek_epic::canReuseForwardRoute(
+    point(8.0F), route, lookahead, 1.0F));
+  EXPECT_TRUE(openseek_epic::canReuseForwardRoute(
+    point(8.0F), route, 0.0F, 1.0F));
+}
+
+TEST(RaycastShortcut, CollapsesAnOpenPolylineToItsEndpoints)
+{
+  const std::vector<Eigen::Vector3f> path = {
+    point(0.0F), point(1.0F, 1.0F), point(2.0F, -1.0F), point(4.0F)};
+  auto open_space = [](const Eigen::Vector3f &) { return 100.0F; };
+  openseek_epic::RaycastShortcutStats stats;
+
+  const auto shortened = openseek_epic::farthestVisibleShortcut(
+    path, 0.25F, 0.65F, open_space, &stats);
+
+  ASSERT_EQ(shortened.size(), 2U);
+  EXPECT_TRUE(shortened.front().isApprox(path.front()));
+  EXPECT_TRUE(shortened.back().isApprox(path.back()));
+  EXPECT_GT(stats.clearance_queries, 2U);
+  EXPECT_EQ(stats.accepted_segments, 1U);
+}
+
+TEST(RaycastShortcut, RetainsAWaypointWhenTheDirectSegmentIsBlocked)
+{
+  const std::vector<Eigen::Vector3f> path = {
+    point(0.0F), point(1.0F, 1.0F), point(3.0F, 1.0F), point(4.0F)};
+  const Eigen::Vector3f obstacle = point(2.0F);
+  auto clearance = [&obstacle](const Eigen::Vector3f &query) {
+    return (query - obstacle).norm();
+  };
+
+  const auto shortened = openseek_epic::farthestVisibleShortcut(
+    path, 0.10F, 0.55F, clearance);
+
+  ASSERT_GT(shortened.size(), 2U);
+  EXPECT_TRUE(shortened.front().isApprox(path.front()));
+  EXPECT_TRUE(shortened.back().isApprox(path.back()));
+  for (std::size_t i = 1; i < shortened.size(); ++i) {
+    EXPECT_TRUE(openseek_epic::segmentHasClearance(
+      shortened[i - 1], shortened[i], 0.10F, 0.55F, clearance));
+  }
+}
+
+TEST(RaycastShortcut, RejectsClearanceBelowTheSafetyThreshold)
+{
+  auto insufficient = [](const Eigen::Vector3f &) { return 0.649F; };
+  auto exact = [](const Eigen::Vector3f &) { return 0.65F; };
+
+  EXPECT_FALSE(openseek_epic::segmentHasClearance(
+    point(0.0F), point(1.0F), 0.25F, 0.65F, insufficient));
+  EXPECT_TRUE(openseek_epic::segmentHasClearance(
+    point(0.0F), point(1.0F), 0.25F, 0.65F, exact));
+}
+
+TEST(RaycastShortcut, LeavesATwoPointPathUnchanged)
+{
+  const std::vector<Eigen::Vector3f> path = {point(0.0F), point(2.0F)};
+  auto blocked = [](const Eigen::Vector3f &) { return 0.0F; };
+
+  const auto shortened = openseek_epic::farthestVisibleShortcut(
+    path, 0.25F, 0.65F, blocked);
+
+  ASSERT_EQ(shortened.size(), 2U);
+  EXPECT_TRUE(shortened.front().isApprox(path.front()));
+  EXPECT_TRUE(shortened.back().isApprox(path.back()));
+}
+
+TEST(RaycastShortcut, RemovesRepeatedPointsWithoutStalling)
+{
+  const std::vector<Eigen::Vector3f> path = {
+    point(0.0F), point(0.0F), point(1.0F), point(1.0F), point(2.0F)};
+  auto open_space = [](const Eigen::Vector3f &) { return 100.0F; };
+
+  const auto shortened = openseek_epic::farthestVisibleShortcut(
+    path, 0.25F, 0.65F, open_space);
+
+  ASSERT_EQ(shortened.size(), 2U);
+  EXPECT_TRUE(shortened.front().isApprox(point(0.0F)));
+  EXPECT_TRUE(shortened.back().isApprox(point(2.0F)));
+}
+
+TEST(RaycastShortcut, SamplesBothEndpointsAndTheInterior)
+{
+  auto endpoint_obstacle = [](const Eigen::Vector3f &query) {
+    return query.x() > 0.99F ? 0.1F : 100.0F;
+  };
+  auto narrow_obstacle = [](const Eigen::Vector3f &query) {
+    return std::abs(query.x() - 0.5F) < 1e-4F ? 0.1F : 100.0F;
+  };
+
+  EXPECT_FALSE(openseek_epic::segmentHasClearance(
+    point(0.0F), point(1.0F), 0.25F, 0.65F, endpoint_obstacle));
+  EXPECT_FALSE(openseek_epic::segmentHasClearance(
+    point(0.0F), point(1.0F), 0.25F, 0.65F, narrow_obstacle));
 }
 
 }  // namespace

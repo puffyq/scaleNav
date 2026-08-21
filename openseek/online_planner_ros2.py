@@ -34,6 +34,7 @@ from policy.poly_solver import Poly5Solver, calculate_yaw
 from planner_continuity import (
     accept_local_goal,
     is_final_subgoal,
+    mission_goal_for_local_goal,
     mission_arrived,
     project_goal_to_fixed_altitude,
 )
@@ -466,6 +467,17 @@ class OnlinePlanner(Node):
             if not changed:
                 return
             self.goal_world = accepted_goal
+            # Without a separate EPIC mission topic, /goal_pose is the final
+            # task goal rather than a rolling local waypoint.  Keeping this
+            # unset disables both near-goal braking and arrival hold, causing
+            # YOPO to keep selecting forward primitives around an already-reached goal.
+            self.mission_goal_world = mission_goal_for_local_goal(
+                accepted_goal,
+                self.mission_goal_world,
+                has_separate_mission_goal=bool(self.args.mission_goal_topic),
+            )
+            if not self.args.mission_goal_topic:
+                self.mission_complete = False
             # EPIC advances the local waypoint continuously. Keep executing
             # the current verified trajectory until the next inference swaps
             # in its replacement; invalidating here creates a 5 Hz stop/start.
@@ -783,6 +795,7 @@ class OnlinePlanner(Node):
         scores = score[0].reshape(-1)
         selected = int(torch.argmin(scores).item())
         states = endstate[0].permute(1, 2, 0).reshape(-1, 9)
+        scores_np = scores.detach().cpu().numpy()
         selected_state = states[selected].detach().cpu().numpy()
         self.frame_index += 1
         raw_depth_png = None
@@ -817,7 +830,7 @@ class OnlinePlanner(Node):
                 "selected": selected,
                 "score_shape": list(score.shape),
                 "endstate_shape": list(endstate.shape),
-                "selected_score": float(scores[selected]),
+                "selected_score": float(scores_np[selected]),
                 "selected_state_body": self.vec(selected_state),
                 "candidate_scores": self.vec(scores.detach().cpu().numpy()),
                 "candidate_states_body": [
@@ -830,7 +843,7 @@ class OnlinePlanner(Node):
             rotation,
             selected_state,
             selected,
-            scores.detach().cpu().numpy(),
+            scores_np,
             reference_position,
             reference_velocity,
             reference_acceleration,

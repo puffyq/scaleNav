@@ -43,6 +43,36 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_route_memory test/test_route_memory.cpp)
   target_include_directories(test_route_memory PRIVATE include ${EIGEN3_INCLUDE_DIRS})
+
+  ament_add_gtest(test_lidar_map test/test_lidar_map.cpp)
+  target_include_directories(test_lidar_map PRIVATE
+    include
+    ${OPENSEEK_COMPAT_INCLUDE}
+    ${EIGEN3_INCLUDE_DIRS}
+    ${PCL_INCLUDE_DIRS}
+  )
+  target_compile_definitions(test_lidar_map PRIVATE PCL_NO_PRECOMPILE)
+  ament_target_dependencies(test_lidar_map rclcpp)
+  target_link_libraries(test_lidar_map ${PCL_LIBRARIES})
+
+  ament_add_gtest(test_topo_semantic
+    test/test_topo_semantic.cpp
+    ${EPIC_ROOT}/pointcloud_topo/src/topo_skeleton_graph.cpp
+    ${EPIC_ROOT}/pointcloud_topo/src/historical_odom_graph.cpp
+    ${EPIC_ROOT}/pointcloud_topo/src/bubble_split.cpp
+    ${EPIC_ROOT}/pointcloud_topo/src/parallel_bubble_astar.cpp
+  )
+  target_include_directories(test_topo_semantic PRIVATE
+    include
+    ${OPENSEEK_COMPAT_INCLUDE}
+    ${EPIC_ROOT}/pointcloud_topo/include
+    ${EIGEN3_INCLUDE_DIRS}
+    ${PCL_INCLUDE_DIRS}
+  )
+  target_compile_definitions(test_topo_semantic PRIVATE PCL_NO_PRECOMPILE)
+  ament_target_dependencies(test_topo_semantic
+    geometry_msgs nav_msgs pcl_conversions rclcpp sensor_msgs visualization_msgs)
+  target_link_libraries(test_topo_semantic ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
 endif()
 
 install(TARGETS epic_graph_node DESTINATION lib/${PROJECT_NAME})

@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -89,7 +90,18 @@ class LIOInterface {
     ld_->lidar_pose_ = pose;
     ld_->lidar_q_ = orientation;
     ld_->lidar_cloud_ = points_world;
+    last_hit_voxels_ = 0;
+    last_free_voxels_ = 0;
+    last_carved_voxels_ = 0;
     bool changed = false;
+    // A depth return certifies the ray from the sensor to the measured surface
+    // as free.  Without carving this free prefix, an old occupied voxel can
+    // remain in the rolling map after the vehicle has moved, eventually
+    // placing a ghost obstacle on top of the odometry query point.
+    std::unordered_map<VoxelKey, Eigen::Vector3f, VoxelKeyHash> hit_voxels;
+    std::unordered_set<VoxelKey, VoxelKeyHash> free_voxels;
+    hit_voxels.reserve(points_world.points.size());
+    free_voxels.reserve(points_world.points.size() * 4U);
     for (const auto &point : points_world.points) {
       if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
           !std::isfinite(point.z)) {
@@ -99,11 +111,62 @@ class LIOInterface {
         static_cast<int>(std::floor(point.x / voxel_size_)),
         static_cast<int>(std::floor(point.y / voxel_size_)),
         static_cast<int>(std::floor(point.z / voxel_size_))};
+      hit_voxels.try_emplace(key, point.x, point.y, point.z);
       if (occupied_voxels_.insert(key).second) {
         cloud_->push_back(point);
         changed = true;
       }
     }
+
+    // Neighboring pixels commonly terminate in the same map voxel. Cast one
+    // ray per endpoint voxel so this update scales with map resolution rather
+    // than raw image resolution.
+    for (const auto &[key, endpoint] : hit_voxels) {
+      (void)key;
+      const Eigen::Vector3f ray = endpoint - pose;
+      const float length = ray.norm();
+      if (length <= voxel_size_ * 0.5F) continue;
+      const int steps = std::max(1, static_cast<int>(std::ceil(
+        length / std::max(0.05F, voxel_size_ * 0.5F))));
+      const Eigen::Vector3f direction = ray / length;
+      // Exclude the hit voxel itself.  It is an occupied surface, not free
+      // space, and is protected by hit_voxels below in case another ray
+      // traverses the same voxel.
+      for (int step = 1; step < steps; ++step) {
+        const Eigen::Vector3f sample = pose + direction *
+          (length * static_cast<float>(step) / static_cast<float>(steps));
+        free_voxels.insert(VoxelKey{
+          static_cast<int>(std::floor(sample.x() / voxel_size_)),
+          static_cast<int>(std::floor(sample.y() / voxel_size_)),
+          static_cast<int>(std::floor(sample.z() / voxel_size_))});
+      }
+    }
+
+    // Remove only voxels that are explicitly observed free and are not a
+    // measured endpoint in this frame.  Rebuild the compact cloud so its
+    // contents and occupied_voxels_ remain exactly consistent.
+    for (const auto &key : free_voxels) {
+      if (hit_voxels.find(key) != hit_voxels.end()) continue;
+      last_carved_voxels_ += occupied_voxels_.erase(key);
+    }
+    if (!free_voxels.empty()) {
+      pcl::PointCloud<PointType>::Ptr carved(new pcl::PointCloud<PointType>);
+      carved->reserve(cloud_->size());
+      for (const auto &point : cloud_->points) {
+        const VoxelKey key{
+          static_cast<int>(std::floor(point.x / voxel_size_)),
+          static_cast<int>(std::floor(point.y / voxel_size_)),
+          static_cast<int>(std::floor(point.z / voxel_size_))};
+        if (occupied_voxels_.find(key) != occupied_voxels_.end()) {
+          carved->push_back(point);
+        } else {
+          changed = true;
+        }
+      }
+      cloud_ = std::move(carved);
+    }
+    last_hit_voxels_ = hit_voxels.size();
+    last_free_voxels_ = free_voxels.size();
     const bool moved_for_prune = !have_prune_pose_ ||
       (pose - last_prune_pose_).norm() >= prune_distance_;
     if (moved_for_prune || cloud_->size() > max_points_) {
@@ -160,6 +223,15 @@ class LIOInterface {
   std::size_t pointCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return cloud_->size();
+  }
+
+  void lastRayCarvingStats(std::size_t &hit_voxels,
+                           std::size_t &free_voxels,
+                           std::size_t &carved_voxels) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    hit_voxels = last_hit_voxels_;
+    free_voxels = last_free_voxels_;
+    carved_voxels = last_carved_voxels_;
   }
 
   double getDisToOcc(const PointType &point) const {
@@ -268,6 +340,9 @@ class LIOInterface {
   std::size_t max_points_ = 20000;
   Eigen::Vector3f last_prune_pose_ = Eigen::Vector3f::Zero();
   bool have_prune_pose_ = false;
+  std::size_t last_hit_voxels_ = 0;
+  std::size_t last_free_voxels_ = 0;
+  std::size_t last_carved_voxels_ = 0;
   mutable std::mutex mutex_;
   pcl::PointCloud<PointType>::Ptr cloud_;
   std::unordered_set<VoxelKey, VoxelKeyHash> occupied_voxels_;

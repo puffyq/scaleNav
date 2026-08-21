@@ -46,6 +46,7 @@ void TopoGraph::init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, Parallel
   nh.getParam("parallel_astar/insert_node_timeout", insert_node_timeout);
 
   nh.getParam("max_update_region_num", max_update_region_num_);
+  nh.param("bubble_topo/semantic_node_match_distance", semantic_node_match_distance_, 1.5);
   update_idx_vec_.reserve(100);
   global_path_.reserve(200);
   x_len = std::ceil((max_bd - min_bd).x() / init_region_size_x_);
@@ -81,6 +82,101 @@ void TopoGraph::init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, Parallel
 BubbleNode::BubbleNode(double radius, Eigen::Vector3f center) {
   radius_ = radius;
   center_ = center;
+}
+
+void TopoGraph::updateNodeSemantic(const TopoNode::Ptr &node, float observation,
+                                   float ema_alpha, std::int64_t stamp_ns) {
+  if (!node || node->is_viewpoint_ || !std::isfinite(observation))
+    return;
+  std::lock_guard<std::mutex> lock(semantic_memory_mutex_);
+  if (node->persistent_id_ == 0)
+    node->persistent_id_ = next_semantic_node_id_++;
+  const float alpha = std::clamp(ema_alpha, 0.0F, 1.0F);
+  const float score = std::clamp(observation, 0.0F, 1.0F);
+  if (node->semantic_observations_ == 0) {
+    node->semantic_score_ = score;
+    node->semantic_confidence_ = 1.0F;
+  } else {
+    node->semantic_score_ =
+      (1.0F - alpha) * node->semantic_score_ + alpha * score;
+    node->semantic_confidence_ = std::min(
+      1.0F, node->semantic_confidence_ + alpha * (1.0F - node->semantic_confidence_));
+  }
+  ++node->semantic_observations_;
+  node->semantic_stamp_ns_ = stamp_ns;
+  semantic_memory_[node->persistent_id_] = TopoSemanticRecord{
+    node->persistent_id_, node->center_, node->semantic_score_,
+    node->semantic_confidence_, node->semantic_observations_, stamp_ns};
+}
+
+vector<TopoSemanticRecord> TopoGraph::semanticMemorySnapshot() const {
+  std::lock_guard<std::mutex> lock(semantic_memory_mutex_);
+  vector<TopoSemanticRecord> records;
+  records.reserve(semantic_memory_.size());
+  for (const auto &entry : semantic_memory_)
+    records.push_back(entry.second);
+  return records;
+}
+
+void TopoGraph::loadSemanticMemory(const vector<TopoSemanticRecord> &records) {
+  std::lock_guard<std::mutex> lock(semantic_memory_mutex_);
+  for (const auto &record : records) {
+    if (record.node_id == 0 || !record.center.allFinite() ||
+        !std::isfinite(record.score) || !std::isfinite(record.confidence))
+      continue;
+    semantic_memory_[record.node_id] = record;
+    next_semantic_node_id_ = std::max(next_semantic_node_id_, record.node_id + 1);
+  }
+}
+
+size_t TopoGraph::semanticMemorySize() const {
+  std::lock_guard<std::mutex> lock(semantic_memory_mutex_);
+  return semantic_memory_.size();
+}
+
+size_t TopoGraph::restoreNodeSemanticMemory(
+    vector<TopoNode::Ptr> &nodes,
+    const unordered_set<std::uint64_t> &unavailable_ids) {
+  std::lock_guard<std::mutex> lock(semantic_memory_mutex_);
+  const float maximum_distance_sq = static_cast<float>(
+    semantic_node_match_distance_ * semantic_node_match_distance_);
+  unordered_set<std::uint64_t> claimed_records = unavailable_ids;
+  size_t restored = 0;
+  for (const auto &node : nodes) {
+    if (!node || node->is_viewpoint_)
+      continue;
+    const TopoSemanticRecord *nearest = nullptr;
+    float nearest_distance_sq = maximum_distance_sq;
+    Eigen::Vector3i node_region;
+    getIndex(node->center_, node_region);
+    for (const auto &entry : semantic_memory_) {
+      const auto &record = entry.second;
+      if (claimed_records.count(record.node_id))
+        continue;
+      Eigen::Vector3i record_region;
+      getIndex(record.center, record_region);
+      if ((record_region - node_region).cwiseAbs().maxCoeff() > 1)
+        continue;
+      const float distance_sq = (record.center - node->center_).squaredNorm();
+      if (distance_sq <= nearest_distance_sq) {
+        nearest = &record;
+        nearest_distance_sq = distance_sq;
+      }
+    }
+    if (nearest) {
+      node->persistent_id_ = nearest->node_id;
+      node->semantic_score_ = nearest->score;
+      node->semantic_confidence_ = nearest->confidence;
+      node->semantic_observations_ = nearest->observations;
+      node->semantic_stamp_ns_ = nearest->stamp_ns;
+      claimed_records.insert(nearest->node_id);
+      semantic_memory_[nearest->node_id].center = node->center_;
+      ++restored;
+    } else {
+      node->persistent_id_ = next_semantic_node_id_++;
+    }
+  }
+  return restored;
 }
 
 RegionNode::RegionNode(Eigen::Vector3i region_idx) {
@@ -162,7 +258,8 @@ void BubbleUnionSet::getClusters() {
 }
 
 bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr &end_node, std::vector<TopoNode::Ptr> &path, double time_out,
-                            bool kino, std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> last_path) {
+                            bool kino, std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> last_path,
+                            float semantic_cost_weight) {
   path.clear();
   std::unordered_map<TopoNode::Ptr, float> g_score, f_score;
   std::unordered_map<TopoNode::Ptr, TopoNode::Ptr> parent_map;
@@ -171,6 +268,7 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
   std::priority_queue<std::pair<float, TopoNode::Ptr>, std::vector<std::pair<float, TopoNode::Ptr>>, std::greater<std::pair<float, TopoNode::Ptr>>>
   open_set;
   auto getHeuristic = [&](const TopoNode::Ptr &n) -> float { return tie_breaker_ * (n->center_ - end_node->center_).norm(); };
+  semantic_cost_weight = std::max(0.0F, semantic_cost_weight);
   auto backtrack = [&]() {
     TopoNode::Ptr cur_node = end_node;
     path.push_back(cur_node);
@@ -206,15 +304,20 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
       if (close_set.find(neighbor) != close_set.end())
         continue;
 
+      const float edge_length = (neighbor->center_ - cur_node->center_).norm();
+      const float semantic_risk = 0.5F *
+        (std::clamp(cur_node->semantic_score_ * cur_node->semantic_confidence_, 0.0F, 1.0F) +
+        std::clamp(neighbor->semantic_score_ * neighbor->semantic_confidence_, 0.0F, 1.0F));
+      const float semantic_penalty = semantic_cost_weight * edge_length * semantic_risk;
       float tentative_g_score;
       if (kino) {
         if (last_path.find({cur_node, neighbor}) != last_path.end()) {
           // tentative_g_score = g_score[cur_node] + 1e-3 * cur_node->weight_[neighbor];
-          tentative_g_score = g_score[cur_node] + 0 * cur_node->weight_[neighbor];
+          tentative_g_score = g_score[cur_node] + 0 * cur_node->weight_[neighbor] + semantic_penalty;
         } else
-          tentative_g_score = g_score[cur_node] + cur_node->weight_[neighbor];
+          tentative_g_score = g_score[cur_node] + cur_node->weight_[neighbor] + semantic_penalty;
       } else {
-        tentative_g_score = g_score[cur_node] + cur_node->weight_[neighbor];
+        tentative_g_score = g_score[cur_node] + cur_node->weight_[neighbor] + semantic_penalty;
       }
       if (open_set_set_.find(neighbor) == open_set_set_.end() || tentative_g_score < g_score[neighbor]) {
         parent_map[neighbor] = cur_node;
@@ -233,13 +336,15 @@ bool TopoGraph::goalDirectedSearch(
     const TopoNode::Ptr &start_node, const Eigen::Vector3f &goal,
     std::vector<TopoNode::Ptr> &path, double time_out,
     float path_cost_weight, float previous_path_cost_factor,
-    const std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> &last_path) {
+    const std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> &last_path,
+    float semantic_cost_weight) {
   path.clear();
   if (start_node == nullptr || !start_node->center_.allFinite() || !goal.allFinite())
     return false;
 
   path_cost_weight = std::max(0.0f, path_cost_weight);
   previous_path_cost_factor = std::clamp(previous_path_cost_factor, 0.0f, 1.0f);
+  semantic_cost_weight = std::max(0.0f, semantic_cost_weight);
 
   std::unordered_map<TopoNode::Ptr, float> g_score;
   std::unordered_map<TopoNode::Ptr, TopoNode::Ptr> parent_map;
@@ -304,6 +409,11 @@ bool TopoGraph::goalDirectedSearch(
       float edge_cost = std::max(0.0f, weight_it->second);
       if (isPreviousEdge(current, neighbor))
         edge_cost *= previous_path_cost_factor;
+      const float edge_length = (neighbor->center_ - current->center_).norm();
+      const float semantic_risk = 0.5F *
+        (std::clamp(current->semantic_score_ * current->semantic_confidence_, 0.0F, 1.0F) +
+        std::clamp(neighbor->semantic_score_ * neighbor->semantic_confidence_, 0.0F, 1.0F));
+      edge_cost += semantic_cost_weight * edge_length * semantic_risk;
       const float tentative_cost = current_cost_it->second + edge_cost;
       const auto neighbor_cost_it = g_score.find(neighbor);
       if (neighbor_cost_it == g_score.end() || tentative_cost < neighbor_cost_it->second - 1e-5f) {
@@ -992,6 +1102,19 @@ void TopoGraph::updateSkeleton() {
   overlap(new_nodes, old_nodes, nodes_remained);
   setdiff(old_nodes, new_nodes, nodes2remove);
   setdiff(new_nodes, old_nodes, nodes2insert);
+  unordered_set<TopoNode::Ptr> removed_set(nodes2remove.begin(), nodes2remove.end());
+  unordered_set<std::uint64_t> active_semantic_ids;
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second)
+      continue;
+    for (const auto &node : entry.second->topo_nodes_) {
+      if (node && !removed_set.count(node) && node->persistent_id_ != 0)
+        active_semantic_ids.insert(node->persistent_id_);
+    }
+  }
+  last_update_timing_.semantic_restored_nodes =
+    restoreNodeSemanticMemory(nodes2insert, active_semantic_ids);
+  last_update_timing_.semantic_memory_records = semanticMemorySize();
   last_update_timing_.diff_ms =
       std::chrono::duration<double, std::milli>(Clock::now() - diff_start).count();
   last_update_timing_.remained_nodes = nodes_remained.size();

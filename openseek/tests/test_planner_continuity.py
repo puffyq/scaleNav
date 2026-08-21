@@ -5,6 +5,7 @@ import numpy as np
 from planner_continuity import (
     accept_local_goal,
     is_final_subgoal,
+    mission_goal_for_local_goal,
     mission_arrived,
     project_goal_to_fixed_altitude,
 )
@@ -37,6 +38,26 @@ class PlannerContinuityTests(unittest.TestCase):
         self.assertFalse(is_final_subgoal(np.array([35.0, 1.0, 1.6]), mission, 0.25))
         self.assertTrue(is_final_subgoal(np.array([39.9, 0.0, 1.6]), mission, 0.25))
 
+    def test_direct_goal_is_also_the_mission_goal(self):
+        goal = np.array([10.0, -2.0, 1.6])
+
+        mission = mission_goal_for_local_goal(
+            goal, mission_goal=None, has_separate_mission_goal=False
+        )
+
+        np.testing.assert_allclose(mission, goal)
+        self.assertTrue(is_final_subgoal(goal, mission, 0.25))
+
+    def test_epic_local_goal_does_not_replace_mission_goal(self):
+        local = np.array([10.0, 0.0, 1.6])
+        mission = np.array([40.0, 0.0, 1.6])
+
+        resolved = mission_goal_for_local_goal(
+            local, mission, has_separate_mission_goal=True
+        )
+
+        np.testing.assert_allclose(resolved, mission)
+
     def test_mission_completion_requires_low_speed(self):
         mission = np.array([40.0, 0.0, 1.6])
         position = np.array([39.8, 0.0, 1.6])
@@ -54,7 +75,6 @@ class PlannerContinuityTests(unittest.TestCase):
         )
 
         np.testing.assert_allclose(projected, [40.0, 0.0, 1.6])
-
 
 if __name__ == "__main__":
     unittest.main()

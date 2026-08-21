@@ -10,6 +10,85 @@
 
 namespace openseek_epic {
 
+struct RaycastShortcutStats
+{
+  std::size_t clearance_queries = 0;
+  std::size_t tested_segments = 0;
+  std::size_t accepted_segments = 0;
+};
+
+template<typename ClearanceQuery>
+inline bool segmentHasClearance(const Eigen::Vector3f &start,
+                                const Eigen::Vector3f &end,
+                                float sample_step,
+                                float minimum_clearance,
+                                ClearanceQuery &query,
+                                RaycastShortcutStats *stats = nullptr)
+{
+  if (!start.allFinite() || !end.allFinite() || !std::isfinite(sample_step) ||
+      !std::isfinite(minimum_clearance) || sample_step <= 0.0F ||
+      minimum_clearance < 0.0F) {
+    return false;
+  }
+
+  const Eigen::Vector3f segment = end - start;
+  const float length = segment.norm();
+  const std::size_t intervals = std::max<std::size_t>(
+    1, static_cast<std::size_t>(std::ceil(length / sample_step)));
+  for (std::size_t i = 0; i <= intervals; ++i) {
+    const float t = static_cast<float>(i) / static_cast<float>(intervals);
+    const float clearance = static_cast<float>(query(start + t * segment));
+    if (stats) ++stats->clearance_queries;
+    if (std::isnan(clearance) || clearance < minimum_clearance) return false;
+  }
+  return true;
+}
+
+// Greedily connect every retained point to the farthest later witness point
+// whose complete line segment satisfies the live obstacle-distance query.
+// Unknown space inherits the map query's policy; the online EPIC adapter
+// returns max range when no observed obstacle is available.
+template<typename ClearanceQuery>
+inline std::vector<Eigen::Vector3f> farthestVisibleShortcut(
+    const std::vector<Eigen::Vector3f> &path,
+    float sample_step,
+    float minimum_clearance,
+    ClearanceQuery query,
+    RaycastShortcutStats *stats = nullptr)
+{
+  std::vector<Eigen::Vector3f> compact;
+  compact.reserve(path.size());
+  for (const auto &point : path) {
+    if (compact.empty() || (compact.back() - point).norm() > 1e-4F) {
+      compact.push_back(point);
+    }
+  }
+  if (compact.size() <= 2) return compact;
+
+  std::vector<Eigen::Vector3f> shortened;
+  shortened.reserve(compact.size());
+  shortened.push_back(compact.front());
+  std::size_t anchor = 0;
+  while (anchor + 1 < compact.size()) {
+    std::size_t selected = anchor + 1;
+    bool found_visible = false;
+    for (std::size_t candidate = compact.size() - 1; candidate > anchor; --candidate) {
+      if (stats) ++stats->tested_segments;
+      if (segmentHasClearance(
+          compact[anchor], compact[candidate], sample_step, minimum_clearance,
+          query, stats)) {
+        selected = candidate;
+        found_visible = true;
+        break;
+      }
+    }
+    if (found_visible && stats) ++stats->accepted_segments;
+    shortened.push_back(compact[selected]);
+    anchor = selected;
+  }
+  return shortened;
+}
+
 inline float pointSegmentDistance(const Eigen::Vector3f &point,
                                   const Eigen::Vector3f &start,
                                   const Eigen::Vector3f &end)
@@ -97,6 +176,21 @@ inline bool shouldReuseTerminal(const Eigen::Vector3f &vehicle,
                                 float release_distance)
 {
   return (vehicle - terminal).norm() > std::max(0.0F, release_distance);
+}
+
+inline float velocityCompensatedLookahead(float minimum_lookahead,
+                                          float speed,
+                                          float planning_period_seconds,
+                                          float reserve_distance)
+{
+  if (!std::isfinite(minimum_lookahead) || !std::isfinite(speed) ||
+      !std::isfinite(planning_period_seconds) || !std::isfinite(reserve_distance)) {
+    return std::max(0.0F, minimum_lookahead);
+  }
+  return std::max(
+    std::max(0.0F, minimum_lookahead),
+    std::max(0.0F, speed) * std::max(0.0F, planning_period_seconds) +
+      std::max(0.0F, reserve_distance));
 }
 
 // A remembered terminal is valid only while the vehicle remains on the

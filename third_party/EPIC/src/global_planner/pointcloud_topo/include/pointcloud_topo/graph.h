@@ -24,6 +24,7 @@
 #include <pcl_ros/point_cloud.h>
 #include <pointcloud_topo/parallel_bubble_astar.h>
 #include <random>
+#include <cstdint>
 #include <mutex>
 #include <ros/ros.h>
 #include <thread>
@@ -109,10 +110,16 @@ public:
 class TopoNode {
 public:
   typedef std::shared_ptr<TopoNode> Ptr;
+  std::uint64_t persistent_id_ = 0;
   bool is_viewpoint_ = false;
   bool is_history_odom_node_ = false;
   float yaw_;
   Eigen::Vector3f center_;
+  // Planning reads semantics directly from the persistent topology node.
+  float semantic_score_ = 0.0F;
+  float semantic_confidence_ = 0.0F;
+  std::uint32_t semantic_observations_ = 0;
+  std::int64_t semantic_stamp_ns_ = 0;
   vector<BubbleNode::Ptr> bubbles_; // 过程量，计算出topoNode后会清空
   unordered_set<TopoNode::Ptr> neighbors_;
   unordered_map<TopoNode::Ptr, uint8_t> unreachable_nbrs_;
@@ -205,6 +212,17 @@ struct TopoGraphUpdateTiming {
   size_t remained_nodes = 0;
   size_t removed_nodes = 0;
   size_t inserted_nodes = 0;
+  size_t semantic_restored_nodes = 0;
+  size_t semantic_memory_records = 0;
+};
+
+struct TopoSemanticRecord {
+  std::uint64_t node_id = 0;
+  Eigen::Vector3f center = Eigen::Vector3f::Zero();
+  float score = 0.0F;
+  float confidence = 0.0F;
+  std::uint32_t observations = 0;
+  std::int64_t stamp_ns = 0;
 };
 
 class TopoGraph {
@@ -250,12 +268,14 @@ public:
   bool index2boundary(const Eigen::Vector3i &region_idx_, Eigen::Vector3f &low_bd, Eigen::Vector3f &high_bd);
   RegionNode::Ptr getRegionNode(const Eigen::Vector3i &region_idx_);
   bool graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr &end_node, std::vector<TopoNode::Ptr> &path, double time_out,
-                   bool kino = false, std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> last_path = {});
+                   bool kino = false, std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> last_path = {},
+                   float semantic_cost_weight = 0.0F);
   bool goalDirectedSearch(
       const TopoNode::Ptr &start_node, const Eigen::Vector3f &goal,
       std::vector<TopoNode::Ptr> &path, double time_out,
       float path_cost_weight = 0.2f, float previous_path_cost_factor = 0.05f,
-      const std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> &last_path = {});
+      const std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> &last_path = {},
+      float semantic_cost_weight = 0.0F);
   void init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, ParallelBubbleAstar::Ptr &parallel_bubble_astar);
   void cauculateMemoryConsumption();
   double getPathLength(const vector<TopoNode::Ptr> &topo_path);
@@ -274,6 +294,14 @@ public:
   void getRegionsToUpdate();
   vector<BubbleNode::Ptr> getBubbleSnapshot() const;
   const TopoGraphUpdateTiming &getLastUpdateTiming() const { return last_update_timing_; }
+  void updateNodeSemantic(const TopoNode::Ptr &node, float observation,
+                          float ema_alpha, std::int64_t stamp_ns);
+  vector<TopoSemanticRecord> semanticMemorySnapshot() const;
+  void loadSemanticMemory(const vector<TopoSemanticRecord> &records);
+  size_t semanticMemorySize() const;
+  size_t restoreNodeSemanticMemory(
+      vector<TopoNode::Ptr> &nodes,
+      const unordered_set<std::uint64_t> &unavailable_ids = {});
   void removeNode(TopoNode::Ptr &node);
   float estimateRoughDistance(const Eigen::Vector3f &goal, const int his_idx);
   vector<TopoNode::Ptr> history_odom_nodes_;
@@ -288,6 +316,10 @@ private:
   int max_update_region_num_;
   bool use_prior_map_;
   double update_connection_timeout, insert_node_timeout;
+  double semantic_node_match_distance_ = 1.5;
+  mutable std::mutex semantic_memory_mutex_;
+  unordered_map<std::uint64_t, TopoSemanticRecord> semantic_memory_;
+  std::uint64_t next_semantic_node_id_ = 1;
   bool hasOverlapWithBox(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd);
 
   void generateBubble(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd, vector<BubbleNode::Ptr> &bubble_node_vec,

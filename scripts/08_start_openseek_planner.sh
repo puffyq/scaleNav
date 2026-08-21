@@ -37,8 +37,15 @@ EPIC_YOPO_GOAL_TOLERANCE="${EPIC_YOPO_GOAL_TOLERANCE:-0.5}"
 EPIC_UPDATE_PERIOD_MS="${EPIC_UPDATE_PERIOD_MS:-100}"
 EPIC_SKELETON_REBUILD_PERIOD_MS="${EPIC_SKELETON_REBUILD_PERIOD_MS:-500.0}"
 EPIC_LOCAL_GOAL_MIN_ADVANCE_M="${EPIC_LOCAL_GOAL_MIN_ADVANCE_M:-0.75}"
-EPIC_LOCAL_GOAL_LOOKAHEAD_M="${EPIC_LOCAL_GOAL_LOOKAHEAD_M:-5.0}"
+EPIC_LOCAL_GOAL_LOOKAHEAD_M="${EPIC_LOCAL_GOAL_LOOKAHEAD_M:-10.0}"
+EPIC_ROUTE_PLAN_PERIOD_MS="${EPIC_ROUTE_PLAN_PERIOD_MS:-2000}"
+EPIC_LOCAL_GOAL_RESERVE_M="${EPIC_LOCAL_GOAL_RESERVE_M:-5.0}"
+EPIC_USE_EDGE_WITNESS_PATH="${EPIC_USE_EDGE_WITNESS_PATH:-true}"
+EPIC_RAYCAST_SHORTCUT_SAMPLE_STEP_M="${EPIC_RAYCAST_SHORTCUT_SAMPLE_STEP_M:-0.25}"
+EPIC_RAYCAST_SHORTCUT_CLEARANCE_MARGIN_M="${EPIC_RAYCAST_SHORTCUT_CLEARANCE_MARGIN_M:-0.05}"
 EPIC_GOAL_PATH_COST_WEIGHT="${EPIC_GOAL_PATH_COST_WEIGHT:-0.2}"
+EPIC_SEMANTIC_COST_WEIGHT="${EPIC_SEMANTIC_COST_WEIGHT:-1.0}"
+EPIC_SEMANTIC_NODE_EMA_ALPHA="${EPIC_SEMANTIC_NODE_EMA_ALPHA:-0.3}"
 EPIC_PREVIOUS_PATH_COST_FACTOR="${EPIC_PREVIOUS_PATH_COST_FACTOR:-0.0}"
 EPIC_ROUTE_REMAP_DISTANCE_M="${EPIC_ROUTE_REMAP_DISTANCE_M:-1.25}"
 EPIC_ROUTE_REUSE_HORIZON_M="${EPIC_ROUTE_REUSE_HORIZON_M:-6.0}"
@@ -50,10 +57,18 @@ EPIC_ODOM_RECONNECT_DISTANCE_M="${EPIC_ODOM_RECONNECT_DISTANCE_M:-1.0}"
 EPIC_ODOM_RECONNECT_YAW_DEG="${EPIC_ODOM_RECONNECT_YAW_DEG:-20.0}"
 EPIC_ODOM_FALLBACK_RADIUS_M="${EPIC_ODOM_FALLBACK_RADIUS_M:-15.0}"
 EPIC_ODOM_FALLBACK_CANDIDATES="${EPIC_ODOM_FALLBACK_CANDIDATES:-24}"
+EPIC_ODOM_CONNECT_TIMEOUT_MS="${EPIC_ODOM_CONNECT_TIMEOUT_MS:-3.0}"
 LIDAR_TOPIC="${LIDAR_TOPIC:-/lidar/front/points}"
 WORLD_FRAME="${WORLD_FRAME:-world_enu}"
 MAX_YAW_RATE="${MAX_YAW_RATE:-1.5}"
-ODOM_TWIST_FRAME="${ODOM_TWIST_FRAME:-world}"
+if [[ -z "${ODOM_TWIST_FRAME+x}" ]]; then
+  if [[ "$START_RENDERER" == "1" ]]; then
+    # openseek_uav_sim follows nav_msgs/Odometry and publishes twist in base_link.
+    ODOM_TWIST_FRAME="body"
+  else
+    ODOM_TWIST_FRAME="world"
+  fi
+fi
 REFERENCE_RESET_POSITION_ERROR="${REFERENCE_RESET_POSITION_ERROR:-0.75}"
 REFERENCE_RESET_VELOCITY_ERROR="${REFERENCE_RESET_VELOCITY_ERROR:-1.5}"
 MINIMUM_TRAJECTORY_ALTITUDE="${MINIMUM_TRAJECTORY_ALTITUDE:-0.15}"
@@ -61,9 +76,9 @@ TRAJECTORY_ALTITUDE_MARGIN="${TRAJECTORY_ALTITUDE_MARGIN:-0.10}"
 FIXED_ALTITUDE="${FIXED_ALTITUDE:-1}"
 DIRECT_GOAL_DISTANCE="${DIRECT_GOAL_DISTANCE:-3.5}"
 EVENT_LOG_DIR="${EVENT_LOG_DIR:-$PROJECT_ROOT/log_event}"
-SAVE_DEPTH_PNG="${SAVE_DEPTH_PNG:-1}"
+SAVE_DEPTH_PNG="${SAVE_DEPTH_PNG:-0}"
 PLAN_FROM_REFERENCE="${PLAN_FROM_REFERENCE:-1}"
-GRAPH_VISUALIZATION="${GRAPH_VISUALIZATION:-1}"
+GRAPH_VISUALIZATION="${GRAPH_VISUALIZATION:-0}"
 # Empty means the local SO3 controller's trajectory topic. Set this explicitly
 # only when running the legacy official Colosseum velocity bridge.
 export COLOSSEUM_CONTROL_TOPIC="${COLOSSEUM_CONTROL_TOPIC-}"
@@ -187,7 +202,7 @@ if [[ "$SAVE_DEPTH_PNG" == "1" ]]; then
   args+=(--save-depth-png)
 fi
 control_topic_display="${COLOSSEUM_CONTROL_TOPIC:-/openseek/trajectory_point}"
-echo "启动 YOPO-Simple: control=$CONTROL renderer=$START_RENDERER plan_from_reference=$PLAN_FROM_REFERENCE graph_visualization=$GRAPH_VISUALIZATION save_depth_png=$SAVE_DEPTH_PNG topic=$control_topic_display goal=$GOAL_TOPIC frame=$WORLD_FRAME log=$EVENT_LOG_DIR"
+echo "启动 YOPO-Simple: control=$CONTROL renderer=$START_RENDERER odom_twist=$ODOM_TWIST_FRAME plan_from_reference=$PLAN_FROM_REFERENCE graph_visualization=$GRAPH_VISUALIZATION save_depth_png=$SAVE_DEPTH_PNG topic=$control_topic_display goal=$GOAL_TOPIC frame=$WORLD_FRAME log=$EVENT_LOG_DIR"
 
 launch_pid=""
 planner_pid=""
@@ -227,7 +242,14 @@ if [[ "$EPIC_ONLINE" == "1" ]]; then
     "skeleton_rebuild_period_ms:=$EPIC_SKELETON_REBUILD_PERIOD_MS" \
     "local_goal_min_advance_m:=$EPIC_LOCAL_GOAL_MIN_ADVANCE_M" \
     "local_goal_lookahead_m:=$EPIC_LOCAL_GOAL_LOOKAHEAD_M" \
+    "route_plan_period_ms:=$EPIC_ROUTE_PLAN_PERIOD_MS" \
+    "local_goal_reserve_m:=$EPIC_LOCAL_GOAL_RESERVE_M" \
+    "use_edge_witness_path:=$EPIC_USE_EDGE_WITNESS_PATH" \
+    "raycast_shortcut_sample_step_m:=$EPIC_RAYCAST_SHORTCUT_SAMPLE_STEP_M" \
+    "raycast_shortcut_clearance_margin_m:=$EPIC_RAYCAST_SHORTCUT_CLEARANCE_MARGIN_M" \
     "goal_path_cost_weight:=$EPIC_GOAL_PATH_COST_WEIGHT" \
+    "semantic_cost_weight:=$EPIC_SEMANTIC_COST_WEIGHT" \
+    "semantic_node_ema_alpha:=$EPIC_SEMANTIC_NODE_EMA_ALPHA" \
     "previous_path_cost_factor:=$EPIC_PREVIOUS_PATH_COST_FACTOR" \
     "route_remap_distance_m:=$EPIC_ROUTE_REMAP_DISTANCE_M" \
     "route_reuse_horizon_m:=$EPIC_ROUTE_REUSE_HORIZON_M" \
@@ -239,6 +261,7 @@ if [[ "$EPIC_ONLINE" == "1" ]]; then
     "odom_reconnect_yaw_deg:=$EPIC_ODOM_RECONNECT_YAW_DEG" \
     "odom_fallback_radius_m:=$EPIC_ODOM_FALLBACK_RADIUS_M" \
     "odom_fallback_candidates:=$EPIC_ODOM_FALLBACK_CANDIDATES" \
+    "odom_connect_timeout_ms:=$EPIC_ODOM_CONNECT_TIMEOUT_MS" \
     > /tmp/openseek_epic_online.log 2>&1 &
   epic_pid=$!
   echo "EPIC 在线链路已启动: global=$EPIC_GLOBAL_GOAL_TOPIC next=$EPIC_NEXT_GOAL_TOPIC update=${EPIC_UPDATE_PERIOD_MS}ms rebuild=${EPIC_SKELETON_REBUILD_PERIOD_MS}ms"
@@ -266,11 +289,11 @@ fi
 planner_pid=$!
 
 set +e
-if [[ -n "$launch_pid" ]]; then
-  wait -n "$launch_pid" "$planner_pid"
-else
-  wait "$planner_pid"
-fi
+critical_pids=("$planner_pid")
+for pid in "$launch_pid" "$frgraph_pid" "$epic_pid" "$semantic_pid"; do
+  [[ -z "$pid" ]] || critical_pids+=("$pid")
+done
+wait -n "${critical_pids[@]}"
 status=$?
 set -e
 exit "$status"

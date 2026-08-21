@@ -46,6 +46,26 @@ VOC21_CLASSES = (
 TARGET_CLASS_INDEX = 15
 
 
+def runtime_classes(prompt: str) -> tuple[tuple[str, ...], int]:
+    """Build mutually exclusive PEARL competitors for a runtime target."""
+    target = prompt.strip()
+    if not target:
+        raise ValueError("PEARL target prompt cannot be empty")
+    target_key = target.casefold()
+    competitors: list[str] = []
+    for class_index, class_names in enumerate(VOC21_CLASSES):
+        if class_index == TARGET_CLASS_INDEX:
+            continue
+        aliases = [
+            alias for alias in class_names.split(", ")
+            if alias.strip().casefold() != target_key
+        ]
+        if aliases:
+            competitors.append(", ".join(aliases))
+    competitors.append(target)
+    return tuple(competitors), len(competitors) - 1
+
+
 class PEARLHeatmapEncoder:
     """Training-free PEARL target-probability encoder.
 
@@ -113,7 +133,7 @@ class PEARLHeatmapEncoder:
 
         self._propagation = TLP(grid=80).to(self.device) if use_propagation else None
         self._propagation_prompt: str | None = None
-        self._query_cache: dict[str, tuple[Tensor, Tensor]] = {}
+        self._query_cache: dict[str, tuple[Tensor, Tensor, int]] = {}
 
     @torch.inference_mode()
     def encode(self, rgb_path: str, prompt: str) -> np.ndarray:
@@ -123,7 +143,7 @@ class PEARLHeatmapEncoder:
     @torch.inference_mode()
     def prepare_prompt(self, prompt: str) -> None:
         """Cache text embeddings before the first camera frame arrives."""
-        query_features, _ = self._encode_queries(prompt)
+        query_features, _, _ = self._encode_queries(prompt)
         if self._propagation is not None:
             self._propagation.bind_text(query_features)
             self._propagation_prompt = prompt
@@ -144,7 +164,7 @@ class PEARLHeatmapEncoder:
             self.device, dtype=self._model.dtype
         )
 
-        query_features, query_indices = self._encode_queries(prompt)
+        query_features, query_indices, target_class_index = self._encode_queries(prompt)
         logits = self._forward_slide(image_tensor, query_features)
         if self._propagation is not None:
             if self._propagation_prompt != prompt:
@@ -158,11 +178,11 @@ class PEARLHeatmapEncoder:
         class_probabilities = torch.stack(
             [
                 query_probabilities[query_indices == class_index].amax(dim=0)
-                for class_index in range(len(VOC21_CLASSES))
+                for class_index in range(target_class_index + 1)
             ]
         )
         class_probabilities /= class_probabilities.sum(dim=0, keepdim=True)
-        target = class_probabilities[TARGET_CLASS_INDEX][None, None]
+        target = class_probabilities[target_class_index][None, None]
         target = F.interpolate(
             target, size=original_size, mode="bilinear", align_corners=False
         )
@@ -177,14 +197,12 @@ class PEARLHeatmapEncoder:
         )
 
     @torch.inference_mode()
-    def _encode_queries(self, prompt: str) -> tuple[Tensor, Tensor]:
+    def _encode_queries(self, prompt: str) -> tuple[Tensor, Tensor, int]:
         prompt = prompt.strip()
         if not prompt:
             raise ValueError("PEARL target prompt cannot be empty")
         if prompt not in self._query_cache:
-            classes = list(VOC21_CLASSES)
-            if prompt.casefold() != "person":
-                classes[TARGET_CLASS_INDEX] = prompt
+            classes, target_class_index = runtime_classes(prompt)
 
             names: list[str] = []
             indices: list[int] = []
@@ -204,6 +222,7 @@ class PEARLHeatmapEncoder:
             self._query_cache[prompt] = (
                 torch.stack(query_features),
                 torch.tensor(indices, dtype=torch.long, device=self.device),
+                target_class_index,
             )
         return self._query_cache[prompt]
 

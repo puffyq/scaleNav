@@ -1,0 +1,76 @@
+#include <gtest/gtest.h>
+
+#include "lidar_map/lidar_map.h"
+
+namespace {
+
+using fast_planner::LIOInterface;
+using fast_planner::PointType;
+
+pcl::PointCloud<PointType> cloud(std::initializer_list<PointType> points)
+{
+  pcl::PointCloud<PointType> result;
+  result.reserve(points.size());
+  for (const auto &point : points) result.push_back(point);
+  return result;
+}
+
+std::shared_ptr<LIOInterface> snapshotOf(
+    const LIOInterface &source,
+    const pcl::PointCloud<PointType> &latest,
+    const Eigen::Vector3f &pose)
+{
+  auto snapshot = std::make_shared<LIOInterface>();
+  snapshot->configureStorage(0.25F, 100.0F, 1000, 100.0F);
+  snapshot->loadSnapshot(
+    source.accumulatedCloudSnapshot(), latest, pose, Eigen::Quaternionf::Identity());
+  return snapshot;
+}
+
+TEST(LidarMapRayCarving, RemovesAnOldHitObservedFreeByANewDepthRay)
+{
+  LIOInterface map;
+  map.configureStorage(0.25F, 100.0F, 1000, 100.0F);
+  const Eigen::Vector3f first_pose = Eigen::Vector3f::Zero();
+  const auto old_frame = cloud({PointType(1.0F, 0.0F, 0.0F)});
+  ASSERT_TRUE(map.updateCloudWorld(
+    old_frame, first_pose, Eigen::Quaternionf::Identity()));
+
+  const Eigen::Vector3f second_pose(1.0F, 0.0F, 0.0F);
+  const auto new_frame = cloud({PointType(3.0F, 0.0F, 0.0F)});
+  ASSERT_TRUE(map.updateCloudWorld(
+    new_frame, second_pose, Eigen::Quaternionf::Identity()));
+
+  const auto accumulated = map.accumulatedCloudSnapshot();
+  ASSERT_EQ(accumulated.size(), 1U);
+  EXPECT_NEAR(accumulated.front().x, 3.0F, 1e-6F);
+
+  std::size_t hit_voxels = 0;
+  std::size_t free_voxels = 0;
+  std::size_t carved_voxels = 0;
+  map.lastRayCarvingStats(hit_voxels, free_voxels, carved_voxels);
+  EXPECT_EQ(hit_voxels, 1U);
+  EXPECT_GT(free_voxels, 0U);
+  EXPECT_EQ(carved_voxels, 1U);
+
+  const auto snapshot = snapshotOf(map, new_frame, second_pose);
+  EXPECT_NEAR(snapshot->getDisToOcc(second_pose), 2.0, 1e-6);
+}
+
+TEST(LidarMapRayCarving, PreservesEveryCurrentFrameEndpoint)
+{
+  LIOInterface map;
+  map.configureStorage(0.25F, 100.0F, 1000, 100.0F);
+  const Eigen::Vector3f pose = Eigen::Vector3f::Zero();
+  const auto frame = cloud({
+    PointType(1.0F, 0.0F, 0.0F),
+    PointType(2.0F, 0.0F, 0.0F),
+  });
+
+  ASSERT_TRUE(map.updateCloudWorld(frame, pose, Eigen::Quaternionf::Identity()));
+  const auto snapshot = snapshotOf(map, frame, pose);
+  EXPECT_NEAR(snapshot->getDisToOcc(Eigen::Vector3f(1.0F, 0.0F, 0.0F)), 0.0, 1e-6);
+  EXPECT_NEAR(snapshot->getDisToOcc(Eigen::Vector3f(2.0F, 0.0F, 0.0F)), 0.0, 1e-6);
+}
+
+}  // namespace

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-GOAL_X="${GOAL_X:-60.0}"
-GOAL_Y="${GOAL_Y:-0.0}"
-GOAL_Z="${GOAL_Z:-0.05}"
+GOAL_X="${GOAL_X:-0.0}"
+GOAL_Y="${GOAL_Y:-140.0}"
+GOAL_Z="${GOAL_Z:-1.6}"
 GOAL_TOPIC="${GOAL_TOPIC:-/goal_pose}"
 GOAL_FRAME="${GOAL_FRAME:-world_enu}"
 
