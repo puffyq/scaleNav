@@ -215,16 +215,48 @@ planner_pid=""
 frgraph_pid=""
 epic_pid=""
 semantic_pid=""
+
+# ros2 launch is a wrapper process and owns several child nodes.  Signalling
+# only the wrapper leaves those nodes alive after Ctrl-C, which can make an
+# old planner continue printing "waiting for ..." after the terminal prompt
+# has returned.
+kill_process_tree() {
+  local root_pid="$1"
+  local signal="$2"
+  [[ -n "$root_pid" ]] || return 0
+  kill -0 "$root_pid" 2>/dev/null || return 0
+  local child_pid
+  while read -r child_pid; do
+    [[ -n "$child_pid" ]] || continue
+    kill_process_tree "$child_pid" "$signal"
+  done < <(pgrep -P "$root_pid" 2>/dev/null || true)
+  kill -"$signal" "$root_pid" 2>/dev/null || true
+}
+
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
+  local pids=()
   for pid in "$planner_pid" "$semantic_pid" "$epic_pid" "$frgraph_pid" "$launch_pid"; do
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      kill -INT "$pid" 2>/dev/null || true
-    fi
+    [[ -z "$pid" ]] || pids+=("$pid")
+  done
+  for pid in "${pids[@]}"; do
+    kill_process_tree "$pid" INT
+  done
+  # Some Python/ROS processes handle SIGINT as a request to shut down and can
+  # take a moment; do not leave a detached planner behind indefinitely.
+  sleep 0.3
+  for pid in "${pids[@]}"; do
+    kill_process_tree "$pid" TERM
+  done
+  sleep 0.3
+  for pid in "${pids[@]}"; do
+    kill_process_tree "$pid" KILL
   done
   [[ -z "$planner_pid" ]] || wait "$planner_pid" 2>/dev/null || true
   [[ -z "$semantic_pid" ]] || wait "$semantic_pid" 2>/dev/null || true
+  [[ -z "$epic_pid" ]] || wait "$epic_pid" 2>/dev/null || true
+  [[ -z "$frgraph_pid" ]] || wait "$frgraph_pid" 2>/dev/null || true
   [[ -z "$launch_pid" ]] || wait "$launch_pid" 2>/dev/null || true
   exit "$status"
 }

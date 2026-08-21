@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # Configuration is local to the child process; it is not exported into the
 # caller's shell or persisted in a shell startup file.
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-PROMPT="blocks"
+PROMPT="tree"
 SEMANTIC_RATE="2"
 START_SEMANTIC="1"
 
