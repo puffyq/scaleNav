@@ -78,6 +78,7 @@ class LIOInterface {
     voxel_size_ = std::max(voxel_size, 0.05F);
     history_radius_ = std::max(history_radius, 1.0F);
     max_points_ = std::max<std::size_t>(max_points, 1000);
+    max_free_voxels_ = std::max<std::size_t>(max_points_ * 8U, 10000U);
     prune_distance_ = std::max(prune_distance, 0.1F);
   }
 
@@ -117,6 +118,9 @@ class LIOInterface {
         changed = true;
       }
     }
+    latest_hit_voxels_.clear();
+    latest_hit_voxels_.reserve(hit_voxels.size());
+    for (const auto &entry : hit_voxels) latest_hit_voxels_.insert(entry.first);
 
     // Neighboring pixels commonly terminate in the same map voxel. Cast one
     // ray per endpoint voxel so this update scales with map resolution rather
@@ -139,6 +143,18 @@ class LIOInterface {
           static_cast<int>(std::floor(sample.x() / voxel_size_)),
           static_cast<int>(std::floor(sample.y() / voxel_size_)),
           static_cast<int>(std::floor(sample.z() / voxel_size_))});
+      }
+    }
+
+    // Keep explicitly observed free voxels as a rolling memory. A hit in the
+    // current frame invalidates an older free-space claim for that voxel.
+    for (const auto &entry : hit_voxels) {
+      if (observed_free_voxels_.erase(entry.first) > 0) changed = true;
+    }
+    for (const auto &key : free_voxels) {
+      if (hit_voxels.find(key) == hit_voxels.end() &&
+          observed_free_voxels_.insert(key).second) {
+        changed = true;
       }
     }
 
@@ -172,9 +188,80 @@ class LIOInterface {
     if (moved_for_prune || cloud_->size() > max_points_) {
       pruneLocked(pose);
     }
+    const bool moved_for_free_prune = !have_free_prune_pose_ ||
+      (pose - free_last_prune_pose_).norm() >= prune_distance_;
+    if (moved_for_free_prune || observed_free_voxels_.size() > max_free_voxels_) {
+      pruneFreeLocked(pose);
+    }
     // The live accumulator is never queried. Rebuilding a PCL KD-tree here
     // would make every camera frame O(all historical points). Graph workers
     // build one immutable KD-tree from accumulatedCloudSnapshot() instead.
+    return changed;
+  }
+
+  // Add free-space evidence for rays that reached the sensor far plane. These
+  // samples have no occupied endpoint and therefore must not enter cloud_.
+  bool updateFreeRaysWorld(const pcl::PointCloud<PointType> &ray_endpoints_world,
+                           const Eigen::Vector3f &pose,
+                           const Eigen::Quaternionf &orientation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ld_->map_update = true;
+    ld_->first_map_flag_ = false;
+    ld_->lidar_pose_ = pose;
+    ld_->lidar_q_ = orientation;
+    last_hit_voxels_ = 0;
+    last_free_voxels_ = 0;
+    last_carved_voxels_ = 0;
+    std::unordered_set<VoxelKey, VoxelKeyHash> free_voxels;
+    free_voxels.reserve(ray_endpoints_world.points.size() * 8U);
+    for (const auto &endpoint : ray_endpoints_world.points) {
+      if (!std::isfinite(endpoint.x) || !std::isfinite(endpoint.y) ||
+          !std::isfinite(endpoint.z)) continue;
+      const Eigen::Vector3f ray(endpoint.x - pose.x(), endpoint.y - pose.y(),
+                                endpoint.z - pose.z());
+      const float length = ray.norm();
+      if (length <= voxel_size_ * 0.5F) continue;
+      const int steps = std::max(1, static_cast<int>(std::ceil(
+        length / std::max(0.05F, voxel_size_ * 0.5F))));
+      const Eigen::Vector3f direction = ray / length;
+      for (int step = 1; step < steps; ++step) {
+        const Eigen::Vector3f sample = pose + direction *
+          (length * static_cast<float>(step) / static_cast<float>(steps));
+        free_voxels.insert(VoxelKey{
+          static_cast<int>(std::floor(sample.x() / voxel_size_)),
+          static_cast<int>(std::floor(sample.y() / voxel_size_)),
+          static_cast<int>(std::floor(sample.z() / voxel_size_))});
+      }
+    }
+    bool changed = false;
+    for (const auto &key : free_voxels) {
+      if (latest_hit_voxels_.find(key) != latest_hit_voxels_.end()) continue;
+      if (observed_free_voxels_.insert(key).second) changed = true;
+      if (occupied_voxels_.erase(key) > 0) {
+        last_carved_voxels_++;
+        changed = true;
+      }
+    }
+    if (!free_voxels.empty()) {
+      pcl::PointCloud<PointType>::Ptr retained(new pcl::PointCloud<PointType>);
+      retained->reserve(cloud_->size());
+      for (const auto &point : cloud_->points) {
+        const VoxelKey key{
+          static_cast<int>(std::floor(point.x / voxel_size_)),
+          static_cast<int>(std::floor(point.y / voxel_size_)),
+          static_cast<int>(std::floor(point.z / voxel_size_))};
+        if (occupied_voxels_.find(key) != occupied_voxels_.end()) retained->push_back(point);
+      }
+      cloud_ = std::move(retained);
+    }
+    last_free_voxels_ = free_voxels.size();
+    const bool moved_for_prune = !have_prune_pose_ ||
+      (pose - last_prune_pose_).norm() >= prune_distance_;
+    if (moved_for_prune || cloud_->size() > max_points_) pruneLocked(pose);
+    const bool moved_for_free_prune = !have_free_prune_pose_ ||
+      (pose - free_last_prune_pose_).norm() >= prune_distance_;
+    if (moved_for_free_prune || observed_free_voxels_.size() > max_free_voxels_)
+      pruneFreeLocked(pose);
     return changed;
   }
 
@@ -188,8 +275,22 @@ class LIOInterface {
     return ld_->lidar_cloud_;
   }
 
+  pcl::PointCloud<PointType> freeSpaceSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pcl::PointCloud<PointType> snapshot;
+    snapshot.reserve(observed_free_voxels_.size());
+    for (const auto &key : observed_free_voxels_) {
+      snapshot.push_back(PointType(
+        (static_cast<float>(key.x) + 0.5F) * voxel_size_,
+        (static_cast<float>(key.y) + 0.5F) * voxel_size_,
+        (static_cast<float>(key.z) + 0.5F) * voxel_size_));
+    }
+    return snapshot;
+  }
+
   void loadSnapshot(const pcl::PointCloud<PointType> &accumulated_world,
                     const pcl::PointCloud<PointType> &latest_world,
+                    const pcl::PointCloud<PointType> &free_world,
                     const Eigen::Vector3f &pose,
                     const Eigen::Quaternionf &orientation) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -207,7 +308,29 @@ class LIOInterface {
         static_cast<int>(std::floor(point.y / voxel_size_)),
         static_cast<int>(std::floor(point.z / voxel_size_))});
     }
+    observed_free_voxels_.clear();
+    observed_free_voxels_.reserve(free_world.size());
+    for (const auto &point : free_world.points) {
+      if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+          !std::isfinite(point.z)) continue;
+      observed_free_voxels_.insert(VoxelKey{
+        static_cast<int>(std::floor(point.x / voxel_size_)),
+        static_cast<int>(std::floor(point.y / voxel_size_)),
+        static_cast<int>(std::floor(point.z / voxel_size_))});
+    }
+    last_prune_pose_ = pose;
+    have_prune_pose_ = true;
+    free_last_prune_pose_ = pose;
+    have_free_prune_pose_ = true;
     if (!cloud_->empty()) kd_.setInputCloud(cloud_);
+  }
+
+  void loadSnapshot(const pcl::PointCloud<PointType> &accumulated_world,
+                    const pcl::PointCloud<PointType> &latest_world,
+                    const Eigen::Vector3f &pose,
+                    const Eigen::Quaternionf &orientation) {
+    loadSnapshot(accumulated_world, latest_world, pcl::PointCloud<PointType>(),
+                 pose, orientation);
   }
 
   bool IsInBox(const Eigen::Vector3f &pos) const {
@@ -223,6 +346,11 @@ class LIOInterface {
   std::size_t pointCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return cloud_->size();
+  }
+
+  float voxelSize() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return voxel_size_;
   }
 
   void lastRayCarvingStats(std::size_t &hit_voxels,
@@ -249,6 +377,21 @@ class LIOInterface {
   }
   double getDisToOcc(const Eigen::Vector3d &point) const {
     return getDisToOcc(Eigen::Vector3f(point.cast<float>()));
+  }
+
+  // A large distance from getDisToOcc() is not sufficient evidence for a
+  // shortcut: it also occurs when the voxel has never been observed.  Keep
+  // this explicit free-space predicate for consumers that must distinguish
+  // known free space from unknown space.
+  bool isKnownFree(const Eigen::Vector3f &point) const {
+    if (!point.allFinite()) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const VoxelKey key{
+      static_cast<int>(std::floor(point.x() / voxel_size_)),
+      static_cast<int>(std::floor(point.y() / voxel_size_)),
+      static_cast<int>(std::floor(point.z() / voxel_size_))};
+    return occupied_voxels_.find(key) == occupied_voxels_.end() &&
+      observed_free_voxels_.find(key) != observed_free_voxels_.end();
   }
 
   void KNN(const PointType &point, int k, PointVector &points,
@@ -334,18 +477,49 @@ class LIOInterface {
     have_prune_pose_ = true;
   }
 
+  void pruneFreeLocked(const Eigen::Vector3f &pose) {
+    const float radius_sq = history_radius_ * history_radius_;
+    std::vector<std::pair<float, VoxelKey>> retained;
+    retained.reserve(observed_free_voxels_.size());
+    for (const auto &key : observed_free_voxels_) {
+      const Eigen::Vector3f center(
+        (static_cast<float>(key.x) + 0.5F) * voxel_size_,
+        (static_cast<float>(key.y) + 0.5F) * voxel_size_,
+        (static_cast<float>(key.z) + 0.5F) * voxel_size_);
+      const float distance_sq = (center - pose).squaredNorm();
+      if (distance_sq <= radius_sq) retained.emplace_back(distance_sq, key);
+    }
+    if (retained.size() > max_free_voxels_) {
+      std::nth_element(
+        retained.begin(), retained.begin() + static_cast<std::ptrdiff_t>(max_free_voxels_),
+        retained.end(),
+        [](const auto &left, const auto &right) { return left.first < right.first; });
+      retained.resize(max_free_voxels_);
+    }
+    observed_free_voxels_.clear();
+    observed_free_voxels_.reserve(retained.size());
+    for (const auto &entry : retained) observed_free_voxels_.insert(entry.second);
+    free_last_prune_pose_ = pose;
+    have_free_prune_pose_ = true;
+  }
+
   float voxel_size_ = 0.25F;
   float history_radius_ = 20.0F;
   float prune_distance_ = 0.5F;
   std::size_t max_points_ = 20000;
+  std::size_t max_free_voxels_ = 160000;
   Eigen::Vector3f last_prune_pose_ = Eigen::Vector3f::Zero();
   bool have_prune_pose_ = false;
+  Eigen::Vector3f free_last_prune_pose_ = Eigen::Vector3f::Zero();
+  bool have_free_prune_pose_ = false;
   std::size_t last_hit_voxels_ = 0;
   std::size_t last_free_voxels_ = 0;
   std::size_t last_carved_voxels_ = 0;
   mutable std::mutex mutex_;
   pcl::PointCloud<PointType>::Ptr cloud_;
   std::unordered_set<VoxelKey, VoxelKeyHash> occupied_voxels_;
+  std::unordered_set<VoxelKey, VoxelKeyHash> observed_free_voxels_;
+  std::unordered_set<VoxelKey, VoxelKeyHash> latest_hit_voxels_;
   mutable pcl::KdTreeFLANN<PointType> kd_;
 };
 

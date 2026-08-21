@@ -136,6 +136,23 @@ TEST(RaycastShortcut, RejectsClearanceBelowTheSafetyThreshold)
     point(0.0F), point(1.0F), 0.25F, 0.65F, exact));
 }
 
+TEST(RaycastShortcut, RejectsUnknownInteriorButAllowsUnknownWitnessEndpoints)
+{
+  auto unknown_interior = [](const Eigen::Vector3f &query) {
+    return query.x() > 0.24F && query.x() < 0.76F ?
+      std::numeric_limits<float>::quiet_NaN() : 10.0F;
+  };
+  auto unknown_endpoints = [](const Eigen::Vector3f &query) {
+    return (query.x() < 1e-4F || query.x() > 0.9999F) ?
+      std::numeric_limits<float>::quiet_NaN() : 10.0F;
+  };
+
+  EXPECT_FALSE(openseek_epic::segmentHasClearance(
+    point(0.0F), point(1.0F), 0.25F, 0.65F, unknown_interior));
+  EXPECT_TRUE(openseek_epic::segmentHasClearance(
+    point(0.0F), point(1.0F), 0.25F, 0.65F, unknown_endpoints));
+}
+
 TEST(RaycastShortcut, LeavesATwoPointPathUnchanged)
 {
   const std::vector<Eigen::Vector3f> path = {point(0.0F), point(2.0F)};

@@ -39,7 +39,14 @@ inline bool segmentHasClearance(const Eigen::Vector3f &start,
     const float t = static_cast<float>(i) / static_cast<float>(intervals);
     const float clearance = static_cast<float>(query(start + t * segment));
     if (stats) ++stats->clearance_queries;
-    if (std::isnan(clearance) || clearance < minimum_clearance) return false;
+    // Bubble A* has already collision-validated the witness endpoints, but a
+    // Bubble center need not coincide with a ray-carved voxel. Unknown
+    // endpoints are therefore allowed; unknown interior samples are not.
+    if (std::isnan(clearance)) {
+      if (i == 0 || i == intervals) continue;
+      return false;
+    }
+    if (!std::isfinite(clearance) || clearance < minimum_clearance) return false;
   }
   return true;
 }

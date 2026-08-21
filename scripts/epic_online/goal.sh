@@ -10,7 +10,7 @@ GOAL_Z="1.6"
 # GOAL_Y="0.0"
 # GOAL_Z="1.6"
 
-# GOAL_X="-80.0"
+# GOAL_X="80.0"
 # GOAL_Y="0.0"
 # GOAL_Z="1.6"
 

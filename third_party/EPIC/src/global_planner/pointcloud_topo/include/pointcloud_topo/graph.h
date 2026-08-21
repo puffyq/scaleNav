@@ -25,6 +25,8 @@
 #include <pointcloud_topo/parallel_bubble_astar.h>
 #include <random>
 #include <cstdint>
+#include <cmath>
+#include <limits>
 #include <mutex>
 #include <ros/ros.h>
 #include <thread>
@@ -115,6 +117,10 @@ public:
   bool is_history_odom_node_ = false;
   float yaw_;
   Eigen::Vector3f center_;
+  // Radius of the representative real BubbleNode used to create this node.
+  // It is retained after the transient BubbleNode list is released so
+  // semantic association can distinguish tight corridors from open space.
+  float bubble_radius_ = 0.0F;
   // Planning reads semantics directly from the persistent topology node.
   float semantic_score_ = 0.0F;
   float semantic_confidence_ = 0.0F;
@@ -206,6 +212,8 @@ struct TopoGraphUpdateTiming {
   double reconnect_ms = 0.0;
   double insert_ms = 0.0;
   size_t regions = 0;
+  size_t occupied_regions = 0;
+  size_t free_regions = 0;
   size_t bubbles = 0;
   size_t planar_bubbles = 0;
   size_t new_nodes = 0;
@@ -219,6 +227,7 @@ struct TopoGraphUpdateTiming {
 struct TopoSemanticRecord {
   std::uint64_t node_id = 0;
   Eigen::Vector3f center = Eigen::Vector3f::Zero();
+  Eigen::Vector3i region_idx = Eigen::Vector3i::Zero();
   float score = 0.0F;
   float confidence = 0.0F;
   std::uint32_t observations = 0;
@@ -316,11 +325,16 @@ private:
   int max_update_region_num_;
   bool use_prior_map_;
   double update_connection_timeout, insert_node_timeout;
-  double semantic_node_match_distance_ = 1.5;
+  double semantic_node_match_distance_ = 2.5;
+  double clearance_cost_weight_ = 2.0;
+  double clearance_target_m_ = 1.2;
   mutable std::mutex semantic_memory_mutex_;
   unordered_map<std::uint64_t, TopoSemanticRecord> semantic_memory_;
   std::uint64_t next_semantic_node_id_ = 1;
   bool hasOverlapWithBox(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd);
+
+  size_t selected_occupied_regions_ = 0;
+  size_t selected_free_regions_ = 0;
 
   void generateBubble(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd, vector<BubbleNode::Ptr> &bubble_node_vec,
                       vector<bool> &check_flags);
@@ -331,4 +345,7 @@ private:
   bool isCubeCoveredByBubble(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd, const vector<BubbleNode::Ptr> &bubble_node_vec);
 
   int searchPathWithBoundary(const Eigen::Vector3f &start, const Eigen::Vector3f &end, double &time_out, vector<Eigen::Vector3f> &path);
+  float edgeClearancePenalty(const TopoNode::Ptr &from,
+                             const TopoNode::Ptr &to,
+                             float edge_length) const;
 };

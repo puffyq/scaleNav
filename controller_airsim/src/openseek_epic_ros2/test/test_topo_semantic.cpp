@@ -17,18 +17,20 @@ TEST(TopoSemanticMemory, RestoresSemanticsAfterANodeIsRecreated)
   original.updateNodeSemantic(observed, 0.8F, 0.25F, 100);
   original.updateNodeSemantic(observed, 0.2F, 0.25F, 200);
   ASSERT_NE(observed->persistent_id_, 0U);
-  EXPECT_NEAR(observed->semantic_score_, 0.65F, 1e-6F);
+  EXPECT_NEAR(observed->semantic_score_, 0.8F, 1e-6F);
   EXPECT_EQ(observed->semantic_observations_, 2U);
 
   TopoGraph rebuilt;
-  rebuilt.min_bd = original.min_bd;
+  // A new goal changes EPIC's map bounds and local region origin. Semantic
+  // identity remains anchored in world coordinates.
+  rebuilt.min_bd = Eigen::Vector3f(-100.0F, -50.0F, -2.0F);
   rebuilt.init_region_size_x_ = original.init_region_size_x_;
   rebuilt.init_region_size_y_ = original.init_region_size_y_;
   rebuilt.init_region_size_z_ = original.init_region_size_z_;
   rebuilt.loadSemanticMemory(original.semanticMemorySnapshot());
 
   auto replacement = std::make_shared<TopoNode>();
-  replacement->center_ = Eigen::Vector3f(0.4F, 0.1F, 1.6F);
+  replacement->center_ = Eigen::Vector3f(2.0F, 0.1F, 1.6F);
   std::vector<TopoNode::Ptr> inserted{replacement};
   EXPECT_EQ(rebuilt.restoreNodeSemanticMemory(inserted), 1U);
   EXPECT_EQ(replacement->persistent_id_, observed->persistent_id_);

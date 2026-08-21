@@ -11,6 +11,18 @@
 
 #include <chrono>
 
+namespace {
+
+Eigen::Vector3i semanticWorldRegion(const Eigen::Vector3f &center,
+                                    double size_x, double size_y, double size_z) {
+  return Eigen::Vector3i(
+    static_cast<int>(std::floor(center.x() / std::max(size_x, 1e-3))),
+    static_cast<int>(std::floor(center.y() / std::max(size_y, 1e-3))),
+    static_cast<int>(std::floor(center.z() / std::max(size_z, 1e-3))));
+}
+
+}  // namespace
+
 void debug_exit(const std::string &location) {
   std::cout << "\033[1;31m Terminating process at location: " << location << "\033[0m" << std::endl;
   exit(0);
@@ -46,7 +58,9 @@ void TopoGraph::init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, Parallel
   nh.getParam("parallel_astar/insert_node_timeout", insert_node_timeout);
 
   nh.getParam("max_update_region_num", max_update_region_num_);
-  nh.param("bubble_topo/semantic_node_match_distance", semantic_node_match_distance_, 1.5);
+  nh.param("bubble_topo/semantic_node_match_distance", semantic_node_match_distance_, 2.5);
+  nh.param("bubble_topo/clearance_cost_weight", clearance_cost_weight_, 2.0);
+  nh.param("bubble_topo/clearance_target_m", clearance_target_m_, 1.2);
   update_idx_vec_.reserve(100);
   global_path_.reserve(200);
   x_len = std::ceil((max_bd - min_bd).x() / init_region_size_x_);
@@ -84,6 +98,35 @@ BubbleNode::BubbleNode(double radius, Eigen::Vector3f center) {
   center_ = center;
 }
 
+float TopoGraph::edgeClearancePenalty(const TopoNode::Ptr &from,
+                                      const TopoNode::Ptr &to,
+                                      float edge_length) const {
+  if (!from || !to || clearance_cost_weight_ <= 0.0 ||
+      clearance_target_m_ <= 0.0 || !lidar_map_interface_) {
+    return 0.0F;
+  }
+  std::vector<Eigen::Vector3f> samples;
+  const auto path_it = from->paths_.find(to);
+  if (path_it != from->paths_.end()) samples = path_it->second;
+  if (samples.empty()) samples = {from->center_, to->center_};
+  float minimum_clearance = std::numeric_limits<float>::infinity();
+  for (const auto &sample : samples) {
+    const double clearance = lidar_map_interface_->getDisToOcc(sample);
+    if (std::isfinite(clearance)) {
+      minimum_clearance = std::min(minimum_clearance,
+                                   static_cast<float>(clearance));
+    }
+  }
+  if (!std::isfinite(minimum_clearance) ||
+      minimum_clearance >= clearance_target_m_) {
+    return 0.0F;
+  }
+  const float deficit = static_cast<float>(
+    (clearance_target_m_ - minimum_clearance) / clearance_target_m_);
+  return static_cast<float>(clearance_cost_weight_) * edge_length *
+    deficit * deficit;
+}
+
 void TopoGraph::updateNodeSemantic(const TopoNode::Ptr &node, float observation,
                                    float ema_alpha, std::int64_t stamp_ns) {
   if (!node || node->is_viewpoint_ || !std::isfinite(observation))
@@ -97,15 +140,18 @@ void TopoGraph::updateNodeSemantic(const TopoNode::Ptr &node, float observation,
     node->semantic_score_ = score;
     node->semantic_confidence_ = 1.0F;
   } else {
-    node->semantic_score_ =
-      (1.0F - alpha) * node->semantic_score_ + alpha * score;
+    // Semantic memory is positive evidence: a later low-score background
+    // surface must not erase a previously observed target at this node.
+    node->semantic_score_ = std::max(node->semantic_score_, score);
     node->semantic_confidence_ = std::min(
       1.0F, node->semantic_confidence_ + alpha * (1.0F - node->semantic_confidence_));
   }
   ++node->semantic_observations_;
   node->semantic_stamp_ns_ = stamp_ns;
+  const Eigen::Vector3i region_idx = semanticWorldRegion(
+    node->center_, init_region_size_x_, init_region_size_y_, init_region_size_z_);
   semantic_memory_[node->persistent_id_] = TopoSemanticRecord{
-    node->persistent_id_, node->center_, node->semantic_score_,
+    node->persistent_id_, node->center_, region_idx, node->semantic_score_,
     node->semantic_confidence_, node->semantic_observations_, stamp_ns};
 }
 
@@ -147,18 +193,21 @@ size_t TopoGraph::restoreNodeSemanticMemory(
       continue;
     const TopoSemanticRecord *nearest = nullptr;
     float nearest_distance_sq = maximum_distance_sq;
-    Eigen::Vector3i node_region;
-    getIndex(node->center_, node_region);
+    const Eigen::Vector3i node_region = semanticWorldRegion(
+      node->center_, init_region_size_x_, init_region_size_y_, init_region_size_z_);
     for (const auto &entry : semantic_memory_) {
       const auto &record = entry.second;
       if (claimed_records.count(record.node_id))
         continue;
-      Eigen::Vector3i record_region;
-      getIndex(record.center, record_region);
+      const Eigen::Vector3i record_region = record.region_idx;
       if ((record_region - node_region).cwiseAbs().maxCoeff() > 1)
         continue;
       const float distance_sq = (record.center - node->center_).squaredNorm();
-      if (distance_sq <= nearest_distance_sq) {
+      const bool same_region = record_region == node_region;
+      const bool nearest_is_same_region = nearest &&
+        (nearest->region_idx == node_region);
+      if (distance_sq <= nearest_distance_sq &&
+          (!nearest || same_region || !nearest_is_same_region)) {
         nearest = &record;
         nearest_distance_sq = distance_sq;
       }
@@ -171,6 +220,7 @@ size_t TopoGraph::restoreNodeSemanticMemory(
       node->semantic_stamp_ns_ = nearest->stamp_ns;
       claimed_records.insert(nearest->node_id);
       semantic_memory_[nearest->node_id].center = node->center_;
+      semantic_memory_[nearest->node_id].region_idx = node_region;
       ++restored;
     } else {
       node->persistent_id_ = next_semantic_node_id_++;
@@ -305,6 +355,8 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
         continue;
 
       const float edge_length = (neighbor->center_ - cur_node->center_).norm();
+      const float clearance_penalty = edgeClearancePenalty(
+        cur_node, neighbor, edge_length);
       const float semantic_risk = 0.5F *
         (std::clamp(cur_node->semantic_score_ * cur_node->semantic_confidence_, 0.0F, 1.0F) +
         std::clamp(neighbor->semantic_score_ * neighbor->semantic_confidence_, 0.0F, 1.0F));
@@ -313,11 +365,14 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
       if (kino) {
         if (last_path.find({cur_node, neighbor}) != last_path.end()) {
           // tentative_g_score = g_score[cur_node] + 1e-3 * cur_node->weight_[neighbor];
-          tentative_g_score = g_score[cur_node] + 0 * cur_node->weight_[neighbor] + semantic_penalty;
+          tentative_g_score = g_score[cur_node] + 0 * cur_node->weight_[neighbor] +
+            semantic_penalty + clearance_penalty;
         } else
-          tentative_g_score = g_score[cur_node] + cur_node->weight_[neighbor] + semantic_penalty;
+          tentative_g_score = g_score[cur_node] + cur_node->weight_[neighbor] +
+            semantic_penalty + clearance_penalty;
       } else {
-        tentative_g_score = g_score[cur_node] + cur_node->weight_[neighbor] + semantic_penalty;
+        tentative_g_score = g_score[cur_node] + cur_node->weight_[neighbor] +
+          semantic_penalty + clearance_penalty;
       }
       if (open_set_set_.find(neighbor) == open_set_set_.end() || tentative_g_score < g_score[neighbor]) {
         parent_map[neighbor] = cur_node;
@@ -410,10 +465,13 @@ bool TopoGraph::goalDirectedSearch(
       if (isPreviousEdge(current, neighbor))
         edge_cost *= previous_path_cost_factor;
       const float edge_length = (neighbor->center_ - current->center_).norm();
+      const float clearance_penalty = edgeClearancePenalty(
+        current, neighbor, edge_length);
       const float semantic_risk = 0.5F *
         (std::clamp(current->semantic_score_ * current->semantic_confidence_, 0.0F, 1.0F) +
         std::clamp(neighbor->semantic_score_ * neighbor->semantic_confidence_, 0.0F, 1.0F));
       edge_cost += semantic_cost_weight * edge_length * semantic_risk;
+      edge_cost += clearance_penalty;
       const float tentative_cost = current_cost_it->second + edge_cost;
       const auto neighbor_cost_it = g_score.find(neighbor);
       if (neighbor_cost_it == g_score.end() || tentative_cost < neighbor_cost_it->second - 1e-5f) {
@@ -554,6 +612,9 @@ void BubbleUnionSet::unionSetCluster(const vector<BubbleNode::Ptr> &bubbles, vec
       node->center_ = center_big_bubble->center_;
     else
       node->center_ = max_raduis_bubble->center_;
+    node->bubble_radius_ = static_cast<float>(
+      center_big_bubble->radius_ > min_topobubble_radius_ ?
+      center_big_bubble->radius_ : max_raduis_bubble->radius_);
     node->is_viewpoint_ = false;
     topos.push_back(node);
     vector<BubbleNode::Ptr>().swap(node->bubbles_);
@@ -933,6 +994,8 @@ void TopoGraph::getRegionsToUpdate() {
   viewpoints_update_region_arr_.clear();
   toponodes_update_region_arr_.clear();
   unordered_set<RegionNode::Ptr> region_set;
+  unordered_set<RegionNode::Ptr> occupied_region_set;
+  unordered_set<RegionNode::Ptr> free_region_set;
   auto graphPoint = [this](Eigen::Vector3f point) {
     if (planar_graph_)
       point.z() = planar_z_;
@@ -948,13 +1011,46 @@ void TopoGraph::getRegionsToUpdate() {
     Eigen::Vector3i region_idx;
     getIndex(pt3d, region_idx);
     auto region = getRegionNode(region_idx);
-    if (region != nullptr)
+    if (region != nullptr) {
       region_set.insert(region);
+      occupied_region_set.insert(region);
+    }
   }
+
+  // The lidar map retains ray-carved voxels as explicit free-space evidence.
+  // Feed those voxels into the same region update set as obstacle returns so
+  // side corridors can produce real BubbleNodes instead of remaining absent.
+  const auto free_cloud = lidar_map_interface_->freeSpaceSnapshot();
+  const float free_layer_tolerance = planar_graph_ ?
+    std::max(0.5F * lidar_map_interface_->voxelSize(), 0.05F) :
+    std::numeric_limits<float>::infinity();
+  for (const auto &point : free_cloud.points) {
+    if (planar_graph_ &&
+        std::abs(point.z - planar_z_) > free_layer_tolerance) {
+      continue;
+    }
+    Eigen::Vector3f free_point(point.x, point.y, point.z);
+    free_point = graphPoint(free_point);
+    Eigen::Vector3i region_idx;
+    getIndex(free_point, region_idx);
+    auto region = getRegionNode(region_idx);
+    if (region != nullptr) {
+      region_set.insert(region);
+      free_region_set.insert(region);
+    }
+  }
+
+  selected_occupied_regions_ = occupied_region_set.size();
+  selected_free_regions_ = free_region_set.size();
   for (auto &region : region_set) {
     toponodes_update_region_arr_.push_back(region);
   }
   auto shorten_by_distance_insert_update_arr = [&](vector<RegionNode::Ptr> &arr) {
+    // Deduplicate before applying the update budget. Otherwise the ray-fill
+    // pass can consume the budget with repeated regions and discard distinct
+    // side corridors.
+    unordered_set<RegionNode::Ptr> region2update(arr.begin(), arr.end());
+    arr = vector<RegionNode::Ptr>(region2update.begin(), region2update.end());
     std::sort(arr.begin(), arr.end(), [this, &graphPoint](const RegionNode::Ptr &region1, const RegionNode::Ptr &region2) {
       Eigen::Vector3f lb1, hb1, lb2, hb2;
       index2boundary(region1->region_idx_, lb1, hb1);
@@ -966,10 +1062,6 @@ void TopoGraph::getRegionsToUpdate() {
       return dist1 < dist2;
     });
     arr.resize(std::min((int)arr.size(), max_update_region_num_));
-
-    // 去重
-    unordered_set<RegionNode::Ptr> region2update(arr.begin(), arr.end());
-    arr = vector<RegionNode::Ptr>(region2update.begin(), region2update.end());
   };
   // shorten_by_distance_insert_update_arr(toponodes_update_region_arr_);
 
@@ -1011,6 +1103,8 @@ void TopoGraph::updateSkeleton() {
   const auto total_start = Clock::now();
   last_update_timing_ = TopoGraphUpdateTiming{};
   last_update_timing_.regions = toponodes_update_region_arr_.size();
+  last_update_timing_.occupied_regions = selected_occupied_regions_;
+  last_update_timing_.free_regions = selected_free_regions_;
   parallel_bubble_astar_->reset();
   vector<TopoNode::Ptr> nodes2insert, nodes_remained, nodes2remove, new_nodes, old_nodes;
   mutex new_nodes_mtx;

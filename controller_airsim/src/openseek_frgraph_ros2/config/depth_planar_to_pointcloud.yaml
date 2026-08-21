@@ -3,8 +3,10 @@ depth_planar_to_pointcloud:
     depth_topic: /camera/depth/image
     camera_info_topic: /camera/depth/camera_info
     pointcloud_topic: /frgraph/points
+    free_ray_topic: /frgraph/free_rays
     output_frame: base_link
     max_range_m: 20.0
+    free_ray_pixel_stride: 4
     # Must match openseek_airsim_renderer/config/renderer.yaml. Depth samples
     # are expressed from the camera center, while EPIC consumes body-frame
     # points and measures clearance from the vehicle origin.

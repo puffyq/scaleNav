@@ -7,6 +7,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("cloud_topic", default_value="/frgraph/points"),
+        DeclareLaunchArgument("free_ray_topic", default_value="/frgraph/free_rays"),
         DeclareLaunchArgument("depth_image_topic", default_value="/camera/depth/image"),
         DeclareLaunchArgument("semantic_heatmap_topic", default_value="/openseek/text_heatmap_raw"),
         DeclareLaunchArgument("odom_topic", default_value="/sim/odom"),
@@ -16,6 +17,8 @@ def generate_launch_description():
         DeclareLaunchArgument("visualization_frame", default_value="odom"),
         DeclareLaunchArgument("graph_fixed_layer", default_value="true"),
         DeclareLaunchArgument("graph_layer_z", default_value="1.6"),
+        DeclareLaunchArgument("reuse_graph_on_goal", default_value="true"),
+        DeclareLaunchArgument("map_margin", default_value="20.0"),
         DeclareLaunchArgument("map_voxel_size", default_value="0.25"),
         DeclareLaunchArgument("map_history_radius_m", default_value="20.0"),
         DeclareLaunchArgument("map_max_points", default_value="20000"),
@@ -32,6 +35,9 @@ def generate_launch_description():
         DeclareLaunchArgument("goal_path_cost_weight", default_value="0.2"),
         DeclareLaunchArgument("semantic_cost_weight", default_value="1.0"),
         DeclareLaunchArgument("semantic_node_ema_alpha", default_value="0.3"),
+        DeclareLaunchArgument("semantic_visualization_max_score", default_value="1.0"),
+        DeclareLaunchArgument("bubble_topo/clearance_cost_weight", default_value="2.0"),
+        DeclareLaunchArgument("bubble_topo/clearance_target_m", default_value="1.2"),
         DeclareLaunchArgument("previous_path_cost_factor", default_value="0.0"),
         DeclareLaunchArgument("route_remap_distance_m", default_value="1.25"),
         DeclareLaunchArgument("route_reuse_horizon_m", default_value="6.0"),
@@ -46,7 +52,7 @@ def generate_launch_description():
         DeclareLaunchArgument("odom_connect_timeout_ms", default_value="3.0"),
         DeclareLaunchArgument("semantic_pose_tolerance_ms", default_value="100.0"),
         DeclareLaunchArgument("semantic_max_age_ms", default_value="1500.0"),
-        DeclareLaunchArgument("semantic_association_radius_m", default_value="3.0"),
+        DeclareLaunchArgument("semantic_association_radius_m", default_value="1.5"),
         DeclareLaunchArgument("semantic_voxel_size_m", default_value="0.5"),
         DeclareLaunchArgument("semantic_camera_translation_flu.x", default_value="0.5"),
         DeclareLaunchArgument("semantic_camera_translation_flu.y", default_value="0.0"),
@@ -60,6 +66,7 @@ def generate_launch_description():
             output="screen",
             parameters=[{
                 "cloud_topic": LaunchConfiguration("cloud_topic"),
+                "free_ray_topic": LaunchConfiguration("free_ray_topic"),
                 "depth_image_topic": LaunchConfiguration("depth_image_topic"),
                 "semantic_heatmap_topic": LaunchConfiguration("semantic_heatmap_topic"),
                 "odom_topic": LaunchConfiguration("odom_topic"),
@@ -69,6 +76,8 @@ def generate_launch_description():
                 "visualization_frame": LaunchConfiguration("visualization_frame"),
                 "graph_fixed_layer": LaunchConfiguration("graph_fixed_layer"),
                 "graph_layer_z": LaunchConfiguration("graph_layer_z"),
+                "reuse_graph_on_goal": LaunchConfiguration("reuse_graph_on_goal"),
+                "map_margin": LaunchConfiguration("map_margin"),
                 "map_voxel_size": LaunchConfiguration("map_voxel_size"),
                 "map_history_radius_m": LaunchConfiguration("map_history_radius_m"),
                 "map_max_points": LaunchConfiguration("map_max_points"),
@@ -87,6 +96,12 @@ def generate_launch_description():
                 "goal_path_cost_weight": LaunchConfiguration("goal_path_cost_weight"),
                 "semantic_cost_weight": LaunchConfiguration("semantic_cost_weight"),
                 "semantic_node_ema_alpha": LaunchConfiguration("semantic_node_ema_alpha"),
+                "semantic_visualization_max_score": LaunchConfiguration(
+                    "semantic_visualization_max_score"),
+                "bubble_topo/clearance_cost_weight": LaunchConfiguration(
+                    "bubble_topo/clearance_cost_weight"),
+                "bubble_topo/clearance_target_m": LaunchConfiguration(
+                    "bubble_topo/clearance_target_m"),
                 "previous_path_cost_factor": LaunchConfiguration("previous_path_cost_factor"),
                 "route_remap_distance_m": LaunchConfiguration("route_remap_distance_m"),
                 "route_reuse_horizon_m": LaunchConfiguration("route_reuse_horizon_m"),

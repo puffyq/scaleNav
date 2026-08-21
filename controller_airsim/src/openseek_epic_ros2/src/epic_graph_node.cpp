@@ -16,6 +16,7 @@
 #include <set>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -64,6 +65,7 @@ class EpicGraphNode final : public rclcpp::Node {
     topo_(std::make_shared<TopoGraph>())
   {
     cloud_topic_ = declare_parameter<std::string>("cloud_topic", "/frgraph/points");
+    free_ray_topic_ = declare_parameter<std::string>("free_ray_topic", "/frgraph/free_rays");
     odom_topic_ = declare_parameter<std::string>("odom_topic", "/sim/odom");
     goal_topic_ = declare_parameter<std::string>("goal_topic", "/goal");
     next_goal_topic_ = declare_parameter<std::string>("next_goal_topic", "/epic/yopo_goal");
@@ -71,7 +73,8 @@ class EpicGraphNode final : public rclcpp::Node {
     visualization_frame_ = declare_parameter<std::string>("visualization_frame", "odom");
     graph_fixed_layer_ = declare_parameter<bool>("graph_fixed_layer", true);
     graph_layer_z_ = declare_parameter<double>("graph_layer_z", 1.6);
-    map_margin_ = declare_parameter<double>("map_margin", 10.0);
+    reuse_graph_on_goal_ = declare_parameter<bool>("reuse_graph_on_goal", true);
+    map_margin_ = declare_parameter<double>("map_margin", 20.0);
     map_voxel_size_ = declare_parameter<double>("map_voxel_size", 0.25);
     map_history_radius_m_ = declare_parameter<double>("map_history_radius_m", 20.0);
     map_max_points_ = declare_parameter<int>("map_max_points", 20000);
@@ -90,6 +93,8 @@ class EpicGraphNode final : public rclcpp::Node {
     goal_path_cost_weight_ = declare_parameter<double>("goal_path_cost_weight", 0.2);
     semantic_cost_weight_ = declare_parameter<double>("semantic_cost_weight", 1.0);
     semantic_node_ema_alpha_ = declare_parameter<double>("semantic_node_ema_alpha", 0.3);
+    semantic_visualization_max_score_ = declare_parameter<double>(
+      "semantic_visualization_max_score", 1.0);
     previous_path_cost_factor_ = declare_parameter<double>("previous_path_cost_factor", 0.0);
     route_remap_distance_m_ = declare_parameter<double>("route_remap_distance_m", 1.25);
     route_reuse_horizon_m_ = declare_parameter<double>("route_reuse_horizon_m", 6.0);
@@ -116,7 +121,7 @@ class EpicGraphNode final : public rclcpp::Node {
     semantic_horizontal_fov_deg_ = declare_parameter<double>("semantic_horizontal_fov_deg", 90.0);
     semantic_vertical_fov_deg_ = declare_parameter<double>("semantic_vertical_fov_deg", 60.0);
     semantic_association_radius_m_ = declare_parameter<double>(
-      "semantic_association_radius_m", 3.0);
+      "semantic_association_radius_m", 1.5);
     semantic_voxel_size_m_ = declare_parameter<double>("semantic_voxel_size_m", 0.5);
     depth_image_topic_ = declare_parameter<std::string>(
       "depth_image_topic", "/camera/depth/image");
@@ -130,6 +135,11 @@ class EpicGraphNode final : public rclcpp::Node {
     declare_parameter<double>("bubble_topo/bubble_min_radius", 0.65);
     declare_parameter<double>("bubble_topo/frontier_bubble_min_radius", 0.65);
     declare_parameter<double>("bubble_topo/cube_discrete_size", 0.40);
+    declare_parameter<double>("bubble_topo/semantic_node_match_distance", 2.5);
+    clearance_cost_weight_ = declare_parameter<double>(
+      "bubble_topo/clearance_cost_weight", 2.0);
+    clearance_target_m_ = declare_parameter<double>(
+      "bubble_topo/clearance_target_m", 1.2);
     declare_parameter<bool>("bubble_topo/planar_graph", graph_fixed_layer_);
     declare_parameter<double>("bubble_topo/planar_z", graph_layer_z_);
     declare_parameter<int>("max_update_region_num", 100);
@@ -157,6 +167,12 @@ class EpicGraphNode final : public rclcpp::Node {
       graph_fixed_layer_ ? "fixed" : "3D", graph_layer_z_,
       1000.0 / static_cast<double>(std::max(1, route_plan_period_ms_)),
       local_goal_lookahead_m_, local_goal_reserve_m_);
+    RCLCPP_INFO(
+      get_logger(),
+      "EPIC costs: clearance_target=%.2f m clearance_weight=%.2f "
+      "semantic_radius=%.2f m semantic_visual_max=%.2f",
+      clearance_target_m_, clearance_cost_weight_,
+      semantic_association_radius_m_, semantic_visualization_max_score_);
 
     graph_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/epic/graph", 1);
     bubble_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/epic/bubbles", 1);
@@ -168,6 +184,9 @@ class EpicGraphNode final : public rclcpp::Node {
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
       cloud_topic_, rclcpp::SensorDataQoS(),
       [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr message) { onCloud(message); });
+    free_ray_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+      free_ray_topic_, rclcpp::SensorDataQoS(),
+      [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr message) { onFreeRays(message); });
     auto semantic_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
     semantic_heatmap_sub_ = create_subscription<sensor_msgs::msg::Image>(
       semantic_heatmap_topic_, semantic_qos,
@@ -365,6 +384,31 @@ class EpicGraphNode final : public rclcpp::Node {
     while (depth_history_.size() > max_depth_history_size_) depth_history_.pop_front();
   }
 
+  void mergeSemanticMemory(const std::vector<TopoSemanticRecord> &records)
+  {
+    std::lock_guard<std::mutex> lock(semantic_memory_mutex_);
+    for (const auto &record : records) {
+      if (record.node_id == 0 || !record.center.allFinite() ||
+          !std::isfinite(record.score) || !std::isfinite(record.confidence)) {
+        continue;
+      }
+      auto it = semantic_memory_.find(record.node_id);
+      if (it == semantic_memory_.end() ||
+          record.stamp_ns >= it->second.stamp_ns) {
+        semantic_memory_[record.node_id] = record;
+      }
+    }
+  }
+
+  std::vector<TopoSemanticRecord> semanticMemorySnapshot() const
+  {
+    std::lock_guard<std::mutex> lock(semantic_memory_mutex_);
+    std::vector<TopoSemanticRecord> records;
+    records.reserve(semantic_memory_.size());
+    for (const auto &entry : semantic_memory_) records.push_back(entry.second);
+    return records;
+  }
+
   void onGoal(const geometry_msgs::msg::PoseStamped::ConstSharedPtr &message)
   {
     Eigen::Vector3f next_goal(
@@ -378,24 +422,39 @@ class EpicGraphNode final : public rclcpp::Node {
     vector<TopoSemanticRecord> semantic_memory;
     {
       std::lock_guard<std::mutex> lock(graph_mutex_);
-      if (topo_) semantic_memory = topo_->semanticMemorySnapshot();
+      if (topo_) mergeSemanticMemory(topo_->semanticMemorySnapshot());
+      semantic_memory = semanticMemorySnapshot();
       goal_ = next_goal;
       have_goal_ = true;
       route_plan_requested_ = true;
-      graph_initialized_ = false;
-      skeleton_initialized_ = false;
-      map_changed_ = true;
-      have_graph_odom_ = false;
+      // A new mission goal gets a new route, even when the existing topology
+      // and its edge witness paths are reused.
       last_topology_path_centers_.clear();
       last_witness_path_.clear();
       have_route_terminal_ = false;
-      astar_ = std::make_shared<ParallelBubbleAstar>();
-      topo_ = std::make_shared<TopoGraph>();
-      topo_->loadSemanticMemory(semantic_memory);
+      const bool in_existing_map = topo_ && topo_->lidar_map_interface_ &&
+        topo_->lidar_map_interface_->IsInBox(next_goal);
+      const bool can_reuse = reuse_graph_on_goal_ && graph_initialized_.load() &&
+        skeleton_initialized_.load() && topo_ && astar_ && in_existing_map;
+      if (!can_reuse) {
+        graph_initialized_ = false;
+        skeleton_initialized_ = false;
+        map_changed_ = true;
+        have_graph_odom_ = false;
+        astar_ = std::make_shared<ParallelBubbleAstar>();
+        topo_ = std::make_shared<TopoGraph>();
+        topo_->loadSemanticMemory(semantic_memory);
+      }
       ++goal_generation_;
+      RCLCPP_INFO(
+        get_logger(), "EPIC goal graph mode: %s (reuse_graph_on_goal=%d in_map=%d)",
+        can_reuse ? "REUSE_EXISTING_GRAPH" : "REBUILD_GRAPH",
+        static_cast<int>(reuse_graph_on_goal_),
+        static_cast<int>(in_existing_map));
     }
-    RCLCPP_INFO(get_logger(), "EPIC goal set: %.2f %.2f %.2f",
-                goal_.x(), goal_.y(), goal_.z());
+    RCLCPP_INFO(get_logger(),
+      "EPIC goal set: %.2f %.2f %.2f semantic_memory=%zu",
+      goal_.x(), goal_.y(), goal_.z(), semantic_memory.size());
   }
 
   void onCloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &message)
@@ -465,6 +524,43 @@ class EpicGraphNode final : public rclcpp::Node {
       active_map->pointCount(), ray_hits, ray_free, ray_carved,
       nearest_body_distance, nearest_body_point.x(),
       nearest_body_point.y(), nearest_body_point.z());
+  }
+
+  void onFreeRays(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &message)
+  {
+    if (!have_odom_ || message->width == 0) return;
+    pcl::PointCloud<fast_planner::PointType> cloud_body;
+    pcl::fromROSMsg(*message, cloud_body);
+    if (cloud_body.empty()) return;
+    TimedPose capture_pose;
+    double pose_sync_ms = 0.0;
+    if (!poseForCloud(message->header.stamp, capture_pose, pose_sync_ms)) return;
+    pcl::PointCloud<fast_planner::PointType> rays_world;
+    rays_world.reserve(cloud_body.size());
+    for (const auto &point : cloud_body.points) {
+      if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+          !std::isfinite(point.z)) continue;
+      const Eigen::Vector3f body(point.x, point.y, point.z);
+      const Eigen::Vector3f world = capture_pose.position +
+        capture_pose.orientation * body;
+      rays_world.push_back(fast_planner::PointType(world.x(), world.y(), world.z()));
+    }
+    if (rays_world.empty()) return;
+    fast_planner::LIOInterface::Ptr active_map;
+    {
+      std::lock_guard<std::mutex> lock(graph_mutex_);
+      active_map = map_;
+    }
+    const bool changed = active_map->updateFreeRaysWorld(
+      rays_world, capture_pose.position, capture_pose.orientation);
+    have_cloud_ = true;
+    if (changed) {
+      map_changed_.store(true);
+    }
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 1000,
+      "[EPIC free rays] endpoints=%zu pose_sync=%.1f ms changed=%d",
+      rays_world.size(), pose_sync_ms, static_cast<int>(changed));
   }
 
   static std::int64_t stampNanoseconds(const builtin_interfaces::msg::Time &stamp)
@@ -540,12 +636,15 @@ class EpicGraphNode final : public rclcpp::Node {
     }
     const auto accumulated = source_map->accumulatedCloudSnapshot();
     const auto latest = source_map->latestCloudSnapshot();
+    const auto free_space = source_map->freeSpaceSnapshot();
+    const auto semantic_memory = semanticMemorySnapshot();
     map_changed_.store(false);
     last_skeleton_rebuild_time_ = std::chrono::steady_clock::now();
     have_skeleton_rebuild_time_ = true;
 
     rebuild_thread_ = std::thread(
-      [this, source_map, accumulated, latest, position, goal, orientation, generation,
+      [this, source_map, accumulated, latest, free_space, semantic_memory,
+       position, goal, orientation, generation,
        current_astar, current_topo, incremental_update]() mutable {
         const auto total_start = std::chrono::steady_clock::now();
         try {
@@ -553,14 +652,15 @@ class EpicGraphNode final : public rclcpp::Node {
             std::make_shared<fast_planner::LIOInterface>();
           if (!incremental_update) {
             // Bubble generation remains 3D; only the derived topology is planar.
-            configureMapBounds(next_map, position, goal, map_margin_);
+            configureMapBounds(
+              next_map, position, goal, std::max(map_margin_, map_history_radius_m_));
             next_map->configureStorage(
               static_cast<float>(map_voxel_size_), static_cast<float>(map_history_radius_m_),
               static_cast<std::size_t>(std::max(map_max_points_, 1000)),
               static_cast<float>(map_prune_distance_m_));
           }
           const auto snapshot_start = std::chrono::steady_clock::now();
-          next_map->loadSnapshot(accumulated, latest, position, orientation);
+          next_map->loadSnapshot(accumulated, latest, free_space, position, orientation);
           const double snapshot_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - snapshot_start).count();
           const auto init_start = std::chrono::steady_clock::now();
@@ -572,6 +672,7 @@ class EpicGraphNode final : public rclcpp::Node {
             ros::NodeHandle nh(shared_from_this());
             next_astar->init(nh, next_map);
             next_topo->init(nh, next_map, next_astar);
+            next_topo->loadSemanticMemory(semantic_memory);
           }
           next_astar->planar_search_ = graph_fixed_layer_;
           next_astar->planar_z_ = static_cast<float>(graph_layer_z_);
@@ -598,6 +699,7 @@ class EpicGraphNode final : public rclcpp::Node {
           const double odom_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - odom_start).count();
           const auto timing = next_topo->getLastUpdateTiming();
+          mergeSemanticMemory(next_topo->semanticMemorySnapshot());
 
           if (!incremental_update && (timing.bubbles == 0 || timing.new_nodes == 0)) {
             map_changed_.store(true);
@@ -620,13 +722,15 @@ class EpicGraphNode final : public rclcpp::Node {
             std::chrono::steady_clock::now() - total_start).count();
           RCLCPP_INFO(get_logger(),
             "[EPIC timing][background %s] points=%zu snapshot_kdtree=%.3f ms "
-            "init=%.3f ms regions=%zu region_select=%.3f ms skeleton=%.3f ms "
+            "free_memory=%zu init=%.3f ms regions=%zu occupied_regions=%zu "
+            "free_regions=%zu region_select=%.3f ms skeleton=%.3f ms "
             "odom_connect=%.3f ms "
             "total=%.3f ms bubbles_3d=%zu bubbles_planar=%zu nodes=%zu "
             "semantic_restored=%zu semantic_memory=%zu",
             incremental_update ? "incremental" : "initialize",
-            accumulated.size(), snapshot_ms, init_ms, timing.regions, regions_ms,
-            skeleton_ms, odom_ms, total_ms,
+            accumulated.size(), snapshot_ms, free_space.size(), init_ms,
+            timing.regions, timing.occupied_regions, timing.free_regions,
+            regions_ms, skeleton_ms, odom_ms, total_ms,
             timing.bubbles, timing.planar_bubbles, timing.new_nodes,
             timing.semantic_restored_nodes, timing.semantic_memory_records);
           if (fallback_edges > 0) {
@@ -978,24 +1082,32 @@ class EpicGraphNode final : public rclcpp::Node {
     return true;
   }
 
-  bool semanticScore(const SemanticFrame &frame, const Eigen::Vector3f &world_point,
+  bool semanticScore(const SemanticFrame &frame, const TopoNode::Ptr &node,
                      float &score) const
   {
     score = 0.0F;
-    if (frame.surface_points_world.empty() || frame.surface_points_world.size() != frame.scores.size()) {
+    if (!node || frame.surface_points_world.empty() ||
+        frame.surface_points_world.size() != frame.scores.size()) {
       return false;
     }
-    const float radius_sq = static_cast<float>(semantic_association_radius_m_ *
-                                                semantic_association_radius_m_);
+    const float bubble_radius = std::max(0.0F, node->bubble_radius_);
+    const float semantic_boundary_radius = static_cast<float>(
+      std::max(semantic_association_radius_m_, 1e-3));
+    const float association_radius = bubble_radius + semantic_boundary_radius;
+    const float radius_sq = association_radius * association_radius;
     bool associated = false;
     for (std::size_t i = 0; i < frame.surface_points_world.size(); ++i) {
-      const float distance_sq = (frame.surface_points_world[i] - world_point).squaredNorm();
+      const float distance_sq =
+        (frame.surface_points_world[i] - node->center_).squaredNorm();
       if (!std::isfinite(distance_sq) || distance_sq > radius_sq) continue;
-      // A nearby high-probability semantic surface gives a warm node. Distance
-      // attenuation keeps a large tree surface from painting the whole graph red.
-      const float distance = std::sqrt(distance_sq);
-      const float weighted = frame.scores[i] *
-        std::max(0.0F, 1.0F - distance / static_cast<float>(semantic_association_radius_m_));
+      const float center_distance = std::sqrt(distance_sq);
+      // Semantic risk is measured from the semantic surface to the Bubble
+      // boundary. A node whose Bubble nearly touches the surface remains warm;
+      // using center distance alone incorrectly paints that node blue.
+      const float boundary_gap = std::max(0.0F, center_distance - bubble_radius);
+      const float surface_proximity = std::max(
+        0.0F, 1.0F - boundary_gap / semantic_boundary_radius);
+      const float weighted = frame.scores[i] * surface_proximity;
       if (weighted > score) score = weighted;
       associated = true;
     }
@@ -1025,10 +1137,11 @@ class EpicGraphNode final : public rclcpp::Node {
       for (const auto &node : entry.second->topo_nodes_) {
         if (!node || node->is_viewpoint_ || !visited.insert(node).second) continue;
         float score = 0.0F;
-        if (!semanticScore(*frame, node->center_, score)) continue;
+        if (!semanticScore(*frame, node, score)) continue;
         topo->updateNodeSemantic(node, score, alpha, frame->stamp_ns);
       }
     }
+    mergeSemanticMemory(topo->semanticMemorySnapshot());
   }
 
   static std_msgs::msg::ColorRGBA semanticColor(float normalized, bool enabled)
@@ -1167,14 +1280,10 @@ class EpicGraphNode final : public rclcpp::Node {
     semantic_voxels_marker.scale.z = semantic_voxel_size_m_;
     semantic_voxels_marker.color.a = 0.65F;
     if (semantic_available && !semantic_frame->scores.empty()) {
-      const auto score_bounds = std::minmax_element(
-        semantic_frame->scores.begin(), semantic_frame->scores.end());
-      const float score_range = *score_bounds.second - *score_bounds.first;
       for (std::size_t i = 0; i < semantic_frame->surface_points_world.size(); ++i) {
         semantic_voxels_marker.points.push_back(toPoint(semantic_frame->surface_points_world[i]));
-        const float normalized = score_range > 1e-5F ?
-          (semantic_frame->scores[i] - *score_bounds.first) / score_range :
-          semantic_frame->scores[i];
+        const float normalized = semantic_frame->scores[i] / static_cast<float>(
+          std::max(semantic_visualization_max_score_, 1e-5));
         semantic_voxels_marker.colors.push_back(semanticColor(normalized, true));
       }
     }
@@ -1241,18 +1350,9 @@ class EpicGraphNode final : public rclcpp::Node {
         }
       }
     }
-    float semantic_min = std::numeric_limits<float>::infinity();
-    float semantic_max = -std::numeric_limits<float>::infinity();
     for (std::size_t i = 0; i < semantic_scores.size(); ++i) {
-      if (semantic_associated[i]) {
-        semantic_min = std::min(semantic_min, semantic_scores[i]);
-        semantic_max = std::max(semantic_max, semantic_scores[i]);
-      }
-    }
-    for (std::size_t i = 0; i < semantic_scores.size(); ++i) {
-      const float range = semantic_max - semantic_min;
-      const float normalized = range > 1e-5F ?
-        (semantic_scores[i] - semantic_min) / range : semantic_scores[i];
+      const float normalized = semantic_scores[i] / static_cast<float>(
+        std::max(semantic_visualization_max_score_, 1e-5));
       skeleton_nodes.colors.push_back(semanticColor(normalized, semantic_associated[i]));
     }
     graph.markers.push_back(skeleton_nodes);
@@ -1329,6 +1429,12 @@ class EpicGraphNode final : public rclcpp::Node {
         topo->parallel_bubble_astar_->safe_distance_ +
         std::max(0.0, raycast_shortcut_clearance_margin_m_));
       auto clearance_query = [topo](const Eigen::Vector3f &point) {
+        // Unknown voxels must not be treated as infinitely clear.  The
+        // topology witness is already collision-checked; shortcut only when
+        // the live ray map explicitly observed every sampled voxel as free.
+        if (!topo->lidar_map_interface_->isKnownFree(point)) {
+          return std::numeric_limits<double>::quiet_NaN();
+        }
         return topo->lidar_map_interface_->getDisToOcc(point);
       };
       selected_witness_path = openseek_epic::farthestVisibleShortcut(
@@ -1518,10 +1624,11 @@ class EpicGraphNode final : public rclcpp::Node {
     return stats;
   }
 
-  std::string cloud_topic_, odom_topic_, goal_topic_, next_goal_topic_, next_goal_frame_;
+  std::string cloud_topic_, free_ray_topic_, odom_topic_, goal_topic_, next_goal_topic_, next_goal_frame_;
   std::string visualization_frame_;
-  double map_margin_ = 10.0;
+  double map_margin_ = 20.0;
   bool graph_fixed_layer_ = true;
+  bool reuse_graph_on_goal_ = true;
   bool graph_layer_initialized_ = false;
   double graph_layer_z_ = 1.6;
   double map_voxel_size_ = 0.25;
@@ -1539,6 +1646,9 @@ class EpicGraphNode final : public rclcpp::Node {
   double goal_path_cost_weight_ = 0.2;
   double semantic_cost_weight_ = 1.0;
   double semantic_node_ema_alpha_ = 0.3;
+  double semantic_visualization_max_score_ = 1.0;
+  double clearance_cost_weight_ = 2.0;
+  double clearance_target_m_ = 1.2;
   double previous_path_cost_factor_ = 0.0;
   double route_remap_distance_m_ = 1.25;
   double route_reuse_horizon_m_ = 6.0;
@@ -1560,7 +1670,7 @@ class EpicGraphNode final : public rclcpp::Node {
   double semantic_camera_tz_ = -0.1;
   double semantic_horizontal_fov_deg_ = 90.0;
   double semantic_vertical_fov_deg_ = 60.0;
-  double semantic_association_radius_m_ = 3.0;
+  double semantic_association_radius_m_ = 1.5;
   double semantic_voxel_size_m_ = 0.5;
   int update_period_ms_ = 100;
   fast_planner::LIOInterface::Ptr map_;
@@ -1572,6 +1682,7 @@ class EpicGraphNode final : public rclcpp::Node {
   Eigen::Vector3f route_terminal_ = Eigen::Vector3f::Zero();
   bool have_route_terminal_ = false;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr free_ray_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr semantic_heatmap_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
@@ -1592,6 +1703,8 @@ class EpicGraphNode final : public rclcpp::Node {
   std::optional<SemanticFrame> semantic_frame_;
   std::int64_t last_semantic_applied_stamp_ns_ = 0;
   std::mutex semantic_mutex_;
+  mutable std::mutex semantic_memory_mutex_;
+  std::unordered_map<std::uint64_t, TopoSemanticRecord> semantic_memory_;
   std::chrono::steady_clock::time_point last_route_plan_time_;
   bool have_route_plan_time_ = false;
   bool route_plan_requested_ = false;

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <chrono>
 #include <memory>
+#include <limits>
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
@@ -25,8 +26,12 @@ class DepthPlanarToPointCloudNode final : public rclcpp::Node {
         "camera_info_topic", "/camera/depth/camera_info");
     pointcloud_topic_ = declare_parameter<std::string>(
         "pointcloud_topic", "/frgraph/points");
+    free_ray_topic_ = declare_parameter<std::string>(
+        "free_ray_topic", "/frgraph/free_rays");
     output_frame_ = declare_parameter<std::string>("output_frame", "base_link");
     max_range_m_ = declare_parameter<double>("max_range_m", 20.0);
+    free_ray_pixel_stride_ = static_cast<int>(std::max<std::int64_t>(
+        1, declare_parameter<int>("free_ray_pixel_stride", 4)));
     default_fx_ = declare_parameter<double>("fx", 0.0);
     default_fy_ = declare_parameter<double>("fy", 0.0);
     default_cx_ = declare_parameter<double>("cx", 0.0);
@@ -48,15 +53,17 @@ class DepthPlanarToPointCloudNode final : public rclcpp::Node {
         });
     pointcloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
         pointcloud_topic_, rclcpp::SensorDataQoS());
+    free_ray_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        free_ray_topic_, rclcpp::SensorDataQoS());
     depth_sub_ = create_subscription<sensor_msgs::msg::Image>(
         depth_topic_, rclcpp::SensorDataQoS(),
         std::bind(&DepthPlanarToPointCloudNode::on_depth, this,
                   std::placeholders::_1));
 
     RCLCPP_INFO(get_logger(),
-                "DepthPlanar adapter: %s -> %s, frame=%s, max_range=%.2fm, "
+                "DepthPlanar adapter: %s -> %s + %s, frame=%s, max_range=%.2fm, "
                 "camera_translation_flu=(%.2f,%.2f,%.2f)",
-                depth_topic_.c_str(), pointcloud_topic_.c_str(),
+                depth_topic_.c_str(), pointcloud_topic_.c_str(), free_ray_topic_.c_str(),
                 output_frame_.c_str(), max_range_m_, camera_tx_, camera_ty_,
                 camera_tz_);
   }
@@ -95,9 +102,13 @@ class DepthPlanarToPointCloudNode final : public rclcpp::Node {
 
     const auto *depth = reinterpret_cast<const float *>(image->data.data());
     std::vector<PointXYZ> points;
+    std::vector<PointXYZ> free_rays;
     try {
       points = depth_planar_to_flu(depth, image->width, image->height,
                                    image->step, model, max_range_m_);
+      free_rays = depth_planar_far_plane_to_flu(
+          depth, image->width, image->height, image->step, model, max_range_m_,
+          static_cast<std::size_t>(free_ray_pixel_stride_));
     } catch (const std::exception &error) {
       RCLCPP_WARN(get_logger(), "DepthPlanar conversion failed: %s", error.what());
       return;
@@ -126,20 +137,58 @@ class DepthPlanarToPointCloudNode final : public rclcpp::Node {
     }
     pointcloud_pub_->publish(std::move(output));
 
+    sensor_msgs::msg::PointCloud2 free_output;
+    free_output.header = image->header;
+    free_output.header.frame_id = output_frame_;
+    free_output.height = 1;
+    free_output.width = static_cast<uint32_t>(free_rays.size());
+    free_output.is_bigendian = false;
+    free_output.is_dense = false;
+    sensor_msgs::PointCloud2Modifier free_modifier(free_output);
+    free_modifier.setPointCloud2FieldsByString(1, "xyz");
+    free_modifier.resize(free_rays.size());
+    sensor_msgs::PointCloud2Iterator<float> free_x(free_output, "x");
+    sensor_msgs::PointCloud2Iterator<float> free_y(free_output, "y");
+    sensor_msgs::PointCloud2Iterator<float> free_z(free_output, "z");
+    for (const auto &point : free_rays) {
+      *free_x = point.x;
+      *free_y = point.y;
+      *free_z = point.z;
+      ++free_x;
+      ++free_y;
+      ++free_z;
+    }
+    free_ray_pub_->publish(std::move(free_output));
+
     const auto t_end = std::chrono::steady_clock::now();
     const double elapsed_ms = std::chrono::duration<double, std::milli>(
         t_end - t_start).count();
+    float free_y_min = std::numeric_limits<float>::quiet_NaN();
+    float free_y_max = std::numeric_limits<float>::quiet_NaN();
+    if (!free_rays.empty()) {
+      const auto bounds = std::minmax_element(
+          free_rays.begin(), free_rays.end(),
+          [](const PointXYZ &left, const PointXYZ &right) {
+            return left.y < right.y;
+          });
+      free_y_min = bounds.first->y;
+      free_y_max = bounds.second->y;
+    }
     RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "[FRGraph timing] DepthPlanar->PointCloud2: %.3f ms, input=%ux%u, points=%zu",
-        elapsed_ms, image->width, image->height, points.size());
+        "[FRGraph timing] DepthPlanar->PointCloud2: %.3f ms, input=%ux%u, "
+        "points=%zu free_rays=%zu free_y=[%.2f,%.2f]",
+        elapsed_ms, image->width, image->height, points.size(), free_rays.size(),
+        free_y_min, free_y_max);
   }
 
   std::string depth_topic_;
   std::string camera_info_topic_;
   std::string pointcloud_topic_;
+  std::string free_ray_topic_;
   std::string output_frame_;
   double max_range_m_ = 20.0;
+  int free_ray_pixel_stride_ = 4;
   double default_fx_ = 0.0;
   double default_fy_ = 0.0;
   double default_cx_ = 0.0;
@@ -152,6 +201,7 @@ class DepthPlanarToPointCloudNode final : public rclcpp::Node {
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr free_ray_pub_;
 };
 
 }  // namespace openseek_frgraph_ros2
