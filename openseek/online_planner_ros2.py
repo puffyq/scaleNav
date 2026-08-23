@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import math
 import os
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -108,6 +110,7 @@ class OnlinePlanner(Node):
         self.minimum_depth = 0.04
         self.segment_time = 2.0 * float(cfg["radio_range"]) / float(cfg["vel_max_train"])
         self.lock = threading.Lock()
+        self.flight_lock = threading.RLock()
         self.callback_group = ReentrantCallbackGroup()
         self.inference_lock = threading.Lock()
         self.odom: Odometry | None = None
@@ -116,6 +119,18 @@ class OnlinePlanner(Node):
         self.velocity_world = np.zeros(3, dtype=np.float32)
         self.previous_velocity_stamp: float | None = None
         self.acceleration_world = np.zeros(3, dtype=np.float32)
+        self.flight_samples = deque(maxlen=50000)
+        self.flight_path_length_m = 0.0
+        self.flight_duration_s = 0.0
+        self.flight_speed_integral = 0.0
+        self.flight_max_speed_mps = 0.0
+        self.flight_max_acceleration_mps2 = 0.0
+        self.flight_max_jerk_mps3 = 0.0
+        self.flight_jerk_squared_integral = 0.0
+        self.flight_last_acceleration = np.zeros(3, dtype=np.float64)
+        self.flight_have_acceleration = False
+        self.flight_last_report = 0.0
+        self.flight_visualization_max_points = 2000
         # Match YOPO-Simple's desire_pos / desire_vel / desire_acc state.
         self.desired_position_world: np.ndarray | None = None
         self.desired_velocity_world: np.ndarray | None = None
@@ -174,6 +189,7 @@ class OnlinePlanner(Node):
         self.visual_odom_pub = self.create_publisher(
             Odometry, "/openseek/odom", 20
         )
+        self.flight_pub = self.create_publisher(MarkerArray, "/openseek/flight", 1)
         goal_qos = QoSProfile(depth=1)
         goal_qos.reliability = ReliabilityPolicy.RELIABLE
         goal_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -212,6 +228,8 @@ class OnlinePlanner(Node):
             0.02, self.publish_control, callback_group=self.callback_group)
         self.status_timer = self.create_timer(
             2.0, self.report_status, callback_group=self.callback_group)
+        self.flight_timer = self.create_timer(
+            0.5, self.publish_flight_telemetry, callback_group=self.callback_group)
 
         self.warm_up()
         self.emit_event(
@@ -388,15 +406,22 @@ class OnlinePlanner(Node):
             ).astype(np.float32)
         else:
             velocity_world = velocity_input
-        self.velocity_world = velocity_world
-        if self.previous_velocity_world is not None and self.previous_velocity_stamp is not None:
-            dt = sample_stamp - self.previous_velocity_stamp
-            if 0.002 <= dt <= 0.2:
-                measured = (velocity_world - self.previous_velocity_world) / dt
-                measured = np.clip(measured, -6.0, 6.0)
-                self.acceleration_world = 0.85 * self.acceleration_world + 0.15 * measured
-        self.previous_velocity_world = velocity_world
-        self.previous_velocity_stamp = sample_stamp
+        with self.flight_lock:
+            self.velocity_world = velocity_world
+            if self.previous_velocity_world is not None and self.previous_velocity_stamp is not None:
+                dt = sample_stamp - self.previous_velocity_stamp
+                if 0.002 <= dt <= 0.2:
+                    measured = (velocity_world - self.previous_velocity_world) / dt
+                    measured = np.clip(measured, -6.0, 6.0)
+                    self.acceleration_world = 0.85 * self.acceleration_world + 0.15 * measured
+            self.previous_velocity_world = velocity_world
+            self.previous_velocity_stamp = sample_stamp
+            self.update_flight_statistics(
+                np.array([
+                    message.pose.pose.position.x,
+                    message.pose.pose.position.y,
+                    message.pose.pose.position.z,
+                ], dtype=np.float64), velocity_world.astype(np.float64), sample_stamp)
         with self.lock:
             self.odom = message
             if self.polynomials is None or not self.trajectory_valid_for_control:
@@ -441,6 +466,130 @@ class OnlinePlanner(Node):
                 "yaw_deg": yaw_deg,
             },
         )
+
+    def update_flight_statistics(
+        self, position: np.ndarray, velocity: np.ndarray, sample_time: float
+    ) -> None:
+        if not np.isfinite(position).all() or not np.isfinite(velocity).all():
+            return
+        with self.flight_lock:
+            if self.flight_samples:
+                previous_time, previous_position, previous_velocity = self.flight_samples[-1]
+                dt = sample_time - previous_time
+                if 1e-3 < dt < 2.0:
+                    self.flight_path_length_m += float(np.linalg.norm(position - previous_position))
+                    self.flight_duration_s += dt
+                    self.flight_speed_integral += float(np.linalg.norm(velocity)) * dt
+                    raw_acceleration = (velocity - previous_velocity) / dt
+                    acceleration = 0.2 * raw_acceleration + 0.8 * self.flight_last_acceleration
+                    if self.flight_have_acceleration:
+                        jerk = (acceleration - self.flight_last_acceleration) / dt
+                        jerk_norm = float(np.linalg.norm(jerk))
+                        self.flight_max_jerk_mps3 = max(self.flight_max_jerk_mps3, jerk_norm)
+                        self.flight_jerk_squared_integral += jerk_norm * jerk_norm * dt
+                    self.flight_last_acceleration = acceleration
+                    self.flight_have_acceleration = True
+                    self.flight_max_acceleration_mps2 = max(
+                        self.flight_max_acceleration_mps2, float(np.linalg.norm(acceleration)))
+                    self.flight_max_speed_mps = max(
+                        self.flight_max_speed_mps, float(np.linalg.norm(velocity)))
+            self.flight_samples.append((sample_time, position.copy(), velocity.copy()))
+
+    @staticmethod
+    def speed_color(speed: float, maximum: float) -> tuple[float, float, float]:
+        t = min(1.0, max(0.0, speed / max(0.1, maximum)))
+        anchors = ((0.05, 0.20, 0.95), (0.05, 0.85, 0.35),
+                   (1.00, 0.85, 0.05), (0.95, 0.05, 0.03))
+        scaled = t * 3.0
+        index = min(2, int(scaled))
+        local = scaled - index
+        return tuple(anchors[index][axis] * (1.0 - local) +
+                     anchors[index + 1][axis] * local for axis in range(3))
+
+    def publish_flight_telemetry(self) -> None:
+        with self.flight_lock:
+            samples = list(self.flight_samples)
+            latest_sample = samples[-1] if samples else None
+            current_velocity = self.velocity_world.copy()
+            current_odom = self.odom
+        if len(samples) > self.flight_visualization_max_points:
+            step = max(1, math.ceil(
+                (len(samples) - 1) / (self.flight_visualization_max_points - 1)))
+            samples = samples[::step]
+            if latest_sample is not None and samples[-1][0] != latest_sample[0]:
+                samples.append(latest_sample)
+
+        # Build and serialize outside flight_lock. Odom callbacks must keep
+        # running even when RViz/DDS is slow to accept a large MarkerArray.
+        marker_array = MarkerArray()
+        trajectory = Marker()
+        trajectory.header.frame_id = self.args.world_frame
+        trajectory.header.stamp = self.get_clock().now().to_msg()
+        trajectory.ns = "openseek_flight_trajectory"
+        trajectory.id = 0
+        trajectory.type = Marker.LINE_LIST
+        trajectory.action = Marker.ADD
+        trajectory.scale.x = 0.10
+        for previous, current in zip(samples[:-1], samples[1:]):
+            speed = 0.5 * (float(np.linalg.norm(previous[2])) + float(np.linalg.norm(current[2])))
+            r, g, b = self.speed_color(speed, self.args.trajectory_speed_color_max_mps)
+            trajectory.points.extend([self.point_msg(previous[1]), self.point_msg(current[1])])
+            color = self.color_msg(r, g, b)
+            trajectory.colors.extend([color, color])
+        marker_array.markers.append(trajectory)
+        vehicle = Marker()
+        vehicle.header = trajectory.header
+        vehicle.ns = "openseek_flight_vehicle"
+        vehicle.id = 1
+        vehicle.type = Marker.ARROW
+        vehicle.action = Marker.ADD
+        if current_odom is not None:
+            vehicle.pose = current_odom.pose.pose
+            r, g, b = self.speed_color(
+                float(np.linalg.norm(current_velocity)),
+                self.args.trajectory_speed_color_max_mps)
+            vehicle.color = self.color_msg(r, g, b)
+        vehicle.scale.x = 1.25
+        vehicle.scale.y = 0.30
+        vehicle.scale.z = 0.30
+        marker_array.markers.append(vehicle)
+        self.flight_pub.publish(marker_array)
+        now = time.monotonic()
+        if now - self.flight_last_report >= 5.0:
+            self.flight_last_report = now
+            self.write_flight_statistics(False)
+
+    @staticmethod
+    def point_msg(values: np.ndarray) -> Point:
+        point = Point()
+        point.x, point.y, point.z = (float(values[0]), float(values[1]), float(values[2]))
+        return point
+
+    @staticmethod
+    def color_msg(r: float, g: float, b: float):
+        from std_msgs.msg import ColorRGBA
+        color = ColorRGBA()
+        color.r, color.g, color.b, color.a = float(r), float(g), float(b), 1.0
+        return color
+
+    def write_flight_statistics(self, final: bool) -> None:
+        with self.flight_lock:
+            duration = self.flight_duration_s
+            average = self.flight_speed_integral / duration if duration > 1e-6 else 0.0
+            rms_jerk = math.sqrt(self.flight_jerk_squared_integral / duration) if duration > 1e-6 else 0.0
+            path = self.event_log_dir / "yopo_flight_statistics.csv"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            new_file = not path.exists() or path.stat().st_size == 0
+            with path.open("a", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                if new_file:
+                    writer.writerow(["wall_time", "source", "final", "path_m", "duration_s",
+                                     "current_speed_mps", "average_speed_mps", "max_speed_mps",
+                                     "max_acceleration_mps2", "jerk_rms_mps3", "max_jerk_mps3"])
+                writer.writerow([time.time(), "yopo", int(final), self.flight_path_length_m,
+                                 duration, float(np.linalg.norm(self.velocity_world)), average,
+                                 self.flight_max_speed_mps, self.flight_max_acceleration_mps2,
+                                 rms_jerk, self.flight_max_jerk_mps3])
 
     def on_goal(self, message: PoseStamped) -> None:
         source_frame = message.header.frame_id or self.args.world_frame
@@ -1337,6 +1486,10 @@ def parse_args() -> argparse.Namespace:
         help="Use a short deterministic trajectory below this waypoint distance.",
     )
     parser.add_argument("--event-log-dir")
+    parser.add_argument(
+        "--trajectory-speed-color-max-mps", type=float,
+        default=float(os.environ.get("EPIC_TRAJECTORY_SPEED_COLOR_MAX_MPS", "8.0")),
+    )
     parser.add_argument("--save-depth-png", action="store_true")
     parser.add_argument("--source-vertical-fov", type=float, default=73.7398)
     parser.add_argument("--model-vertical-fov", type=float, default=60.0)
@@ -1378,6 +1531,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("horizontal model FOV is invalid")
     if args.max_yaw_rate <= 0.0:
         parser.error("yaw rate must be positive")
+    if args.trajectory_speed_color_max_mps <= 0.0:
+        parser.error("trajectory speed color maximum must be positive")
     if args.reference_reset_position_error <= 0.0 or args.reference_reset_velocity_error <= 0.0:
         parser.error("reference reset thresholds must be positive")
     if args.minimum_trajectory_altitude < 0.0 or args.altitude_margin < 0.0:
@@ -1401,6 +1556,7 @@ def main() -> None:
         pass
     finally:
         executor.shutdown()
+        node.write_flight_statistics(True)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

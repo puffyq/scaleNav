@@ -53,3 +53,12 @@ third_party/**/.git/
 third_party/**/.git.openseek-nested/
 third_party/**/build/
 third_party/**/bin/
+
+# LaTeX build products; keep the manuscript sources and bibliographies.
+paper/**/*.pdf
+paper/**/*.aux
+paper/**/*.log
+paper/**/*.out
+paper/**/*.toc
+paper/**/*.zip
+paper/**/missfont.log

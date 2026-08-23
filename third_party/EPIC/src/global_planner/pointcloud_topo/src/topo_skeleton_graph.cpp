@@ -21,6 +21,12 @@ Eigen::Vector3i semanticWorldRegion(const Eigen::Vector3f &center,
     static_cast<int>(std::floor(center.z() / std::max(size_z, 1e-3))));
 }
 
+struct NodeMatchCandidate {
+  size_t old_index;
+  size_t new_index;
+  float dist_sq;
+};
+
 }  // namespace
 
 void debug_exit(const std::string &location) {
@@ -37,6 +43,8 @@ void TopoGraph::init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, Parallel
   parallel_bubble_astar_ = parallel_bubble_astar;
   odom_node_ = make_shared<TopoNode>();
   odom_node_->is_viewpoint_ = true;
+  odom_node_->role_ = TopoNodeRole::Odom;
+  odom_node_->geometry_state_ = TopoGeometryState::Verified;
   // 分区，初始化regions_arr_
   // 10m * 10m * 2m ==> 0.315 * 0.315 * 0.5
   nh = nh;
@@ -59,6 +67,8 @@ void TopoGraph::init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, Parallel
 
   nh.getParam("max_update_region_num", max_update_region_num_);
   nh.param("bubble_topo/semantic_node_match_distance", semantic_node_match_distance_, 2.5);
+  nh.param("bubble_topo/semantic_speculative_influence_m",
+           semantic_speculative_influence_m_, 5.0);
   nh.param("bubble_topo/clearance_cost_weight", clearance_cost_weight_, 2.0);
   nh.param("bubble_topo/clearance_target_m", clearance_target_m_, 1.2);
   update_idx_vec_.reserve(100);
@@ -91,6 +101,69 @@ void TopoGraph::init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, Parallel
   check_pts_octree_.setResolution(cube_discrete_size);
   check_pts_octree_.setInputCloud(check_pts_pc);
   check_pts_octree_.addPointsFromInputCloud();
+}
+
+void TopoGraph::copyPersistentNodesFrom(const TopoGraph &source) {
+  if (this == &source) return;
+  std::unordered_map<TopoNode::Ptr, TopoNode::Ptr> copied;
+  std::vector<TopoNode::Ptr> source_nodes;
+  {
+    std::lock_guard<std::mutex> lock(source.semantic_memory_mutex_);
+    for (const auto &entry : source.reg_map_idx2ptr_) {
+      if (!entry.second) continue;
+      for (const auto &node : entry.second->topo_nodes_) {
+        if (!node || node->is_viewpoint_ || node->role_ == TopoNodeRole::Odom ||
+            !copied.emplace(node, nullptr).second) continue;
+        auto clone = std::make_shared<TopoNode>();
+        clone->persistent_id_ = node->persistent_id_;
+        clone->role_ = node->role_;
+        clone->geometry_state_ = node->geometry_state_;
+        clone->center_ = node->center_;
+        clone->bubble_radius_ = node->bubble_radius_;
+        clone->semantic_score_ = node->semantic_score_;
+        clone->semantic_confidence_ = node->semantic_confidence_;
+        clone->semantic_observations_ = node->semantic_observations_;
+        clone->semantic_stamp_ns_ = node->semantic_stamp_ns_;
+        copied[node] = clone;
+        source_nodes.emplace_back(node);
+      }
+    }
+  }
+
+  for (const auto &source_node : source_nodes) {
+    const auto clone = copied.at(source_node);
+    Eigen::Vector3i region_idx;
+    getIndex(clone->center_, region_idx);
+    const auto region = getRegionNode(region_idx);
+    if (!region) continue;
+    region->topo_nodes_.insert(clone);
+  }
+
+  for (const auto &source_node : source_nodes) {
+    const auto from_it = copied.find(source_node);
+    if (from_it == copied.end()) continue;
+    const auto from = from_it->second;
+    for (const auto &source_neighbor : source_node->neighbors_) {
+      const auto to_it = copied.find(source_neighbor);
+      if (to_it == copied.end() ||
+          std::less<const TopoNode *>{}(to_it->second.get(), from.get())) continue;
+      const auto to = to_it->second;
+      from->neighbors_.insert(to);
+      to->neighbors_.insert(from);
+      const auto path_it = source_node->paths_.find(source_neighbor);
+      if (path_it != source_node->paths_.end()) {
+        from->paths_[to] = path_it->second;
+        auto reverse_path = path_it->second;
+        std::reverse(reverse_path.begin(), reverse_path.end());
+        to->paths_[from] = reverse_path;
+      }
+      const auto weight_it = source_node->weight_.find(source_neighbor);
+      if (weight_it != source_node->weight_.end()) {
+        from->weight_[to] = weight_it->second;
+        to->weight_[from] = weight_it->second;
+      }
+    }
+  }
 }
 
 BubbleNode::BubbleNode(double radius, Eigen::Vector3f center) {
@@ -127,6 +200,83 @@ float TopoGraph::edgeClearancePenalty(const TopoNode::Ptr &from,
     deficit * deficit;
 }
 
+std::vector<TopoNode::Ptr> TopoGraph::speculativeNodes() const {
+  std::vector<TopoNode::Ptr> nodes;
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second) continue;
+    for (const auto &node : entry.second->topo_nodes_) {
+      if (node && node->role_ == TopoNodeRole::Speculative)
+        nodes.emplace_back(node);
+    }
+  }
+  return nodes;
+}
+
+float TopoGraph::edgeSemanticRisk(const TopoNode::Ptr &from,
+                                  const TopoNode::Ptr &to) const {
+  if (!from || !to) return 0.0F;
+  float risk = std::clamp(0.5F *
+    (std::clamp(from->semantic_score_ * from->semantic_confidence_, 0.0F, 1.0F) +
+     std::clamp(to->semantic_score_ * to->semantic_confidence_, 0.0F, 1.0F)),
+    0.0F, 1.0F);
+
+  // A speculative node is an observation at the end of a semantic ray, not
+  // merely a destination with a cost. Project it onto the edge witness so
+  // ordinary edges near the predicted risk are penalized before A* reaches
+  // the candidate itself. This keeps the risk representation unified in
+  // TopoNode while providing the intended early turn-away behavior.
+  // Use EPIC's collision-free witness polyline, not the chord between the
+  // node centers.  A witness can bend around an obstacle; measuring only the
+  // chord can miss a semantic risk that lies directly on the executed edge.
+  std::vector<Eigen::Vector3f> witness;
+  const auto path_it = from->paths_.find(to);
+  if (path_it != from->paths_.end()) {
+    witness = path_it->second;
+  } else {
+    const auto reverse_it = to->paths_.find(from);
+    if (reverse_it != to->paths_.end()) {
+      witness = reverse_it->second;
+      std::reverse(witness.begin(), witness.end());
+    }
+  }
+  if (witness.size() < 2) witness = {from->center_, to->center_};
+  const float influence = static_cast<float>(std::max(
+    0.5, semantic_speculative_influence_m_));
+  const float sigma = std::max(0.5F, 0.5F * influence);
+  const float influence_sq = influence * influence;
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second) continue;
+    for (const auto &candidate : entry.second->topo_nodes_) {
+      if (!candidate || candidate->role_ != TopoNodeRole::Speculative) continue;
+      const float confidence_score = std::clamp(
+        candidate->semantic_score_ * candidate->semantic_confidence_, 0.0F, 1.0F);
+      if (confidence_score <= 1e-3F) continue;
+      float distance_sq = std::numeric_limits<float>::infinity();
+      for (std::size_t i = 1; i < witness.size(); ++i) {
+        const Eigen::Vector3f a = witness[i - 1];
+        const Eigen::Vector3f segment = witness[i] - a;
+        const float segment_sq = segment.squaredNorm();
+        const float t = segment_sq > 1e-6F ?
+          std::clamp((candidate->center_ - a).dot(segment) / segment_sq,
+                     0.0F, 1.0F) : 0.0F;
+        const Eigen::Vector3f closest = a + t * segment;
+        distance_sq = std::min(distance_sq,
+          (candidate->center_ - closest).squaredNorm());
+      }
+      if (distance_sq > influence_sq) continue;
+      const float field = confidence_score * std::exp(
+        -0.5F * distance_sq / (sigma * sigma));
+      risk = std::max(risk, field);
+    }
+  }
+  return std::clamp(risk, 0.0F, 1.0F);
+}
+
+float TopoGraph::semanticRiskForEdge(const TopoNode::Ptr &from,
+                                     const TopoNode::Ptr &to) const {
+  return edgeSemanticRisk(from, to);
+}
+
 void TopoGraph::updateNodeSemantic(const TopoNode::Ptr &node, float observation,
                                    float ema_alpha, std::int64_t stamp_ns) {
   if (!node || node->is_viewpoint_ || !std::isfinite(observation))
@@ -140,9 +290,10 @@ void TopoGraph::updateNodeSemantic(const TopoNode::Ptr &node, float observation,
     node->semantic_score_ = score;
     node->semantic_confidence_ = 1.0F;
   } else {
-    // Semantic memory is positive evidence: a later low-score background
-    // surface must not erase a previously observed target at this node.
-    node->semantic_score_ = std::max(node->semantic_score_, score);
+    // Semantic memory follows the current evidence. A stale maximum would
+    // make one accidental high-score association permanent and would keep
+    // painting/planning through a node long after the target left the view.
+    node->semantic_score_ = (1.0F - alpha) * node->semantic_score_ + alpha * score;
     node->semantic_confidence_ = std::min(
       1.0F, node->semantic_confidence_ + alpha * (1.0F - node->semantic_confidence_));
   }
@@ -235,10 +386,14 @@ RegionNode::RegionNode(Eigen::Vector3i region_idx) {
 }
 
 RegionNode::Ptr TopoGraph::getRegionNode(const Eigen::Vector3i &region_idx_) {
-  if (reg_map_idx2ptr_.find(region_idx_) == reg_map_idx2ptr_.end()) {
-    return nullptr;
-  }
-  return reg_map_idx2ptr_[region_idx_];
+  auto it = reg_map_idx2ptr_.find(region_idx_);
+  if (it != reg_map_idx2ptr_.end()) return it->second;
+  // The online map is rolling and the mission is unbounded.  Regions outside
+  // the initial goal-sized box are created on demand when new occupied/free
+  // voxels are observed instead of making the graph disappear at the box edge.
+  auto region = std::make_shared<RegionNode>(region_idx_);
+  reg_map_idx2ptr_[region_idx_] = region;
+  return region;
 }
 
 void TopoGraph::getIndex(const Eigen::Vector3f &point, Eigen::Vector3i &region_idx_) {
@@ -357,10 +512,14 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
       const float edge_length = (neighbor->center_ - cur_node->center_).norm();
       const float clearance_penalty = edgeClearancePenalty(
         cur_node, neighbor, edge_length);
-      const float semantic_risk = 0.5F *
-        (std::clamp(cur_node->semantic_score_ * cur_node->semantic_confidence_, 0.0F, 1.0F) +
-        std::clamp(neighbor->semantic_score_ * neighbor->semantic_confidence_, 0.0F, 1.0F));
-      const float semantic_penalty = semantic_cost_weight * edge_length * semantic_risk;
+      const float semantic_risk = edgeSemanticRisk(cur_node, neighbor);
+      // Smooth risk barrier: low semantic risk remains inexpensive, while a
+      // route through a highly confident block becomes rapidly unattractive
+      // without introducing a discontinuous hard threshold.
+      const float semantic_barrier = -std::log(std::max(
+        1e-3F, 1.0F - semantic_risk));
+      const float semantic_penalty =
+        semantic_cost_weight * edge_length * semantic_barrier;
       float tentative_g_score;
       if (kino) {
         if (last_path.find({cur_node, neighbor}) != last_path.end()) {
@@ -402,12 +561,21 @@ bool TopoGraph::goalDirectedSearch(
   semantic_cost_weight = std::max(0.0f, semantic_cost_weight);
 
   std::unordered_map<TopoNode::Ptr, float> g_score;
+  std::unordered_map<TopoNode::Ptr, float> f_score;
+  std::unordered_map<TopoNode::Ptr, float> geometry_score;
+  std::unordered_map<TopoNode::Ptr, float> risk_score;
   std::unordered_map<TopoNode::Ptr, TopoNode::Ptr> parent_map;
   std::unordered_set<TopoNode::Ptr> closed;
   using QueueEntry = std::pair<float, TopoNode::Ptr>;
   std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<QueueEntry>> open;
+  const auto heuristic = [&goal](const TopoNode::Ptr &node) {
+    return (node->center_ - goal).norm();
+  };
   g_score[start_node] = 0.0f;
-  open.push({0.0f, start_node});
+  f_score[start_node] = heuristic(start_node);
+  geometry_score[start_node] = 0.0f;
+  risk_score[start_node] = 0.0f;
+  open.push({heuristic(start_node), start_node});
 
   TopoNode::Ptr best_node;
   float best_objective = std::numeric_limits<float>::infinity();
@@ -428,16 +596,22 @@ bool TopoGraph::goalDirectedSearch(
     const auto [queued_cost, current] = open.top();
     open.pop();
     const auto current_cost_it = g_score.find(current);
-    if (current_cost_it == g_score.end() ||
-        queued_cost > current_cost_it->second + 1e-5f ||
+    const auto current_f_it = f_score.find(current);
+    if (current_cost_it == g_score.end() || current_f_it == f_score.end() ||
+        queued_cost > current_f_it->second + 1e-5f ||
         !closed.insert(current).second)
       continue;
 
-    // Viewpoints are transient query nodes in EPIC.  A rolling target must be
-    // one of the persistent TopoNodes produced from real BubbleNode clusters.
+    // Speculative nodes use the same A* role as every other persistent
+    // TopoNode. Semantic evidence only changes edge cost; it does not turn a
+    // node into a forbidden destination.
     if (current != start_node && !current->is_viewpoint_) {
       const float goal_distance = (current->center_ - goal).norm();
-      const float objective = goal_distance + path_cost_weight * current_cost_it->second;
+      // Weight geometric progress separately. Risk must not be discounted by
+      // path_cost_weight, otherwise a risky node that is slightly closer to
+      // the mission goal can still win the rolling endpoint selection.
+      const float objective = goal_distance +
+        path_cost_weight * geometry_score[current] + risk_score[current];
       const bool better = objective < best_objective - 1e-4f;
       const bool same_objective = std::abs(objective - best_objective) <= 1e-4f;
       const bool better_tie = same_objective &&
@@ -467,17 +641,26 @@ bool TopoGraph::goalDirectedSearch(
       const float edge_length = (neighbor->center_ - current->center_).norm();
       const float clearance_penalty = edgeClearancePenalty(
         current, neighbor, edge_length);
-      const float semantic_risk = 0.5F *
-        (std::clamp(current->semantic_score_ * current->semantic_confidence_, 0.0F, 1.0F) +
-        std::clamp(neighbor->semantic_score_ * neighbor->semantic_confidence_, 0.0F, 1.0F));
-      edge_cost += semantic_cost_weight * edge_length * semantic_risk;
-      edge_cost += clearance_penalty;
+      const float semantic_risk = edgeSemanticRisk(current, neighbor);
+      const float semantic_barrier = -std::log(std::max(
+        1e-3f, 1.0f - semantic_risk));
+      const float semantic_penalty =
+        semantic_cost_weight * edge_length * semantic_barrier;
+      const float risk_penalty = semantic_penalty + clearance_penalty;
+      const float geometry_edge_cost = edge_cost;
+      edge_cost += risk_penalty;
       const float tentative_cost = current_cost_it->second + edge_cost;
       const auto neighbor_cost_it = g_score.find(neighbor);
       if (neighbor_cost_it == g_score.end() || tentative_cost < neighbor_cost_it->second - 1e-5f) {
         g_score[neighbor] = tentative_cost;
+        f_score[neighbor] = tentative_cost + heuristic(neighbor);
+        geometry_score[neighbor] = geometry_score[current] + geometry_edge_cost;
+        risk_score[neighbor] = risk_score[current] + risk_penalty;
         parent_map[neighbor] = current;
-        open.push({tentative_cost, neighbor});
+        // This is a bounded rolling search.  Queue by f=g+h so the timeout
+        // reaches the forward mission corridor and speculative risk points;
+        // using g alone turns this into Dijkstra and starves far branches.
+        open.push({tentative_cost + heuristic(neighbor), neighbor});
       }
     }
   }
@@ -622,35 +805,98 @@ void BubbleUnionSet::unionSetCluster(const vector<BubbleNode::Ptr> &bubbles, vec
 }
 
 void TopoGraph::overlap(vector<TopoNode::Ptr> &set1, vector<TopoNode::Ptr> &set2, vector<TopoNode::Ptr> &overlap) {
-  HashMap map;
-  for (auto &node : set1) {
-    Eigen::Vector3i idx;
-    posToIndex(node->center_, idx);
-    map[idx] = node;
-  }
   overlap.clear();
-  for (auto &node : set2) {
-    Eigen::Vector3i idx;
-    posToIndex(node->center_, idx);
-    if (map.find(idx) != map.end()) {
-      overlap.push_back(node);
+  if (set1.empty() || set2.empty()) return;
+
+  // TopoNode centers are regenerated from Bubble clusters and can drift by
+  // more than 1 mm between updates. Exact voxel hashing would therefore mark
+  // stable nodes as "removed" and reinsert them every frame.
+  const float max_match_distance_m = static_cast<float>(
+    std::max(semantic_node_match_distance_, 1.0));
+  const float max_match_distance_sq = max_match_distance_m * max_match_distance_m;
+
+  std::vector<NodeMatchCandidate> candidates;
+  candidates.reserve(set1.size() * std::min<size_t>(set2.size(), 16));
+  for (size_t i = 0; i < set1.size(); ++i) {
+    const auto &old_node = set1[i];
+    if (!old_node) continue;
+    Eigen::Vector3i old_region;
+    getIndex(old_node->center_, old_region);
+    for (size_t j = 0; j < set2.size(); ++j) {
+      const auto &new_node = set2[j];
+      if (!new_node) continue;
+      Eigen::Vector3i new_region;
+      getIndex(new_node->center_, new_region);
+      if ((old_region - new_region).cwiseAbs().maxCoeff() > 1)
+        continue;
+      const float dist_sq = (old_node->center_ - new_node->center_).squaredNorm();
+      if (dist_sq <= max_match_distance_sq) {
+        candidates.push_back(NodeMatchCandidate{i, j, dist_sq});
+      }
     }
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const NodeMatchCandidate &lhs, const NodeMatchCandidate &rhs) {
+              return lhs.dist_sq < rhs.dist_sq;
+            });
+
+  std::vector<bool> old_used(set1.size(), false);
+  std::vector<bool> new_used(set2.size(), false);
+  for (const auto &candidate : candidates) {
+    if (old_used[candidate.old_index] || new_used[candidate.new_index])
+      continue;
+    old_used[candidate.old_index] = true;
+    new_used[candidate.new_index] = true;
+    overlap.push_back(set2[candidate.new_index]);
   }
 }
 
 void TopoGraph::setdiff(vector<TopoNode::Ptr> &set1, vector<TopoNode::Ptr> &set2, vector<TopoNode::Ptr> &set_1diff2) {
-  HashMap map;
-  for (auto &node : set2) {
-    Eigen::Vector3i idx;
-    posToIndex(node->center_, idx);
-    map[idx] = node;
-  }
   set_1diff2.clear();
-  for (auto &node : set1) {
-    Eigen::Vector3i idx;
-    posToIndex(node->center_, idx);
-    if (map.find(idx) == map.end())
-      set_1diff2.push_back(node);
+  if (set1.empty()) return;
+
+  // See overlap(): use a spatial tolerance instead of exact millimeter bins.
+  const float max_match_distance_m = static_cast<float>(
+    std::max(semantic_node_match_distance_, 1.0));
+  const float max_match_distance_sq = max_match_distance_m * max_match_distance_m;
+
+  std::vector<NodeMatchCandidate> candidates;
+  candidates.reserve(set1.size() * std::min<size_t>(set2.size(), 16));
+  for (size_t i = 0; i < set1.size(); ++i) {
+    const auto &old_node = set1[i];
+    if (!old_node) continue;
+    Eigen::Vector3i old_region;
+    getIndex(old_node->center_, old_region);
+    for (size_t j = 0; j < set2.size(); ++j) {
+      const auto &new_node = set2[j];
+      if (!new_node) continue;
+      Eigen::Vector3i new_region;
+      getIndex(new_node->center_, new_region);
+      if ((old_region - new_region).cwiseAbs().maxCoeff() > 1)
+        continue;
+      const float dist_sq = (old_node->center_ - new_node->center_).squaredNorm();
+      if (dist_sq <= max_match_distance_sq) {
+        candidates.push_back(NodeMatchCandidate{i, j, dist_sq});
+      }
+    }
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const NodeMatchCandidate &lhs, const NodeMatchCandidate &rhs) {
+              return lhs.dist_sq < rhs.dist_sq;
+            });
+
+  std::vector<bool> old_used(set1.size(), false);
+  std::vector<bool> new_used(set2.size(), false);
+  for (const auto &candidate : candidates) {
+    if (old_used[candidate.old_index] || new_used[candidate.new_index])
+      continue;
+    old_used[candidate.old_index] = true;
+    new_used[candidate.new_index] = true;
+  }
+  for (size_t i = 0; i < set1.size(); ++i) {
+    if (!old_used[i] && set1[i]) {
+      set_1diff2.push_back(set1[i]);
+    }
   }
 }
 
@@ -989,6 +1235,142 @@ void TopoGraph::insertNodes(vector<TopoNode::Ptr> &nodes, bool only_raycast) {
   }
 }
 
+size_t TopoGraph::insertSpeculativeNodes(
+    const vector<Eigen::Vector3f> &centers, const vector<float> &semantic_scores,
+    float bubble_radius, const Eigen::Vector3f &odom_pos,
+    std::int64_t stamp_ns) {
+  const auto is_stale = [stamp_ns](const TopoNode::Ptr &node) {
+    if (!node || node->semantic_stamp_ns_ <= 0 || stamp_ns <= 0) return true;
+    // Keep a short prediction horizon across one missed/low-confidence frame.
+    // This prevents a 2 Hz semantic stream from deleting the only far-field
+    // branch before the next inference result arrives.
+    return std::llabs(stamp_ns - node->semantic_stamp_ns_) > 1500LL * 1000000LL;
+  };
+  if (centers.empty() || !lidar_map_interface_ || !parallel_bubble_astar_)
+  {
+    if (centers.empty()) {
+      vector<TopoNode::Ptr> stale_speculative;
+      for (const auto &entry : reg_map_idx2ptr_) {
+        if (!entry.second) continue;
+        for (const auto &node : entry.second->topo_nodes_) {
+          if (node && node->role_ == TopoNodeRole::Speculative && is_stale(node)) {
+            stale_speculative.emplace_back(node);
+          }
+        }
+      }
+      for (auto &node : stale_speculative) removeNode(node);
+    }
+    return 0;
+  }
+  const float min_separation = std::max(0.75F, bubble_radius);
+  if (odom_node_) odom_node_->center_ = odom_pos;
+  vector<TopoNode::Ptr> created;
+  created.reserve(centers.size());
+  std::unordered_set<TopoNode::Ptr> updated_speculative;
+  size_t influenced_existing = 0;
+  for (size_t center_index = 0; center_index < centers.size(); ++center_index) {
+    const auto &center = centers[center_index];
+    if (!center.allFinite() || !lidar_map_interface_->IsInBox(center)) continue;
+    const float score = std::clamp(
+      center_index < semantic_scores.size() ? semantic_scores[center_index] : 1.0F,
+      0.0F, 1.0F);
+    TopoNode::Ptr match;
+    float match_distance = min_separation;
+    for (const auto &entry : reg_map_idx2ptr_) {
+      if (!entry.second) continue;
+      for (const auto &node : entry.second->topo_nodes_) {
+        if (!node || node->is_viewpoint_) continue;
+        const float distance = (node->center_ - center).norm();
+        if (distance >= match_distance) continue;
+        if (node->role_ == TopoNodeRole::Speculative ||
+            node->geometry_state_ == TopoGeometryState::Verified) {
+          match = node;
+          match_distance = distance;
+        }
+      }
+    }
+    if (match) {
+      updateNodeSemantic(match, score, 1.0F, stamp_ns);
+      if (match->role_ == TopoNodeRole::Speculative) {
+        updated_speculative.insert(match);
+      } else {
+        ++influenced_existing;
+      }
+      continue;
+    }
+    auto node = std::make_shared<TopoNode>();
+    node->center_ = center;
+    node->bubble_radius_ = std::max(0.45F, bubble_radius);
+    node->role_ = TopoNodeRole::Speculative;
+    node->geometry_state_ = TopoGeometryState::Unknown;
+    updateNodeSemantic(node, score, 1.0F, stamp_ns);
+    created.emplace_back(std::move(node));
+  }
+  // Keep the speculative layer bounded to the newest semantic frame. Nodes
+  // not observed in this frame are stale predictions, not geometric memory.
+  vector<TopoNode::Ptr> stale_speculative;
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second) continue;
+    for (const auto &node : entry.second->topo_nodes_) {
+      if (node && node->role_ == TopoNodeRole::Speculative &&
+          is_stale(node) &&
+          !updated_speculative.count(node)) {
+        stale_speculative.emplace_back(node);
+      }
+    }
+  }
+  for (auto &node : stale_speculative) removeNode(node);
+  if (created.empty()) return influenced_existing + updated_speculative.size();
+
+  // Attach each semantic candidate through the same TopoGraph insertion API
+  // used by ordinary nodes. Use EPIC's one-shot raycast mode for the witness;
+  // this is the cheap path used by insertNodes(..., true), and avoids a
+  // second full A* search or a separate semantic connection mechanism.
+  size_t accepted = 0;
+  for (auto &node : created) {
+    vector<TopoNode::Ptr> nearby;
+    if (odom_node_ && odom_node_ != node) {
+      nearby.emplace_back(odom_node_);
+    }
+    for (const auto &entry : reg_map_idx2ptr_) {
+      if (!entry.second) continue;
+      for (const auto &candidate : entry.second->topo_nodes_) {
+        if (!candidate || candidate == node || candidate->is_viewpoint_) continue;
+        const float distance = (candidate->center_ - node->center_).norm();
+        if (distance <= std::max(4.0F, 6.0F * node->bubble_radius_))
+          nearby.emplace_back(candidate);
+      }
+    }
+    std::sort(nearby.begin(), nearby.end(),
+      [&node](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
+        return (left->center_ - node->center_).squaredNorm() <
+               (right->center_ - node->center_).squaredNorm();
+    });
+    const size_t limit = std::min<size_t>(nearby.size(), 4);
+    vector<TopoNode::Ptr> neighbors;
+    vector<vector<Eigen::Vector3f>> paths;
+    neighbors.reserve(limit);
+    paths.reserve(limit);
+    for (size_t i = 0; i < limit; ++i) {
+      const auto &neighbor = nearby[i];
+      const Eigen::Vector3f delta = neighbor->center_ - node->center_;
+      const float length = delta.norm();
+      if (!std::isfinite(length) || length <= 1e-3F) continue;
+      vector<Eigen::Vector3f> path;
+      const int result = parallel_bubble_astar_->search(
+        node->center_, neighbor->center_, path, insert_node_timeout,
+        false, true);
+      if (result == ParallelBubbleAstar::REACH_END && path.size() >= 2) {
+        neighbors.push_back(neighbor);
+        paths.push_back(std::move(path));
+      }
+    }
+    insertNode(node, neighbors, paths);
+    ++accepted;
+  }
+  return accepted + influenced_existing;
+}
+
 void TopoGraph::getRegionsToUpdate() {
   update_idx_vec_.clear();
   viewpoints_update_region_arr_.clear();
@@ -1001,12 +1383,15 @@ void TopoGraph::getRegionsToUpdate() {
       point.z() = planar_z_;
     return point;
   };
-  const Eigen::Vector3f graph_pose = graphPoint(lidar_map_interface_->ld_->lidar_pose_);
-  for (auto &pt : lidar_map_interface_->ld_->lidar_cloud_.points) {
+  const Eigen::Vector3f lidar_pose = lidar_map_interface_->poseSnapshot();
+  const auto latest_cloud = lidar_map_interface_->latestCloudSnapshot();
+  const float max_ray_length = static_cast<float>(lidar_map_interface_->lp_->max_ray_length_);
+  const Eigen::Vector3f graph_pose = graphPoint(lidar_pose);
+  for (const auto &pt : latest_cloud.points) {
     Eigen::Vector3f pt3d = pt.getArray3fMap();
-    if ((pt3d - lidar_map_interface_->ld_->lidar_pose_).norm() > lidar_map_interface_->lp_->max_ray_length_)
-      pt3d = lidar_map_interface_->ld_->lidar_pose_ + lidar_map_interface_->lp_->max_ray_length_ * (pt3d - lidar_map_interface_->ld_->lidar_pose_) /
-                                                   (pt3d - lidar_map_interface_->ld_->lidar_pose_).norm();
+    if ((pt3d - lidar_pose).norm() > max_ray_length)
+      pt3d = lidar_pose + max_ray_length * (pt3d - lidar_pose) /
+                                                   (pt3d - lidar_pose).norm();
     pt3d = graphPoint(pt3d);
     Eigen::Vector3i region_idx;
     getIndex(pt3d, region_idx);
@@ -1017,30 +1402,28 @@ void TopoGraph::getRegionsToUpdate() {
     }
   }
 
-  // The lidar map retains ray-carved voxels as explicit free-space evidence.
-  // Feed those voxels into the same region update set as obstacle returns so
-  // side corridors can produce real BubbleNodes instead of remaining absent.
+  selected_occupied_regions_ = occupied_region_set.size();
+  // Free-ray evidence is part of EPIC's topology input, not visualization
+  // metadata. It is what lets Bubble generation populate clear side
+  // corridors where the depth frame has no occupied return. Keep it in the
+  // same bounded region set as occupied returns.
   const auto free_cloud = lidar_map_interface_->freeSpaceSnapshot();
   const float free_layer_tolerance = planar_graph_ ?
     std::max(0.5F * lidar_map_interface_->voxelSize(), 0.05F) :
     std::numeric_limits<float>::infinity();
   for (const auto &point : free_cloud.points) {
-    if (planar_graph_ &&
-        std::abs(point.z - planar_z_) > free_layer_tolerance) {
+    if (planar_graph_ && std::abs(point.z - planar_z_) > free_layer_tolerance)
       continue;
-    }
-    Eigen::Vector3f free_point(point.x, point.y, point.z);
-    free_point = graphPoint(free_point);
+    const Eigen::Vector3f free_point = graphPoint(
+      Eigen::Vector3f(point.x, point.y, point.z));
     Eigen::Vector3i region_idx;
     getIndex(free_point, region_idx);
-    auto region = getRegionNode(region_idx);
+    const auto region = getRegionNode(region_idx);
     if (region != nullptr) {
       region_set.insert(region);
       free_region_set.insert(region);
     }
   }
-
-  selected_occupied_regions_ = occupied_region_set.size();
   selected_free_regions_ = free_region_set.size();
   for (auto &region : region_set) {
     toponodes_update_region_arr_.push_back(region);
@@ -1051,20 +1434,18 @@ void TopoGraph::getRegionsToUpdate() {
     // side corridors.
     unordered_set<RegionNode::Ptr> region2update(arr.begin(), arr.end());
     arr = vector<RegionNode::Ptr>(region2update.begin(), region2update.end());
-    std::sort(arr.begin(), arr.end(), [this, &graphPoint](const RegionNode::Ptr &region1, const RegionNode::Ptr &region2) {
+    std::sort(arr.begin(), arr.end(), [this, &graphPoint, &lidar_pose](const RegionNode::Ptr &region1, const RegionNode::Ptr &region2) {
       Eigen::Vector3f lb1, hb1, lb2, hb2;
       index2boundary(region1->region_idx_, lb1, hb1);
       index2boundary(region2->region_idx_, lb2, hb2);
-      Eigen::Vector3f diff1 = ((hb1 + lb1) * 0.5 - graphPoint(lidar_map_interface_->ld_->lidar_pose_));
-      Eigen::Vector3f diff2 = ((hb2 + lb2) * 0.5 - graphPoint(lidar_map_interface_->ld_->lidar_pose_));
+      Eigen::Vector3f diff1 = ((hb1 + lb1) * 0.5 - graphPoint(lidar_pose));
+      Eigen::Vector3f diff2 = ((hb2 + lb2) * 0.5 - graphPoint(lidar_pose));
       double dist1 = diff1.norm();
       double dist2 = diff2.norm();
       return dist1 < dist2;
     });
     arr.resize(std::min((int)arr.size(), max_update_region_num_));
   };
-  // shorten_by_distance_insert_update_arr(toponodes_update_region_arr_);
-
   // 向四周发射射线，超过当前单位球大概一格子的范围
   double step_size = min(init_region_size_x_, init_region_size_y_);
   step_size = min(step_size, init_region_size_z_);
@@ -1111,7 +1492,7 @@ void TopoGraph::updateSkeleton() {
   const auto prepare_start = Clock::now();
   for (auto &region : toponodes_update_region_arr_) {
     for (auto &node : region->topo_nodes_) {
-      if (!node->is_viewpoint_)
+      if (!node->is_viewpoint_ && node->role_ != TopoNodeRole::Speculative)
         old_nodes.push_back(node);
     }
   }
@@ -1192,6 +1573,43 @@ void TopoGraph::updateSkeleton() {
   last_update_timing_.planar_bubbles = static_cast<size_t>(generated_planar_bubbles);
   last_update_timing_.new_nodes = static_cast<size_t>(generated_nodes);
 
+  // A newly observed Bubble is authoritative geometry. If it lands on a
+  // speculative candidate, promote the candidate instead of keeping two
+  // vertices at the same location. This preserves semantic identity while
+  // changing only the geometry state.
+  vector<TopoNode::Ptr> speculative_promotions;
+  for (const auto &measured : new_nodes) {
+    if (!measured) continue;
+    TopoNode::Ptr match;
+    float best_distance = std::numeric_limits<float>::infinity();
+    const Eigen::Vector3i region_idx = [&]() {
+      Eigen::Vector3i index;
+      getIndex(measured->center_, index);
+      return index;
+    }();
+    const auto region = getRegionNode(region_idx);
+    if (region) {
+      for (const auto &candidate : region->topo_nodes_) {
+        if (!candidate || candidate->role_ != TopoNodeRole::Speculative) continue;
+        const float distance = (candidate->center_ - measured->center_).norm();
+        const float limit = std::max(1.0F,
+          measured->bubble_radius_ + candidate->bubble_radius_);
+        if (distance <= limit && distance < best_distance) {
+          best_distance = distance;
+          match = candidate;
+        }
+      }
+    }
+    if (!match) continue;
+    measured->persistent_id_ = match->persistent_id_;
+    measured->semantic_score_ = match->semantic_score_;
+    measured->semantic_confidence_ = match->semantic_confidence_;
+    measured->semantic_observations_ = match->semantic_observations_;
+    measured->semantic_stamp_ns_ = match->semantic_stamp_ns_;
+    speculative_promotions.emplace_back(match);
+  }
+  for (auto &speculative : speculative_promotions) removeNode(speculative);
+
   const auto diff_start = Clock::now();
   overlap(new_nodes, old_nodes, nodes_remained);
   setdiff(old_nodes, new_nodes, nodes2remove);
@@ -1252,9 +1670,14 @@ void TopoGraph::updateOdomNode(Eigen::Vector3f &odom_pos, float &yaw) {
 
   if (planar_graph_)
     odom_pos.z() = planar_z_;
-  // The odometry query node is transient. Update its pose and remove the
-  // previous query edges before attempting the new connections. Returning
-  // early on a failed local connection must not leave a stale pose/edge set.
+  // The odometry query node is transient, but its previous edges are still
+  // better than an empty graph if the local reconnect fails. Keep the old
+  // neighborhood until we have at least one valid replacement edge.
+  const auto old_neighbors = odom_node_->neighbors_;
+  const auto old_paths = odom_node_->paths_;
+  const auto old_weights = odom_node_->weight_;
+  const auto old_unreachable = odom_node_->unreachable_nbrs_;
+
   odom_node_->center_ = odom_pos;
   odom_node_->yaw_ = yaw;
   for (auto &nei : odom_node_->neighbors_) {
@@ -1312,8 +1735,27 @@ void TopoGraph::updateOdomNode(Eigen::Vector3f &odom_pos, float &yaw) {
       edge2insert_mtx.unlock();
     }
   }
-  if (edge2insert.empty())
+  if (edge2insert.empty()) {
+    odom_node_->neighbors_ = old_neighbors;
+    odom_node_->paths_ = old_paths;
+    odom_node_->weight_ = old_weights;
+    odom_node_->unreachable_nbrs_ = old_unreachable;
+    for (const auto &nei : old_neighbors) {
+      if (!nei) continue;
+      nei->neighbors_.insert(odom_node_);
+      const auto path_it = old_paths.find(nei);
+      if (path_it != old_paths.end()) {
+        auto reverse_path = path_it->second;
+        std::reverse(reverse_path.begin(), reverse_path.end());
+        nei->paths_[odom_node_] = reverse_path;
+      }
+      const auto weight_it = old_weights.find(nei);
+      nei->weight_[odom_node_] = weight_it != old_weights.end() ?
+        weight_it->second : 0.0F;
+      nei->unreachable_nbrs_.erase(odom_node_);
+    }
     return;
+  }
   for (auto &edge : edge2insert) {
     odom_node_->neighbors_.insert(edge.first.second);
     odom_node_->paths_.insert({edge.first.second, edge.second});
@@ -1321,6 +1763,11 @@ void TopoGraph::updateOdomNode(Eigen::Vector3f &odom_pos, float &yaw) {
     // parallel_bubble_astar_->calculatePathCost(edge.second, cost);
     // odom_node_->weight_[edge.first.second] = cost;
     odom_node_->weight_[edge.first.second] = 0;
+    edge.first.second->neighbors_.insert(odom_node_);
+    auto reverse_path = edge.second;
+    std::reverse(reverse_path.begin(), reverse_path.end());
+    edge.first.second->paths_[odom_node_] = reverse_path;
+    edge.first.second->weight_[odom_node_] = 0;
     // auto nbr = edge.first.second;
     // nbr->neighbors_.insert(odom_node_);
     // nbr->weight_[odom_node_] = cost;

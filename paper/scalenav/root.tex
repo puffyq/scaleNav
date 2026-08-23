@@ -1,0 +1,532 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% ScaleNav — ICRA-style first draft (ieeeconf template)
+% Compile: pdflatex root.tex (requires ieeeconf.cls in this directory)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[letterpaper, 10 pt, conference]{ieeeconf}
+
+\IEEEoverridecommandlockouts
+\overrideIEEEmargins
+
+\usepackage{graphics}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+
+\title{\LARGE \bf
+ScaleNav: Memory-Conditioned Neural Motion Planning for\\ Cross-Scale UAV Navigation with Open-Vocabulary Guidance
+}
+
+\author{First Author$^{1}$ and Second Author$^{2}$% <-this % stops a space
+\thanks{*This work was not supported by any organization.}% <-this % stops a space
+\thanks{$^{1}$First Author is with the Affiliation
+        {\tt\small first.author@example.com}}%
+\thanks{$^{2}$Second Author is with the Affiliation
+        {\tt\small second.author@example.com}}%
+}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+\pagestyle{empty}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{abstract}
+
+Learning-based local planners fly fast and react quickly, but they are memoryless.
+Their decision horizon is set by the depth range, not by the environment.
+A building that must be circumnavigated is structurally out of reach for a planner that sees ten meters ahead.
+We present ScaleNav, a two-layer system that gives a memoryless neural planner a spatial memory.
+A slow layer maintains a persistent free-space graph in the world frame.
+Collision-free spheres cover the observed free space; edges store witness paths.
+The graph is validated every frame against the current depth image.
+A goal-weighted rolling A* selects a route on this graph.
+The route is compressed into a sphere-chain corridor and rendered as a depth-aligned mask channel.
+A corridor-conditioned YOPO network consumes this channel together with the current depth and a task-progress vector.
+Scale adaptation is carried entirely by this input.
+The network structure, the weights, and all hyperparameters are shared across forests and city blocks.
+Open-vocabulary semantics from a frozen vision-language model modulate only the graph edge costs.
+The fast policy is never trained on any category.
+Safety does not depend on semantics.
+Experiments in simulation evaluate cross-scale flight, memory bandwidth, depth degradation, and open-vocabulary rerouting.
+
+\end{abstract}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{INTRODUCTION}
+
+Consider a quadrotor flying from point A to point B without a prior map.
+It carries an RGB-D camera and onboard compute.
+It must fly fast and continuously.
+The environment spans two scales.
+Forests contain gaps of one to three meters.
+Walls and buildings impose detour topologies of tens of meters.
+
+Learning-based local planners such as YOPO \cite{yopo} map a single depth frame directly to motion primitives.
+They are fast and robust to dynamics.
+But they have three structural limits.
+First, the decision horizon equals the sensor horizon.
+A turn around a building comes too late.
+This is not a tuning issue; it is structural.
+Second, the policy is memoryless.
+The width of a building seen one frame ago is lost immediately.
+At a fork with limited visibility, the policy can only guess.
+Third, the policy has no notion of task progress.
+The goal is clipped to the field of view.
+The network cannot distinguish a mid-route point from the final goal, and it does not slow down near the goal.
+
+Classical hierarchical methods build a map and run a global planner.
+They handle large obstacles, but at a cost.
+Mapping and replanning interrupts continuous flight.
+Hybrid representations that treat large and small obstacles differently need a fragile scale threshold.
+We avoid both.
+
+Our design follows three principles.
+First, scale adaptivity is carried entirely by the input; the model structure and parameters never change.
+Second, all scenes share one set of hyperparameters.
+Third, an executable action exists at all times; the degraded behavior is slowing down and looking while moving, not hovering.
+
+ScaleNav realizes these principles with a fast--slow architecture (Fig.~\ref{fig:arch}).
+The slow layer keeps a persistent free-space graph in the world frame, built on the sphere-cover representation of EPIC \cite{epic}.
+It adds visible-collision gating, speculative nodes, and goal-weighted search.
+The fast layer is a corridor-conditioned YOPO network.
+The interface between the two is a sphere-chain corridor rendered as a depth-aligned mask channel.
+Open-vocabulary queries from a frozen PEARL model \cite{pearl} enter only as edge costs on the graph.
+
+Our contributions are:
+\begin{itemize}
+\item \textbf{Memory as a spatial region.} We inject memory into a memoryless neural planner as a depth-aligned corridor channel. The network stays stateless. Training remains single-frame. No RNN and no frame stacking are needed.
+\item \textbf{Depth-driven visible-collision gating.} Edges are blocked the moment the current depth explicitly observes a collision. Unobserved space stays optimistic. No extra unknown state is maintained.
+\item \textbf{Decoupled open-vocabulary semantics.} Semantics modulate only graph edge costs. The policy is trained on pure geometry. A new query word at test time reroutes globally with zero retraining.
+\item \textbf{Task-progress conditioning.} Two scalars, straight-line distance to goal and remaining corridor length, let one policy fly fast mid-route and slow down near the goal.
+\end{itemize}
+
+\begin{figure}[thpb]
+   \centering
+   \framebox{\parbox{3in}{System architecture: RGB-D and text query enter the slow layer; the persistent free-space graph produces a sphere-chain corridor; the corridor mask, depth, and obs vector feed the corridor-conditioned YOPO.}}
+   %\includegraphics[width=\linewidth]{../../docs/architecture.png}
+   \caption{ScaleNav architecture. The slow layer maintains a persistent free-space graph and renders the selected route as a corridor mask. The fast layer maps depth, corridor, and task progress to motion primitives. Semantics enter only as graph edge costs.}
+   \label{fig:arch}
+\end{figure}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{RELATED WORK}
+
+\subsection{Learning-Based Local Planners}
+
+YOPO \cite{yopo} maps depth, body state, and a goal vector to primitive offsets and scores, trained with guidance learning.
+Loquercio et al. \cite{loquercio} fly high-speed in the wild with a privileged expert and DAgger.
+Depthnav \cite{depthnav} uses depth-only reinforcement learning.
+These policies are reactive and memoryless.
+Their goal input is a single vector, clipped to the sensor range.
+ScaleNav keeps this fast reactive core and adds memory through the input, not through the network state.
+
+\subsection{Memory, Mapping, and Global Planning}
+
+NanoMap \cite{nanomap} keeps a short window of raw point clouds for proximity queries without fusing a global map.
+We adopt the same stance: a short raw-point cache serves radius estimation and per-frame collision checks; no global fused map, no voxel occupancy, no ESDF is maintained.
+FAR Planner \cite{far} and SPTM \cite{sptm} keep persistent route memory; we borrow the persistence principle.
+Bubble Planner \cite{bubble} plans in receding corridors; we adopt its receding-horizon corridor cut.
+RAPPIDS \cite{rappids} queries collisions directly in the depth image; our gating uses the same projection test.
+EPIC \cite{epic} covers free space with spheres and maintains the graph incrementally for exploration.
+We reuse its representation and maintenance, and replace frontier logic with goal-weighted search and speculative nodes.
+SCOPE \cite{scope}, a concurrent work, uses a voxel belief map with lidar and trajectory optimization.
+ScaleNav instead uses a persistent free-space graph, depth-gated validation, and a learned fast layer, and keeps no strict unknown state.
+
+\subsection{Open-Vocabulary Semantics in Navigation}
+
+CLIP \cite{clip} established image-level open-vocabulary recognition.
+PEARL \cite{pearl} produces geometry-aligned open-vocabulary heatmaps from text queries.
+VLFM \cite{vlfm} builds value maps from VLM similarity for frontier selection in indoor ObjectNav.
+These systems train or tune the semantic behavior into a policy or a value map.
+ScaleNav places semantics on the planner, not in the network.
+Open vocabulary becomes a property by construction.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{SYSTEM OVERVIEW}
+
+\subsection{Problem Statement}
+
+The quadrotor flies from $\mathbf{p}_{\text{start}}$ to $\mathbf{p}_{\text{goal}}$ in a static, unknown environment.
+Observations at time $t$ are a depth image $D_t \in \mathbb{R}^{96\times160}$, an RGB image $I_t$, and the body state $\mathbf{x}_t$.
+The policy must produce dynamically feasible trajectories online.
+All scenes use one set of hyperparameters.
+
+\subsection{Architecture}
+
+Fig.~\ref{fig:arch} shows the data flow.
+The slow layer runs at graph-update rate, outside the control loop.
+It maintains a persistent free-space graph (Sec.~\ref{sec:graph}).
+A rolling goal-weighted A* selects a route.
+The near segment of the route is exposed as a sphere-chain corridor (Sec.~\ref{sec:corridor}).
+The fast layer runs in the control loop.
+It fuses three inputs: the current depth, the rendered corridor mask, and an observation vector with task progress.
+It outputs offsets and scores for 15 motion primitives (Sec.~\ref{sec:policy}).
+A frozen open-vocabulary model modulates graph edge costs (Sec.~\ref{sec:semantics}).
+
+\subsection{Where Memory Lives}
+
+The network is stateless.
+Memory lives in the world-frame graph.
+Each frame, memory is compressed into a channel aligned with the depth image.
+Training stays single-frame; the simulator pipeline is unchanged.
+This turns the ablation axis into a \emph{memory bandwidth} question: goal vector, waypoint, or corridor region, fed to the same network through the same pipeline.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{PERSISTENT FREE-SPACE GRAPH}
+\label{sec:graph}
+
+\subsection{Graph as Memory}
+
+We build no global point cloud, no voxel occupancy, and no ESDF.
+A short raw-point cache in the style of NanoMap \cite{nanomap} serves radius estimation and current-frame collision queries.
+Unseen space stays optimistic and traversable.
+Only an explicit collision in the current depth blocks a node or an edge.
+
+A node is $v_i = (\mathbf{c}_i, r_i, q_i)$: sphere center, radius, and confidence.
+The radius is the distance to the nearest obstacle, estimated from a KD-tree over the back-projected points of the current depth frame.
+It is computed once per new node.
+
+An edge is $e_{ij} = (\pi_{ij}, L_{ij}, d_{\text{safe}}, q_{ij}, s_{ij})$: a witness path found by A* on the local point set at generation time, its length, the minimum clearance along it, a confidence, and a state.
+When an edge is reused, $\pi_{ij}$ is re-validated against the current frame.
+A failed validation downgrades or disconnects the edge.
+
+Graph maintenance follows the incremental scheme of EPIC \cite{epic}.
+A spatial hash manages candidate regions.
+A union--find clusters spheres into representative vertices.
+Each frame computes the difference $V_{\text{pre}}/V_{\text{new}}$ and touches only the changed local part.
+The graph persists in the world frame and accumulates across frames.
+
+No artificial goal node is created.
+The goal acts only as a search direction.
+This avoids repeatedly deleting and rebuilding an artificial terminal, which would flip the homotopy of left- versus right-hand detours.
+
+\subsection{Visible-Collision Gating}
+
+Each new depth frame triggers a projection check on the active route and on candidate edges.
+Sampled points along $\pi_{ij}$ are projected into the depth image and compared with the pixel depth.
+An explicit collision blocks the edge.
+Unobserved space creates no unknown state; the edge remains an optimistic candidate.
+This gating is the only mechanism that couples the graph to the sensor, and it is conservative in exactly one direction: seen obstacles block, unseen space does not.
+
+\subsection{Goal-Weighted Rolling Search}
+
+Search runs on the real graph reachable from the current odometry node.
+For each reachable node $v$ we compute
+\begin{equation}
+J(v) = \lVert \mathbf{c}_v - \mathbf{p}_{\text{goal}} \rVert + \alpha\, g(v),
+\end{equation}
+where $g(v)$ is the accumulated edge cost on the graph.
+The reachable node with the smallest $J$ becomes the rolling terminal, and the topological path is recovered from the search parents.
+The edge cost is
+\begin{equation}
+C(e) = w_{\text{len}} L_{ij} + w_{\text{risk}} \, d_{\text{safe}}^{-1} + \lambda\, C_{\text{sem}}(e),
+\end{equation}
+with $C_{\text{sem}}$ from Sec.~\ref{sec:semantics}.
+Blocked edges are removed; unobserved regions are not penalized.
+As the graph expands, the rolling terminal advances toward the goal naturally.
+
+The near segment of the path yields the waypoint.
+When the real-graph terminal enters the local connection range of the final goal, a bubble A* validates the last segment, and the exact goal is appended to the witness path as a terminal coordinate.
+It is never a persistent graph node.
+
+\subsection{Receding-Horizon Route Identity}
+
+Node objects are replaced by the incremental update, so pointers cannot carry route identity across cycles.
+We store the previous witness path in world coordinates, project the vehicle onto it, and keep a fixed-length receding window ahead of the projection.
+Real edges near this window are re-identified as the previous route and reused at zero cost.
+The previous rolling terminal is re-mapped to the current graph by world coordinates.
+Search toward the goal resumes only when the terminal is reached, deleted, or unreachable.
+What persists is the free-space corridor and the detour homotopy, not volatile object addresses.
+No subgoal low-pass filter, no left--right switching threshold, and no artificial-node rule is added.
+
+\subsection{Applicability of the Sphere Primitive}
+
+The sphere primitive assumes no gaps narrower than the vehicle.
+Buildings and walls satisfy this.
+Tree trunks leave gaps of 1--3 m, which a vehicle-scale sphere chain covers.
+The price is a conservative radius estimate near thin trunks, hence a narrower corridor.
+We accept this; Experiment C exposes the effect.
+For truly narrow gaps, the region generator can be swapped for the direction-aware convex regions of FRGraph \cite{frgraph} without changing maintenance, gating, search, or the corridor interface.
+
+The forward-facing camera covers only the front in one frame.
+The back and the sides rely on graph persistence.
+Coverage gaps after takeoff and after sharp turns are treated optimistically and corrected by gating on approach.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{CORRIDOR INTERFACE}
+\label{sec:corridor}
+
+\subsection{Sphere-Chain Corridor}
+
+The corridor is a sphere chain along the global route, parameterized by arc length:
+\begin{equation}
+\mathcal{C}(s) = \{ \mathbf{p}(s), r(s), d(s) \},
+\end{equation}
+with centerline position, local radius, and remaining distance to the terminal.
+We do not build a separate polyhedron corridor; the sphere chain is itself the corridor interface to the policy.
+
+For a sample $\mathbf{c}_k$ on the selected witness path, the effective radius is
+\begin{equation}
+r_k = \max\bigl(0,\; d_{\text{occ}}(\mathbf{c}_k) - d_{\text{margin}}\bigr),
+\end{equation}
+where $d_{\text{occ}}$ is the distance to known obstacles and $d_{\text{margin}}$ the safety margin.
+If $\lVert \mathbf{c}_k - \mathbf{c}_{k+1} \rVert \le r_k + r_{k+1}$ fails, intermediate spheres are inserted.
+
+Spheres are sampled every half local radius along the witness path, not only at nodes.
+Node spheres alone leave gaps between clusters, and a single interval mask would fill those gaps as solid.
+Filling along the witness path removes this artifact; corridor fidelity follows the witness path, not the node density.
+
+The corridor exists in the graph before the search; the search only selects and orders it.
+It is cached in the world frame.
+When the graph does not change, the corridor does not move; each frame applies only a coordinate transform and re-renders by analytic ray--sphere intersection.
+
+The corridor span is the near segment of the A* route plus an optimistic segment within the receding window.
+For the policy the corridor is a soft guidance.
+An optimistic segment that meets an explicit obstacle in the current depth is removed at re-search; no unknown state is maintained.
+
+\subsection{Waypoints and Execution}
+
+The A* output is a node sequence; each edge carries its witness points.
+The execution path concatenates the witness paths, applies one cross-edge shortcut under the sphere-overlap condition, and publishes a rolling subgoal along the decimated path.
+The shortcut removes a middle point only when the first and last safety spheres overlap, so a curved path around a wall is never straightened into a centerline.
+The subgoal is a rolling control target, not a completion signal.
+The final hover state is entered only when the subgoal coincides with the goal, the position error is below $0.5$ m, and the speed is below $0.3$ m/s.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{CORRIDOR-CONDITIONED POLICY}
+\label{sec:policy}
+
+\subsection{Inputs and Outputs}
+
+The fast policy consumes three inputs.
+The \emph{depth channel} ($1\times96\times160$) is the current observation; it answers what is around now.
+The \emph{corridor mask channel} ($2\times96\times160$) stores, per pixel, the depth interval $[near, far]$ in which the corresponding ray crosses the corridor.
+The interval is normalized by the maximum range, truncated at the depth surface, not truncated at NaN pixels, and zero where no corridor exists.
+It answers where the remembered route goes and how wide it is.
+The \emph{observation vector} holds velocity (3), acceleration (3), the local waypoint (3), the straight-line distance to the final goal (1), and the remaining corridor length (1).
+It answers how far the task has progressed.
+
+The output is unchanged from YOPO: offsets and scores of 15 primitives on a $5\times3$ lattice.
+The backbone is a ResNet-18 with the first convolution widened to the extra channels.
+New channels are initialized by copying the pretrained depth-channel weights, so the corridor contributes zero at initialization and training starts from the original behavior.
+
+\subsection{Why Two Channels}
+
+The two image channels share the carrier but not the semantics.
+Depth is perception of the current frame.
+The corridor is a decision computed from accumulated observations.
+After truncation, the corridor still carries three things depth does not: memory beyond the field of view and range (turn early), a topological choice at symmetric forks, and a fallback under degradation (the corridor renders where depth is NaN).
+The redundant cases, open space and straight flight, are exactly the fallback to the original behavior.
+The value appears where the two channels disagree.
+They must stay separate.
+Training lets the collision cost dominate the corridor cost, so the priority ``depth for safety, corridor for direction'' emerges without hand-written rules.
+
+\subsection{Training}
+
+We follow the differentiable-cost route of YOPOv2-Tracker \cite{yopotracker}; no expert demonstration is used.
+The total cost is fully differentiable:
+an ESDF collision cost for hard safety,
+a smoothness cost,
+a goal cost,
+a corridor cost, and
+an arrival cost.
+The corridor violation of a trajectory point $\mathbf{p}$ against the chain is
+\begin{equation}
+\ell_{\text{corr}}(\mathbf{p}) = \min_k \max\bigl(0,\; \lVert \mathbf{p} - \mathbf{c}_k \rVert - r_k\bigr),
+\end{equation}
+differentiable and back-propagated through the chain.
+Its weight is kept low: the corridor guides the direction and never overrides the collision cost.
+The arrival term penalizes terminal speed and overshoot when the remaining distance drops below a threshold.
+
+In simulation the corridor is computed offline from the ground-truth map as a privileged corridor.
+At test time it is replaced by the real graph output.
+Corridor perturbation augmentation closes the domain gap: radius noise, random segment dropout, and global translation jitter.
+This is isomorphic to depth-corruption augmentation: dirt seen in training is not fatal at test time.
+
+Five data disciplines shape the distribution:
+(1) samples where the corridor deliberately disagrees with the goal direction, or the network learns to ignore the channel;
+(2) all-zero corridor samples, so the policy falls back to the original YOPO behavior when the graph has no route;
+(3) remaining-distance coverage from hundreds of meters to half a meter, or the progress scalars carry no causal signal;
+(4) dynamic obstacles inside the corridor, so the hard priority of depth is actually trained;
+(5) corridor rendered where depth is missing, training the depth--corridor division of labor.
+
+The training data is fully decoupled from semantics: geometry and corridor in, trajectory out, no category anywhere.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{OPEN-VOCABULARY GLOBAL GUIDANCE}
+\label{sec:semantics}
+
+The user issues a text query, e.g., ``avoid the buildings.''
+The frozen PEARL model \cite{pearl} produces a heatmap of that category on the RGB frame.
+Heatmap pixels are projected to the world frame through depth.
+Edges sample the heatmap along their witness paths and accumulate a semantic edge cost $C_{\text{sem}}(e)$.
+The total edge cost of (2) changes; the A* route changes.
+The fast policy only receives a different corridor.
+It never learns that the word ``building'' exists.
+
+Open vocabulary is therefore a constructed property.
+The only trained component is the fast policy, and its data is pure geometry.
+PEARL is open-vocabulary by design.
+The graph is a search structure and is not trained.
+No component is bound to a category at training time.
+A query word never seen before works at test time, without relying on network generalization.
+
+The boundary is stated explicitly: semantics participate only in route cost, never in geometric collision checking.
+Safety does not depend on semantics.
+This boundary is a feature, not a limitation.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{EXPERIMENTS (PLANNED)}
+\label{sec:experiments}
+
+All experiments run in the Colosseum simulator \cite{airsim} with onboard RGB-D.
+All scenes share one set of hyperparameters, stated in the source release.
+Baselines are the original YOPO \cite{yopo}, depthnav \cite{depthnav}, a classical FAR-Planner \cite{far} plus local planner stack, and SCOPE \cite{scope} if code is available.
+Metrics are success rate, collision rate, path length, completion time, minimum clearance, and replanning frequency.
+
+\subsection{Experiment A: Cross-Scale Flight}
+
+Scenes: empty, sparse trees, forest, long wall, single building, building blocks, and a mixed-scale single continuous flight (forest interleaved with buildings, one run, constant speed, no mode flag).
+We compare the original YOPO against graph-plus-YOPO.
+We expect YOPO to succeed in forest-scale scenes and to fail at building-scale detours, and ScaleNav to close that gap without changing parameters.
+Results are reported in Table~\ref{tab:crossscale}.
+
+\begin{table}[t]
+\caption{Cross-Scale Results (to be filled)}
+\label{tab:crossscale}
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+Scene & Method & Succ.\ (\%) & Coll.\ (\%) & $L$ (m) & $t$ (s) \\
+\midrule
+Forest      & YOPO     & \todo{TBD} & \todo{TBD} & \todo{TBD} & \todo{TBD} \\
+Forest      & ScaleNav & \todo{TBD} & \todo{TBD} & \todo{TBD} & \todo{TBD} \\
+Building    & YOPO     & \todo{TBD} & \todo{TBD} & \todo{TBD} & \todo{TBD} \\
+Building    & ScaleNav & \todo{TBD} & \todo{TBD} & \todo{TBD} & \todo{TBD} \\
+Mixed       & YOPO     & \todo{TBD} & \todo{TBD} & \todo{TBD} & \todo{TBD} \\
+Mixed       & ScaleNav & \todo{TBD} & \todo{TBD} & \todo{TBD} & \todo{TBD} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsection{Experiment B: Memory Bandwidth Ablation}
+
+Three arms share one network structure and one training pipeline: direct goal, waypoint, and corridor mask.
+The only variable is the amount of memory injected into the fast layer.
+A dedicated ``corridor disagrees with goal'' scene tests whether the network reads the corridor channel instead of ignoring it.
+We expect the corridor arm to dominate the waypoint arm on building-scale scenes, which would show that the gain is not merely ``one more point.''
+
+\subsection{Experiment C: Degradation Sweep}
+
+Depth dropout, noise, and fog are increased in levels.
+We plot success rate and speed against the degradation level.
+The ablated system without graph and corridor is expected to collide at high degradation, while the corridor provides direction where depth fails.
+This experiment also exposes the conservative-radius effect near thin trunks.
+
+\subsection{Experiment D: Open-Vocabulary Rerouting}
+
+On the graph, we switch the query word: no semantics, ``avoid buildings,'' ``avoid trees,'' ``avoid power lines.''
+We compare the induced global routes.
+The fast layer is not retrained at all.
+We expect geometrically feasible but semantically distinct routes, demonstrating that task intent that geometry cannot express is carried by the edge costs.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{CONCLUSIONS}
+
+ScaleNav gives a memoryless neural planner a spatial memory without touching its structure.
+A persistent free-space graph remembers; a sphere-chain corridor rendered as a depth-aligned channel injects that memory into the policy.
+Scale adaptivity is carried by the input, not by parameters, thresholds, or mode switches.
+Open-vocabulary semantics modulate only graph edge costs, keeping safety independent of semantics and retraining at zero.
+Planned experiments will quantify cross-scale flight, memory bandwidth, degradation robustness, and open-vocabulary rerouting.
+Future work closes the loop from route back to graph growth, using the current route tangent as a candidate direction for graph refinement.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{ACKNOWLEDGMENT}
+
+\todo{Add funding and acknowledgments.}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% NOTE: references marked with TODO need exact bibliographic verification.
+\begin{thebibliography}{99}
+
+\bibitem{yopo}
+Y. Zhang et al., ``You only plan once: A learning-based quadrotor planner,''
+\emph{IEEE Trans. Robot.}, 2025. \todo{verify authors/venue}
+
+\bibitem{epic}
+SYSU STAR Lab and HKU, ``EPIC: free-space sphere graph for exploration,''
+\emph{IEEE Robot. Autom. Lett.}, 2025. \todo{verify exact title/authors}
+
+\bibitem{pearl}
+Pei et al., ``PEARL: geometry-aligned open-vocabulary perception,'' 2026.
+\todo{verify venue}
+
+\bibitem{loquercio}
+A. Loquercio, E. Kaufmann, R. Ranftl, M. M\"uller, V. Koltun, and D. Scaramuzza,
+``Learning high-speed flight in the wild,''
+\emph{Science Robotics}, vol. 6, no. 59, 2021.
+
+\bibitem{depthnav}
+CMU, ``Depthnav: depth-only reinforcement learning navigation,''
+in \emph{Proc. IEEE Int. Conf. Robot. Autom.}, 2026. \todo{verify authors/title}
+
+\bibitem{nanomap}
+P. R. Florence, J. Carter, J. Ware, and R. Tedrake,
+``NanoMap: Fast, uncertainty-aware proximity queries with lazy search of local 3D data,''
+in \emph{Proc. IEEE Int. Conf. Robot. Autom.}, 2018, pp. 7631--7638.
+
+\bibitem{far}
+F. Yang, C. Cao, H. Zhu, J. Oh, and J. Zhang,
+``FAR planner: Fast, attemptable route planner using dynamic visibility update,''
+in \emph{Proc. IEEE/RSJ Int. Conf. Intell. Robots Syst.}, 2022. \todo{verify pages}
+
+\bibitem{sptm}
+N. Savinov, A. Dosovitskiy, and V. Koltun,
+``Semi-parametric topological memory for navigation,''
+in \emph{Proc. Int. Conf. Learn. Represent.}, 2018.
+
+\bibitem{bubble}
+Y. Ren, F. Zhu, W. Liu, Z. Wang, Y. Lin, F. Gao, and F. Zhang,
+``Bubble planner: Planning high-speed smooth quadrotor trajectories using receding corridors,''
+in \emph{Proc. IEEE/RSJ Int. Conf. Intell. Robots Syst.}, 2022, pp. 6332--6339.
+
+\bibitem{rappids}
+N. J. Bucki, J. Lee, and M. W. Mueller,
+``Rectangular pyramid partitioning using integrated depth sensors (RAPPIDS): A fast planner for multicopter navigation,''
+\emph{IEEE Robot. Autom. Lett.}, vol. 5, no. 3, pp. 4626--4633, 2020.
+
+\bibitem{scope}
+``SCOPE: belief-map-based navigation under depth degradation,'' 2026.
+\todo{concurrent work; verify citation}
+
+\bibitem{frgraph}
+HKUST-GZ, ``FRGraph: direction-aware convex free regions,'' 2026.
+\todo{verify citation}
+
+\bibitem{clip}
+A. Radford et al., ``Learning transferable visual models from natural language supervision,''
+in \emph{Proc. Int. Conf. Mach. Learn.}, 2021, pp. 8748--8763.
+
+\bibitem{vlfm}
+N. Yokoyama, S. Ha, D. Batra, J. Wang, and B. Bucher,
+``VLFM: Vision-language frontier maps for zero-shot semantic navigation,''
+in \emph{Proc. IEEE Int. Conf. Robot. Autom.}, 2024, pp. 42--48.
+
+\bibitem{yopotracker}
+``YOPOv2-Tracker: differentiable-cost training for learned planners,'' TJU, 2025.
+\todo{verify citation}
+
+\bibitem{airsim}
+S. Shah, D. Dey, C. Lovett, and A. Kapoor,
+``AirSim: High-fidelity visual and physical simulation for autonomous vehicles,''
+in \emph{Field and Service Robotics}, 2018, pp. 621--635.
+
+\end{thebibliography}
+
+\end{document}

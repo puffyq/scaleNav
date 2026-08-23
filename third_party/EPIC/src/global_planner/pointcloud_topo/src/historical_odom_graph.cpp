@@ -191,6 +191,8 @@ void TopoGraph::updateHistoricalOdoms() {
     TopoNode::Ptr new_odom_node = std::make_shared<TopoNode>();
     new_odom_node->center_ = odom_node_->center_;
     new_odom_node->is_history_odom_node_ = true;
+    new_odom_node->role_ = TopoNodeRole::Odom;
+    new_odom_node->geometry_state_ = TopoGeometryState::Verified;
     Eigen::Vector3i idx;
     getIndex(new_odom_node->center_, idx);
     for (int i = -1; i <= 1; i++) {

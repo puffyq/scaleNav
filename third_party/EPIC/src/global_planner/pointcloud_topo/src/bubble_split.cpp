@@ -25,10 +25,10 @@ void TopoGraph::generateBubble(const Eigen::Vector3f &low_bd,
     return;
   Eigen::Vector3i region_idx;
   getIndex(center, region_idx);
-  if (!reg_map_idx2ptr_.count(region_idx)) {
-    ROS_ERROR("148 region idx not in map");
-    exit(1);
-  }
+  // Region ownership must be lazy as well: the online map can grow beyond the
+  // initially preallocated box, and bubble generation should not abort when a
+  // newly observed cell lands in an unseen region.
+  getRegionNode(region_idx);
   Eigen::Vector3f region_bd_min, region_bd_max;
   index2boundary(region_idx, region_bd_min, region_bd_max);
   Eigen::Vector3f box_search_min_pt, box_search_max_pt;

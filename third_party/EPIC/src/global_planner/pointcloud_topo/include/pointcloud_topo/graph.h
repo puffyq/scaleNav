@@ -109,12 +109,25 @@ public:
   Eigen::Vector3f center_;
 };
 
+enum class TopoNodeRole : std::uint8_t {
+  Geometric = 0,
+  Speculative = 1,
+  Odom = 2,
+};
+
+enum class TopoGeometryState : std::uint8_t {
+  Verified = 0,
+  Unknown = 1,
+};
+
 class TopoNode {
 public:
   typedef std::shared_ptr<TopoNode> Ptr;
   std::uint64_t persistent_id_ = 0;
   bool is_viewpoint_ = false;
   bool is_history_odom_node_ = false;
+  TopoNodeRole role_ = TopoNodeRole::Geometric;
+  TopoGeometryState geometry_state_ = TopoGeometryState::Verified;
   float yaw_;
   Eigen::Vector3f center_;
   // Radius of the representative real BubbleNode used to create this node.
@@ -250,8 +263,16 @@ public:
   void insertNode(TopoNode::Ptr &new_node, vector<TopoNode::Ptr> &nbr_nodes, vector<vector<Eigen::Vector3f>> &paths);
   // void getUnreachableLocalNodes(vector<TopoNode::Ptr> &nodes_unreachable);
   void updateSkeleton();
+  // Copy persistent topology, including speculative semantic candidates, into
+  // a freshly initialized graph before applying the current local Bubble diff.
+  // The transient odometry query node is recreated by updateOdomNode().
+  void copyPersistentNodesFrom(const TopoGraph &source);
   void updateHistoricalOdoms();
   void updateOdomNode(Eigen::Vector3f &odom_pos, float &yaw);
+  size_t insertSpeculativeNodes(
+      const vector<Eigen::Vector3f> &centers, const vector<float> &semantic_scores,
+      float bubble_radius, const Eigen::Vector3f &odom_pos,
+      std::int64_t stamp_ns);
   Eigen::Vector3f min_bd, max_bd, map_bd_min, map_bd_max;
   double min_x_, min_y_, min_z_; // 最小格子尺寸
   double bubble_min_radius_, frt_bubble_radius_;
@@ -285,6 +306,7 @@ public:
       float path_cost_weight = 0.2f, float previous_path_cost_factor = 0.05f,
       const std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> &last_path = {},
       float semantic_cost_weight = 0.0F);
+  float semanticRiskForEdge(const TopoNode::Ptr &from, const TopoNode::Ptr &to) const;
   void init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, ParallelBubbleAstar::Ptr &parallel_bubble_astar);
   void cauculateMemoryConsumption();
   double getPathLength(const vector<TopoNode::Ptr> &topo_path);
@@ -312,6 +334,7 @@ public:
       vector<TopoNode::Ptr> &nodes,
       const unordered_set<std::uint64_t> &unavailable_ids = {});
   void removeNode(TopoNode::Ptr &node);
+  std::vector<TopoNode::Ptr> speculativeNodes() const;
   float estimateRoughDistance(const Eigen::Vector3f &goal, const int his_idx);
   vector<TopoNode::Ptr> history_odom_nodes_;
   vector<float> his_odom_dis_vec_;
@@ -326,12 +349,16 @@ private:
   bool use_prior_map_;
   double update_connection_timeout, insert_node_timeout;
   double semantic_node_match_distance_ = 2.5;
+  // Speculative semantic observations influence nearby ordinary edges too;
+  // otherwise A* can pass beside a risk node without ever visiting it.
+  double semantic_speculative_influence_m_ = 5.0;
   double clearance_cost_weight_ = 2.0;
   double clearance_target_m_ = 1.2;
   mutable std::mutex semantic_memory_mutex_;
   unordered_map<std::uint64_t, TopoSemanticRecord> semantic_memory_;
   std::uint64_t next_semantic_node_id_ = 1;
   bool hasOverlapWithBox(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd);
+  float edgeSemanticRisk(const TopoNode::Ptr &from, const TopoNode::Ptr &to) const;
 
   size_t selected_occupied_regions_ = 0;
   size_t selected_free_regions_ = 0;

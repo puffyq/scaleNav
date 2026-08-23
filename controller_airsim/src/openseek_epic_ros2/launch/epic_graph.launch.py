@@ -15,6 +15,12 @@ def generate_launch_description():
         DeclareLaunchArgument("next_goal_topic", default_value="/epic/yopo_goal"),
         DeclareLaunchArgument("next_goal_frame", default_value="world_enu"),
         DeclareLaunchArgument("visualization_frame", default_value="odom"),
+        DeclareLaunchArgument("odom_twist_frame", default_value="world"),
+        DeclareLaunchArgument(
+            "flight_statistics_file",
+            default_value="/mnt/code/lab/yopo/OpenSeek/log_event/epic_flight_statistics.csv"),
+        DeclareLaunchArgument("trajectory_speed_color_max_mps", default_value="8.0"),
+        DeclareLaunchArgument("trajectory_max_points", default_value="50000"),
         DeclareLaunchArgument("graph_fixed_layer", default_value="true"),
         DeclareLaunchArgument("graph_layer_z", default_value="1.6"),
         DeclareLaunchArgument("reuse_graph_on_goal", default_value="true"),
@@ -30,12 +36,14 @@ def generate_launch_description():
         DeclareLaunchArgument("route_plan_period_ms", default_value="2000"),
         DeclareLaunchArgument("local_goal_reserve_m", default_value="5.0"),
         DeclareLaunchArgument("use_edge_witness_path", default_value="true"),
+        DeclareLaunchArgument("enable_raycast_shortcut", default_value="false"),
         DeclareLaunchArgument("raycast_shortcut_sample_step_m", default_value="0.25"),
         DeclareLaunchArgument("raycast_shortcut_clearance_margin_m", default_value="0.05"),
         DeclareLaunchArgument("goal_path_cost_weight", default_value="0.2"),
         DeclareLaunchArgument("semantic_cost_weight", default_value="1.0"),
         DeclareLaunchArgument("semantic_node_ema_alpha", default_value="0.3"),
         DeclareLaunchArgument("semantic_visualization_max_score", default_value="1.0"),
+        DeclareLaunchArgument("semantic_speculative_influence_m", default_value="5.0"),
         DeclareLaunchArgument("bubble_topo/clearance_cost_weight", default_value="2.0"),
         DeclareLaunchArgument("bubble_topo/clearance_target_m", default_value="1.2"),
         DeclareLaunchArgument("previous_path_cost_factor", default_value="0.0"),
@@ -50,15 +58,24 @@ def generate_launch_description():
         DeclareLaunchArgument("odom_fallback_radius_m", default_value="15.0"),
         DeclareLaunchArgument("odom_fallback_candidates", default_value="8"),
         DeclareLaunchArgument("odom_connect_timeout_ms", default_value="3.0"),
-        DeclareLaunchArgument("semantic_pose_tolerance_ms", default_value="100.0"),
+        DeclareLaunchArgument("semantic_pose_tolerance_ms", default_value="250.0"),
         DeclareLaunchArgument("semantic_max_age_ms", default_value="1500.0"),
+        DeclareLaunchArgument("semantic_depth_sync_tolerance_ms", default_value="250.0"),
         DeclareLaunchArgument("semantic_association_radius_m", default_value="1.5"),
-        DeclareLaunchArgument("semantic_voxel_size_m", default_value="0.5"),
+        DeclareLaunchArgument("semantic_depth_clip_m", default_value="20.0"),
+        DeclareLaunchArgument("speculative_enabled", default_value="true"),
+        DeclareLaunchArgument("speculative_min_score", default_value="0.35"),
+        DeclareLaunchArgument("speculative_forward_m", default_value="22.0"),
+        DeclareLaunchArgument("speculative_patch_separation_m", default_value="1.5"),
+        DeclareLaunchArgument("speculative_radius_m", default_value="0.75"),
+        DeclareLaunchArgument("speculative_max_nodes", default_value="16"),
         DeclareLaunchArgument("semantic_camera_translation_flu.x", default_value="0.5"),
         DeclareLaunchArgument("semantic_camera_translation_flu.y", default_value="0.0"),
         DeclareLaunchArgument("semantic_camera_translation_flu.z", default_value="-0.1"),
         DeclareLaunchArgument("semantic_horizontal_fov_deg", default_value="90.0"),
         DeclareLaunchArgument("semantic_vertical_fov_deg", default_value="60.0"),
+        DeclareLaunchArgument("semantic_patch_cols", default_value="5"),
+        DeclareLaunchArgument("semantic_patch_rows", default_value="3"),
         Node(
             package="openseek_epic_ros2",
             executable="epic_graph_node",
@@ -74,6 +91,11 @@ def generate_launch_description():
                 "next_goal_topic": LaunchConfiguration("next_goal_topic"),
                 "next_goal_frame": LaunchConfiguration("next_goal_frame"),
                 "visualization_frame": LaunchConfiguration("visualization_frame"),
+                "odom_twist_frame": LaunchConfiguration("odom_twist_frame"),
+                "flight_statistics_file": LaunchConfiguration("flight_statistics_file"),
+                "trajectory_speed_color_max_mps": LaunchConfiguration(
+                    "trajectory_speed_color_max_mps"),
+                "trajectory_max_points": LaunchConfiguration("trajectory_max_points"),
                 "graph_fixed_layer": LaunchConfiguration("graph_fixed_layer"),
                 "graph_layer_z": LaunchConfiguration("graph_layer_z"),
                 "reuse_graph_on_goal": LaunchConfiguration("reuse_graph_on_goal"),
@@ -89,6 +111,7 @@ def generate_launch_description():
                 "route_plan_period_ms": LaunchConfiguration("route_plan_period_ms"),
                 "local_goal_reserve_m": LaunchConfiguration("local_goal_reserve_m"),
                 "use_edge_witness_path": LaunchConfiguration("use_edge_witness_path"),
+                "enable_raycast_shortcut": LaunchConfiguration("enable_raycast_shortcut"),
                 "raycast_shortcut_sample_step_m": LaunchConfiguration(
                     "raycast_shortcut_sample_step_m"),
                 "raycast_shortcut_clearance_margin_m": LaunchConfiguration(
@@ -98,6 +121,8 @@ def generate_launch_description():
                 "semantic_node_ema_alpha": LaunchConfiguration("semantic_node_ema_alpha"),
                 "semantic_visualization_max_score": LaunchConfiguration(
                     "semantic_visualization_max_score"),
+                "bubble_topo/semantic_speculative_influence_m": LaunchConfiguration(
+                    "semantic_speculative_influence_m"),
                 "bubble_topo/clearance_cost_weight": LaunchConfiguration(
                     "bubble_topo/clearance_cost_weight"),
                 "bubble_topo/clearance_target_m": LaunchConfiguration(
@@ -118,9 +143,18 @@ def generate_launch_description():
                 "odom_connect_timeout_ms": LaunchConfiguration("odom_connect_timeout_ms"),
                 "semantic_pose_tolerance_ms": LaunchConfiguration("semantic_pose_tolerance_ms"),
                 "semantic_max_age_ms": LaunchConfiguration("semantic_max_age_ms"),
+                "semantic_depth_sync_tolerance_ms": LaunchConfiguration(
+                    "semantic_depth_sync_tolerance_ms"),
                 "semantic_association_radius_m": LaunchConfiguration(
                     "semantic_association_radius_m"),
-                "semantic_voxel_size_m": LaunchConfiguration("semantic_voxel_size_m"),
+                "semantic_depth_clip_m": LaunchConfiguration("semantic_depth_clip_m"),
+                "speculative_enabled": LaunchConfiguration("speculative_enabled"),
+                "speculative_min_score": LaunchConfiguration("speculative_min_score"),
+                "speculative_forward_m": LaunchConfiguration("speculative_forward_m"),
+                "speculative_patch_separation_m": LaunchConfiguration(
+                    "speculative_patch_separation_m"),
+                "speculative_radius_m": LaunchConfiguration("speculative_radius_m"),
+                "speculative_max_nodes": LaunchConfiguration("speculative_max_nodes"),
                 "semantic_camera_translation_flu.x": LaunchConfiguration(
                     "semantic_camera_translation_flu.x"),
                 "semantic_camera_translation_flu.y": LaunchConfiguration(
@@ -131,6 +165,8 @@ def generate_launch_description():
                     "semantic_horizontal_fov_deg"),
                 "semantic_vertical_fov_deg": LaunchConfiguration(
                     "semantic_vertical_fov_deg"),
+                "semantic_patch_cols": LaunchConfiguration("semantic_patch_cols"),
+                "semantic_patch_rows": LaunchConfiguration("semantic_patch_rows"),
             }],
         ),
     ])

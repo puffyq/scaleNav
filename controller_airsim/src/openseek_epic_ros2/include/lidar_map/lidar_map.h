@@ -72,6 +72,20 @@ class LIOInterface {
     lp_->box_num_ = 1;
   }
 
+  bool expandBounds(const Eigen::Vector3f &min_bound,
+                    const Eigen::Vector3f &max_bound) {
+    const Eigen::Vector3f expanded_min =
+        lp_->global_box_min_boundary_.cwiseMin(min_bound);
+    const Eigen::Vector3f expanded_max =
+        lp_->global_box_max_boundary_.cwiseMax(max_bound);
+    if (expanded_min.isApprox(lp_->global_box_min_boundary_) &&
+        expanded_max.isApprox(lp_->global_box_max_boundary_)) {
+      return false;
+    }
+    configureBounds(expanded_min, expanded_max);
+    return true;
+  }
+
   void configureStorage(float voxel_size, float history_radius,
                         std::size_t max_points, float prune_distance) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -163,7 +177,20 @@ class LIOInterface {
     // contents and occupied_voxels_ remain exactly consistent.
     for (const auto &key : free_voxels) {
       if (hit_voxels.find(key) != hit_voxels.end()) continue;
-      last_carved_voxels_ += occupied_voxels_.erase(key);
+      const auto erased = occupied_voxels_.erase(key);
+      last_carved_voxels_ += erased;
+      changed = changed || erased > 0;
+    }
+    const bool moved_for_prune = !have_prune_pose_ ||
+      (pose - last_prune_pose_).norm() >= prune_distance_;
+    const bool needs_prune = moved_for_prune || cloud_->size() > max_points_;
+    // A repeated frame that touches no new occupied/free voxel does not alter
+    // geometry. Avoid rebuilding the PCL KD-tree and rescanning the rolling
+    // cloud on the hot callback path.
+    if (!changed && !needs_prune) {
+      last_hit_voxels_ = hit_voxels.size();
+      last_free_voxels_ = free_voxels.size();
+      return false;
     }
     if (!free_voxels.empty()) {
       pcl::PointCloud<PointType>::Ptr carved(new pcl::PointCloud<PointType>);
@@ -183,8 +210,6 @@ class LIOInterface {
     }
     last_hit_voxels_ = hit_voxels.size();
     last_free_voxels_ = free_voxels.size();
-    const bool moved_for_prune = !have_prune_pose_ ||
-      (pose - last_prune_pose_).norm() >= prune_distance_;
     if (moved_for_prune || cloud_->size() > max_points_) {
       pruneLocked(pose);
     }
@@ -193,9 +218,11 @@ class LIOInterface {
     if (moved_for_free_prune || observed_free_voxels_.size() > max_free_voxels_) {
       pruneFreeLocked(pose);
     }
-    // The live accumulator is never queried. Rebuilding a PCL KD-tree here
-    // would make every camera frame O(all historical points). Graph workers
-    // build one immutable KD-tree from accumulatedCloudSnapshot() instead.
+    // Clearance queries are made by the live planner while the cloud callback
+    // updates this map. Keep the KD-tree consistent with the compact cloud;
+    // otherwise carved voxels remain visible as ghost obstacles until the next
+    // skeleton snapshot.
+    rebuildKdTreeLocked();
     return changed;
   }
 
@@ -222,7 +249,7 @@ class LIOInterface {
       const float length = ray.norm();
       if (length <= voxel_size_ * 0.5F) continue;
       const int steps = std::max(1, static_cast<int>(std::ceil(
-        length / std::max(0.05F, voxel_size_ * 0.5F))));
+        length / std::max(0.05F, voxel_size_))));
       const Eigen::Vector3f direction = ray / length;
       for (int step = 1; step < steps; ++step) {
         const Eigen::Vector3f sample = pose + direction *
@@ -242,6 +269,19 @@ class LIOInterface {
         changed = true;
       }
     }
+    const bool moved_for_prune = !have_prune_pose_ ||
+      (pose - last_prune_pose_).norm() >= prune_distance_;
+    const bool needs_prune = moved_for_prune || cloud_->size() > max_points_;
+    // Far-plane rays are published for every depth frame. If they only repeat
+    // already-known free voxels, leave the compact cloud and KD-tree untouched
+    // so the point-cloud callback is not serialized behind an O(map_size) copy.
+    if (!changed && !needs_prune &&
+        (!have_free_prune_pose_ ||
+         (pose - free_last_prune_pose_).norm() < prune_distance_) &&
+        observed_free_voxels_.size() <= max_free_voxels_) {
+      last_free_voxels_ = free_voxels.size();
+      return false;
+    }
     if (!free_voxels.empty()) {
       pcl::PointCloud<PointType>::Ptr retained(new pcl::PointCloud<PointType>);
       retained->reserve(cloud_->size());
@@ -255,13 +295,12 @@ class LIOInterface {
       cloud_ = std::move(retained);
     }
     last_free_voxels_ = free_voxels.size();
-    const bool moved_for_prune = !have_prune_pose_ ||
-      (pose - last_prune_pose_).norm() >= prune_distance_;
     if (moved_for_prune || cloud_->size() > max_points_) pruneLocked(pose);
     const bool moved_for_free_prune = !have_free_prune_pose_ ||
       (pose - free_last_prune_pose_).norm() >= prune_distance_;
     if (moved_for_free_prune || observed_free_voxels_.size() > max_free_voxels_)
       pruneFreeLocked(pose);
+    rebuildKdTreeLocked();
     return changed;
   }
 
@@ -273,6 +312,11 @@ class LIOInterface {
   pcl::PointCloud<PointType> latestCloudSnapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return ld_->lidar_cloud_;
+  }
+
+  Eigen::Vector3f poseSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ld_->lidar_pose_;
   }
 
   pcl::PointCloud<PointType> freeSpaceSnapshot() const {
@@ -322,15 +366,38 @@ class LIOInterface {
     have_prune_pose_ = true;
     free_last_prune_pose_ = pose;
     have_free_prune_pose_ = true;
-    if (!cloud_->empty()) kd_.setInputCloud(cloud_);
+    rebuildKdTreeLocked();
   }
 
   void loadSnapshot(const pcl::PointCloud<PointType> &accumulated_world,
                     const pcl::PointCloud<PointType> &latest_world,
                     const Eigen::Vector3f &pose,
                     const Eigen::Quaternionf &orientation) {
-    loadSnapshot(accumulated_world, latest_world, pcl::PointCloud<PointType>(),
-                 pose, orientation);
+    // Incremental EPIC rebuilds refresh occupied/latest clouds from the same
+    // live map. Preserve ray-carved free-space evidence here; clearing it on
+    // every skeleton update makes previously observed corridors look unknown
+    // again and is both a correctness and replanning regression.
+    std::lock_guard<std::mutex> lock(mutex_);
+    ld_->map_update = true;
+    ld_->first_map_flag_ = false;
+    ld_->lidar_pose_ = pose;
+    ld_->lidar_q_ = orientation;
+    ld_->lidar_cloud_ = latest_world;
+    cloud_ = std::make_shared<pcl::PointCloud<PointType>>(accumulated_world);
+    occupied_voxels_.clear();
+    occupied_voxels_.reserve(cloud_->size());
+    for (const auto &point : cloud_->points) {
+      occupied_voxels_.insert(VoxelKey{
+        static_cast<int>(std::floor(point.x / voxel_size_)),
+        static_cast<int>(std::floor(point.y / voxel_size_)),
+        static_cast<int>(std::floor(point.z / voxel_size_))});
+    }
+    for (const auto &key : occupied_voxels_) observed_free_voxels_.erase(key);
+    last_prune_pose_ = pose;
+    have_prune_pose_ = true;
+    free_last_prune_pose_ = pose;
+    have_free_prune_pose_ = true;
+    rebuildKdTreeLocked();
   }
 
   bool IsInBox(const Eigen::Vector3f &pos) const {
@@ -475,6 +542,14 @@ class LIOInterface {
     }
     last_prune_pose_ = pose;
     have_prune_pose_ = true;
+  }
+
+  void rebuildKdTreeLocked() {
+    if (cloud_->empty()) {
+      kd_.setInputCloud(pcl::PointCloud<PointType>::ConstPtr());
+    } else {
+      kd_.setInputCloud(cloud_);
+    }
   }
 
   void pruneFreeLocked(const Eigen::Vector3f &pose) {

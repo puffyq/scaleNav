@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 # GOAL_X="0.0"
-# GOAL_Y="140.0"
+# GOAL_Y="0.0"
 # GOAL_Z="1.6"
 
 # GOAL_X="-0.0"

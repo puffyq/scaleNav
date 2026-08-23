@@ -92,6 +92,23 @@ TEST(LidarMapRayCarving, KeepsFreeRayEvidenceAcrossMapSnapshots)
   EXPECT_EQ(restored.freeSpaceSnapshot().size(), free.size());
 }
 
+TEST(LidarMapRayCarving, IncrementalOccupiedSnapshotKeepsFreeRayEvidence)
+{
+  LIOInterface map;
+  map.configureStorage(0.25F, 100.0F, 1000, 100.0F);
+  const auto first = cloud({PointType(2.0F, 0.0F, 0.0F)});
+  ASSERT_TRUE(map.updateCloudWorld(
+    first, Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity()));
+  const auto free_before = map.freeSpaceSnapshot();
+  ASSERT_GT(free_before.size(), 0U);
+
+  // This is the overload used by an in-place EPIC skeleton update.
+  map.loadSnapshot(
+    map.accumulatedCloudSnapshot(), first,
+    Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity());
+  EXPECT_EQ(map.freeSpaceSnapshot().size(), free_before.size());
+}
+
 TEST(LidarMapRayCarving, NewHitInvalidatesRememberedFreeVoxel)
 {
   LIOInterface map;
@@ -132,6 +149,42 @@ TEST(LidarMapRayCarving, FarPlaneRayDoesNotEraseACurrentFrameHit)
     Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity());
   ASSERT_EQ(map.accumulatedCloudSnapshot().size(), 1U);
   EXPECT_NEAR(map.accumulatedCloudSnapshot().front().x, 2.0F, 1e-6F);
+}
+
+TEST(LidarMapRayCarving, RepeatedFarPlaneRayIsAHotPathNoOp)
+{
+  LIOInterface map;
+  map.configureStorage(0.25F, 100.0F, 1000, 100.0F);
+  const auto ray = cloud({PointType(4.0F, 0.0F, 0.0F)});
+  ASSERT_TRUE(map.updateFreeRaysWorld(
+    ray, Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity()));
+  const auto before = map.freeSpaceSnapshot().size();
+  EXPECT_FALSE(map.updateFreeRaysWorld(
+    ray, Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity()));
+  EXPECT_EQ(map.freeSpaceSnapshot().size(), before);
+}
+
+TEST(LidarMapBounds, ExpansionPreservesMapMemory)
+{
+  LIOInterface map;
+  map.configureBounds(
+    Eigen::Vector3f(-20.0F, -20.0F, -5.0F),
+    Eigen::Vector3f(100.0F, 20.0F, 5.0F));
+  map.configureStorage(0.25F, 200.0F, 1000U, 0.5F);
+  const auto occupied = cloud({PointType(10.0F, 0.0F, 1.6F)});
+  map.loadSnapshot(
+    occupied, occupied, Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity());
+
+  EXPECT_FALSE(map.IsInBox(Eigen::Vector3f(-80.0F, 0.0F, 1.6F)));
+  EXPECT_TRUE(map.expandBounds(
+    Eigen::Vector3f(-100.0F, -20.0F, -5.0F),
+    Eigen::Vector3f(100.0F, 20.0F, 5.0F)));
+  EXPECT_TRUE(map.IsInBox(Eigen::Vector3f(-80.0F, 0.0F, 1.6F)));
+  ASSERT_EQ(map.accumulatedCloudSnapshot().size(), 1U);
+  EXPECT_NEAR(map.accumulatedCloudSnapshot().front().x, 10.0F, 1e-6F);
+  EXPECT_FALSE(map.expandBounds(
+    Eigen::Vector3f(-50.0F, -10.0F, -2.0F),
+    Eigen::Vector3f(50.0F, 10.0F, 2.0F)));
 }
 
 }  // namespace
