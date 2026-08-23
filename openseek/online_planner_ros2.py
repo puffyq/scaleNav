@@ -38,6 +38,7 @@ from planner_continuity import (
     is_final_subgoal,
     mission_goal_for_local_goal,
     mission_arrived,
+    mission_goal_changed,
     project_goal_to_fixed_altitude,
 )
 from text_tracker.heatmap import goal_body_to_heatmap
@@ -678,9 +679,13 @@ class OnlinePlanner(Node):
                 else None
             )
             goal = project_goal_to_fixed_altitude(goal, fixed_altitude)
-            if (
-                self.mission_goal_world is not None
-                and np.linalg.norm(self.mission_goal_world - goal) <= 1e-3
+            # The global topic is intentionally latched/repeated by EPIC. A
+            # one-centimetre odometry z change must not restart the mission or
+            # clear the arrival hold when the graph/model is fixed-height.
+            if not mission_goal_changed(
+                self.mission_goal_world,
+                goal,
+                ignore_altitude=self.fixed_altitude or self.model_vertical_num == 1,
             ):
                 return
             self.mission_goal_world = goal

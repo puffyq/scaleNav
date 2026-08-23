@@ -218,6 +218,31 @@ TEST(TopoSemanticCost, SpeculativeNodeRemainsAValidAstarCandidate)
   EXPECT_EQ(path.back(), speculative);
 }
 
+TEST(TopoSemanticCost, LowScoreSpeculativeNodeRemainsAValidSafeBranch)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto safe = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  safe->center_ = Eigen::Vector3f(12.0F, 0.0F, 1.6F);
+  safe->role_ = TopoNodeRole::Speculative;
+  safe->geometry_state_ = TopoGeometryState::Unknown;
+  safe->semantic_score_ = 0.0F;
+  safe->semantic_confidence_ = 1.0F;
+  start->neighbors_.insert(safe);
+  safe->neighbors_.insert(start);
+  start->paths_[safe] = {start->center_, safe->center_};
+  safe->paths_[start] = {safe->center_, start->center_};
+  start->weight_[safe] = 12.0F;
+  safe->weight_[start] = 12.0F;
+
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, safe->center_, path, 0.2, 0.2F, 1.0F, {}, 2.0F));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), safe);
+}
+
 TEST(TopoSemanticCost, AstarTurnsAwayFromNearbySpeculativeRisk)
 {
   TopoGraph graph;

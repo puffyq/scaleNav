@@ -8,7 +8,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROMPT="blocks, walls, trees"
 SEMANTIC_RATE="2"
 START_SEMANTIC="1"
-SAVE_DEPTH_PNG="${SAVE_DEPTH_PNG:-0}"
+SAVE_DEPTH_PNG="${SAVE_DEPTH_PNG:-1}"
 
 while (($# > 0)); do
   case "$1" in

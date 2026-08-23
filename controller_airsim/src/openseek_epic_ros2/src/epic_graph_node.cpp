@@ -294,6 +294,11 @@ class EpicGraphNode final : public rclcpp::Node {
     std::vector<Eigen::Vector3f> surface_points_world;
     std::vector<float> scores;
     std::vector<std::uint8_t> pseudo_depth;
+    // A patch can contain both a measured semantic surface and clipped
+    // pixels. Keep the clipped representative separately so a near high
+    // score cannot suppress the patch's far-field candidate.
+    std::vector<Eigen::Vector3f> pseudo_points_world;
+    std::vector<float> pseudo_scores;
   };
 
   struct DepthFrame
@@ -576,6 +581,9 @@ class EpicGraphNode final : public rclcpp::Node {
     std::vector<float> patch_scores(patch_count, 0.0F);
     std::vector<std::uint8_t> patch_pseudo(patch_count, 0U);
     std::vector<std::uint8_t> patch_valid(patch_count, 0U);
+    std::vector<Eigen::Vector3f> patch_pseudo_world(patch_count, Eigen::Vector3f::Zero());
+    std::vector<float> patch_pseudo_scores(patch_count, 0.0F);
+    std::vector<std::uint8_t> patch_pseudo_valid(patch_count, 0U);
     for (std::uint32_t v = 0; v < depth.height; ++v) {
       const auto *depth_row = reinterpret_cast<const float *>(
         depth.data.data() + static_cast<std::size_t>(v) * depth.step);
@@ -621,6 +629,13 @@ class EpicGraphNode final : public rclcpp::Node {
           patch_pseudo[patch_index] = pseudo_depth ? 1U : 0U;
           patch_valid[patch_index] = 1U;
         }
+        if (pseudo_depth &&
+            (!patch_pseudo_valid[patch_index] ||
+             semantic > patch_pseudo_scores[patch_index])) {
+          patch_pseudo_world[patch_index] = world;
+          patch_pseudo_scores[patch_index] = semantic;
+          patch_pseudo_valid[patch_index] = 1U;
+        }
       }
     }
     {
@@ -631,11 +646,17 @@ class EpicGraphNode final : public rclcpp::Node {
       frame.surface_points_world.reserve(patch_count);
       frame.scores.reserve(patch_count);
       frame.pseudo_depth.reserve(patch_count);
+      frame.pseudo_points_world.reserve(patch_count);
+      frame.pseudo_scores.reserve(patch_count);
       for (std::size_t i = 0; i < patch_count; ++i) {
         if (!patch_valid[i]) continue;
         frame.surface_points_world.push_back(patch_world[i]);
         frame.scores.push_back(patch_scores[i]);
         frame.pseudo_depth.push_back(patch_pseudo[i]);
+        if (patch_pseudo_valid[i]) {
+          frame.pseudo_points_world.push_back(patch_pseudo_world[i]);
+          frame.pseudo_scores.push_back(patch_pseudo_scores[i]);
+        }
       }
       semantic_ray_count = frame.surface_points_world.size();
       semantic_frame_ = std::move(frame);
@@ -1598,17 +1619,22 @@ class EpicGraphNode final : public rclcpp::Node {
     std::size_t speculative_connected_nodes = 0;
     float speculative_min_range_m = std::numeric_limits<float>::infinity();
     float speculative_max_range_m = 0.0F;
-    if (speculative_enabled_ && frame->pseudo_depth.size() ==
-        frame->surface_points_world.size()) {
+    if (speculative_enabled_ && frame->pseudo_points_world.size() ==
+        frame->pseudo_scores.size()) {
       struct Candidate {
         Eigen::Vector3f point;
         float score;
       };
       std::vector<Candidate> rays;
-      for (std::size_t i = 0; i < frame->surface_points_world.size(); ++i) {
-        if (!frame->pseudo_depth[i] || frame->scores[i] < speculative_min_score_)
+      for (std::size_t i = 0; i < frame->pseudo_points_world.size(); ++i) {
+        // Every clipped ray is a geometric prediction.  Do not discard low
+        // semantic scores here: they are the safe/unknown branches needed to
+        // keep the rolling graph moving when the only far-field observations
+        // with explicit semantics are risky.  The score remains an endpoint
+        // cost, so high ``block`` scores are still repulsive in A*.
+        if (!frame->pseudo_depth[i])
           continue;
-        rays.push_back({frame->surface_points_world[i], frame->scores[i]});
+        rays.push_back({frame->pseudo_points_world[i], frame->pseudo_scores[i]});
       }
       std::sort(rays.begin(), rays.end(),
         [](const Candidate &left, const Candidate &right) {

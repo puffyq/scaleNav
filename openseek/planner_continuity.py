@@ -61,3 +61,26 @@ def project_goal_to_fixed_altitude(
     if altitude is not None:
         projected[2] = float(altitude)
     return projected
+
+
+def mission_goal_changed(
+    current_goal: np.ndarray | None,
+    next_goal: np.ndarray,
+    tolerance: float = 0.05,
+    ignore_altitude: bool = False,
+) -> bool:
+    """Return whether a mission command represents a genuinely new target.
+
+    EPIC republishes its global goal periodically.  With a fixed-height graph,
+    odometry and message conversion can make only ``z`` vary by centimetres;
+    that must not restart an already completed mission.  A real XY change (or
+    an XYZ change for a fully three-dimensional model) remains a new mission.
+    """
+    if current_goal is None:
+        return True
+    delta = np.asarray(next_goal, dtype=np.float64) - np.asarray(
+        current_goal, dtype=np.float64
+    )
+    if ignore_altitude:
+        delta[2] = 0.0
+    return bool(np.linalg.norm(delta) > tolerance)

@@ -7,6 +7,7 @@ from planner_continuity import (
     is_final_subgoal,
     mission_goal_for_local_goal,
     mission_arrived,
+    mission_goal_changed,
     project_goal_to_fixed_altitude,
 )
 
@@ -75,6 +76,35 @@ class PlannerContinuityTests(unittest.TestCase):
         )
 
         np.testing.assert_allclose(projected, [40.0, 0.0, 1.6])
+
+    def test_fixed_height_goal_ignores_republished_altitude_jitter(self):
+        current = np.array([80.0, 0.0, 1.60])
+        for altitude in (1.59, 1.58, 1.60):
+            self.assertFalse(
+                mission_goal_changed(
+                    current,
+                    np.array([80.0, 0.0, altitude]),
+                    ignore_altitude=True,
+                )
+            )
+
+    def test_fixed_height_goal_accepts_real_xy_change(self):
+        self.assertTrue(
+            mission_goal_changed(
+                np.array([80.0, 0.0, 1.60]),
+                np.array([-80.0, 0.0, 1.60]),
+                ignore_altitude=True,
+            )
+        )
+
+    def test_three_dimensional_goal_keeps_altitude_changes(self):
+        self.assertTrue(
+            mission_goal_changed(
+                np.array([10.0, 0.0, 1.0]),
+                np.array([10.0, 0.0, 2.0]),
+                ignore_altitude=False,
+            )
+        )
 
 if __name__ == "__main__":
     unittest.main()
