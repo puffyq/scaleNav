@@ -62,3 +62,14 @@ paper/**/*.out
 paper/**/*.toc
 paper/**/*.zip
 paper/**/missfont.log
+
+# Workspace migration backups and generated ROS/colcon outputs.
+bc/
+CMakeFiles/
+log_scalenav/
+scalenav_ws/build/
+scalenav_ws/install/
+scalenav_ws/log/
+scalenav_ws/src/**/build/
+scalenav_ws/src/**/install/
+scalenav_ws/src/**/log/

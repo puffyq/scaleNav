@@ -1,0 +1,21 @@
+scalenav_log_node:
+  ros__parameters:
+    output_dir: "/mnt/code/lab/yopo/OpenSeek/log_scalenav"
+    depth_topic: "/camera/depth/image"
+    rgb_topic: "/camera/color/image"
+    pointcloud_topic: "/depth/points"
+    free_ray_topic: "/depth/free_rays"
+    graph_topic: "/epic/graph"
+    bubble_topic: "/epic/bubbles"
+    path_topic: "/epic/path"
+    odom_topic: "/sim/odom"
+    control_topic: "/scalenav/trajectory_point"
+    semantic_topic: "/scalenav/text_heatmap_raw"
+    goal_topic: "/goal_pose"
+    max_total_bytes: 10737418240
+    max_sessions: 20
+    max_session_bytes: 1073741824
+    prune_period_s: 10.0
+    pointcloud_max_points: 200000
+    pointcloud_stride: 1
+    qos_depth: 10
