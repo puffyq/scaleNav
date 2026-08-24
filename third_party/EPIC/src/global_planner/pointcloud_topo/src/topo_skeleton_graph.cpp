@@ -118,6 +118,7 @@ void TopoGraph::copyPersistentNodesFrom(const TopoGraph &source) {
         clone->persistent_id_ = node->persistent_id_;
         clone->role_ = node->role_;
         clone->geometry_state_ = node->geometry_state_;
+        clone->geometry_miss_count_ = node->geometry_miss_count_;
         clone->center_ = node->center_;
         clone->bubble_radius_ = node->bubble_radius_;
         clone->semantic_score_ = node->semantic_score_;
@@ -277,6 +278,13 @@ float TopoGraph::semanticRiskForEdge(const TopoNode::Ptr &from,
   return edgeSemanticRisk(from, to);
 }
 
+float TopoGraph::clearanceCostForEdge(const TopoNode::Ptr &from,
+                                      const TopoNode::Ptr &to) const {
+  if (!from || !to) return 0.0F;
+  const float edge_length = (to->center_ - from->center_).norm();
+  return edgeClearancePenalty(from, to, edge_length);
+}
+
 void TopoGraph::updateNodeSemantic(const TopoNode::Ptr &node, float observation,
                                    float ema_alpha, std::int64_t stamp_ns) {
   if (!node || node->is_viewpoint_ || !std::isfinite(observation))
@@ -397,9 +405,15 @@ RegionNode::Ptr TopoGraph::getRegionNode(const Eigen::Vector3i &region_idx_) {
 }
 
 void TopoGraph::getIndex(const Eigen::Vector3f &point, Eigen::Vector3i &region_idx_) {
-  region_idx_.x() = int((point[0] - min_bd[0]) / init_region_size_x_);
-  region_idx_.y() = int((point[1] - min_bd[1]) / init_region_size_y_);
-  region_idx_.z() = int((point[2] - min_bd[2]) / init_region_size_z_);
+  // C++ integer conversion truncates toward zero.  For points just below a
+  // rolling-map boundary that maps them to the wrong (non-negative) region,
+  // so removal/merge can look in a different RegionNode than insertion.
+  region_idx_.x() = static_cast<int>(std::floor(
+    (point[0] - min_bd[0]) / std::max(init_region_size_x_, 1e-6)));
+  region_idx_.y() = static_cast<int>(std::floor(
+    (point[1] - min_bd[1]) / std::max(init_region_size_y_, 1e-6)));
+  region_idx_.z() = static_cast<int>(std::floor(
+    (point[2] - min_bd[2]) / std::max(init_region_size_z_, 1e-6)));
 }
 
 bool TopoGraph::index2boundary(const Eigen::Vector3i &region_idx_, Eigen::Vector3f &low_bd, Eigen::Vector3f &high_bd) {
@@ -464,8 +478,20 @@ void BubbleUnionSet::getClusters() {
 
 bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr &end_node, std::vector<TopoNode::Ptr> &path, double time_out,
                             bool kino, std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> last_path,
-                            float semantic_cost_weight) {
+                            float semantic_cost_weight, float max_search_radius_m) {
   path.clear();
+  if (start_node == nullptr || end_node == nullptr ||
+      !start_node->center_.allFinite() || !end_node->center_.allFinite())
+    return false;
+  const bool bounded_search = std::isfinite(max_search_radius_m) && max_search_radius_m >= 0.0F;
+  const float radius_sq = bounded_search ? max_search_radius_m * max_search_radius_m :
+    std::numeric_limits<float>::infinity();
+  const auto within_search_radius = [&](const TopoNode::Ptr &node) {
+    return node != nullptr && (!bounded_search ||
+      (node->center_ - start_node->center_).squaredNorm() <= radius_sq);
+  };
+  if (!within_search_radius(end_node))
+    return false;
   std::unordered_map<TopoNode::Ptr, float> g_score, f_score;
   std::unordered_map<TopoNode::Ptr, TopoNode::Ptr> parent_map;
   std::unordered_set<TopoNode::Ptr> close_set, open_set_set_;
@@ -506,7 +532,7 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
     for (auto &neighbor : cur_node->neighbors_) {
       // if (!neighbor->reachable_)
       //   continue;
-      if (close_set.find(neighbor) != close_set.end())
+      if (!within_search_radius(neighbor) || close_set.find(neighbor) != close_set.end())
         continue;
 
       const float edge_length = (neighbor->center_ - cur_node->center_).norm();
@@ -551,7 +577,7 @@ bool TopoGraph::goalDirectedSearch(
     std::vector<TopoNode::Ptr> &path, double time_out,
     float path_cost_weight, float previous_path_cost_factor,
     const std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> &last_path,
-    float semantic_cost_weight) {
+    float semantic_cost_weight, float max_search_radius_m) {
   path.clear();
   if (start_node == nullptr || !start_node->center_.allFinite() || !goal.allFinite())
     return false;
@@ -559,6 +585,13 @@ bool TopoGraph::goalDirectedSearch(
   path_cost_weight = std::max(0.0f, path_cost_weight);
   previous_path_cost_factor = std::clamp(previous_path_cost_factor, 0.0f, 1.0f);
   semantic_cost_weight = std::max(0.0f, semantic_cost_weight);
+  const bool bounded_search = std::isfinite(max_search_radius_m) && max_search_radius_m >= 0.0F;
+  const float radius_sq = bounded_search ? max_search_radius_m * max_search_radius_m :
+    std::numeric_limits<float>::infinity();
+  const auto within_search_radius = [&](const TopoNode::Ptr &node) {
+    return node != nullptr && (!bounded_search ||
+      (node->center_ - start_node->center_).squaredNorm() <= radius_sq);
+  };
 
   std::unordered_map<TopoNode::Ptr, float> g_score;
   std::unordered_map<TopoNode::Ptr, float> f_score;
@@ -591,7 +624,6 @@ bool TopoGraph::goalDirectedSearch(
     if (a.y() != b.y()) return a.y() < b.y();
     return a.z() < b.z();
   };
-
   while (!open.empty()) {
     const auto [queued_cost, current] = open.top();
     open.pop();
@@ -630,7 +662,7 @@ bool TopoGraph::goalDirectedSearch(
       break;
 
     for (const auto &neighbor : current->neighbors_) {
-      if (neighbor == nullptr || closed.find(neighbor) != closed.end())
+      if (!within_search_radius(neighbor) || closed.find(neighbor) != closed.end())
         continue;
       const auto weight_it = current->weight_.find(neighbor);
       if (weight_it == current->weight_.end() || !std::isfinite(weight_it->second))
@@ -811,8 +843,11 @@ void TopoGraph::overlap(vector<TopoNode::Ptr> &set1, vector<TopoNode::Ptr> &set2
   // TopoNode centers are regenerated from Bubble clusters and can drift by
   // more than 1 mm between updates. Exact voxel hashing would therefore mark
   // stable nodes as "removed" and reinsert them every frame.
-  const float max_match_distance_m = static_cast<float>(
-    std::max(semantic_node_match_distance_, 1.0));
+  // Semantic association distance is intentionally much larger than the
+  // geometric Bubble displacement. Reusing it here collapses distinct
+  // branches whenever two valid vertices are within 2.5 m. EPIC's original
+  // diff was voxel-exact; retain only small numerical motion for geometry.
+  constexpr float max_match_distance_m = 0.50F;
   const float max_match_distance_sq = max_match_distance_m * max_match_distance_m;
 
   std::vector<NodeMatchCandidate> candidates;
@@ -856,8 +891,9 @@ void TopoGraph::setdiff(vector<TopoNode::Ptr> &set1, vector<TopoNode::Ptr> &set2
   if (set1.empty()) return;
 
   // See overlap(): use a spatial tolerance instead of exact millimeter bins.
-  const float max_match_distance_m = static_cast<float>(
-    std::max(semantic_node_match_distance_, 1.0));
+  // Keep this in lockstep with overlap(). Semantic matching must never decide
+  // that two geometric branches are the same vertex.
+  constexpr float max_match_distance_m = 0.50F;
   const float max_match_distance_sq = max_match_distance_m * max_match_distance_m;
 
   std::vector<NodeMatchCandidate> candidates;
@@ -906,15 +942,9 @@ void TopoGraph::removeNodes(vector<TopoNode::Ptr> &nodes) {
   for (auto &node : nodes) {
     if (node == nullptr)
       continue;
-    Eigen::Vector3i region_idx;
-    getIndex(node->center_, region_idx);
-    auto region_node = getRegionNode(region_idx);
-    ROS_ASSERT(region_node != nullptr);
-    // if (region_node == nullptr) {
-    //   continue;
-    //   debug_exit("TopoGraph::removeNodes :region_node == nullptr ");
-    // }
-    region_node->topo_nodes_.erase(node);
+    for (const auto &entry : reg_map_idx2ptr_) {
+      if (entry.second) entry.second->topo_nodes_.erase(node);
+    }
   }
 
   // nbrs
@@ -994,9 +1024,12 @@ void TopoGraph::updateRemainedConnections(vector<TopoNode::Ptr> &nodes) {
     unordered_set<TopoNode::Ptr> pre_nbrs_set_tmp;
     unordered_map<TopoNode::Ptr, uint8_t> unreachable_nbrs_tmp;
     for (auto &pre_nbr : pre_nbrs_set) {
-      if (node->unreachable_nbrs_.count(pre_nbr) && node->unreachable_nbrs_[pre_nbr] > 2) {
+      // Keep EPIC's bounded retry policy. Re-running a 3 ms A* for every
+      // rejected neighbour on every incremental frame makes graph updates
+      // compete with depth ingestion and creates visible planner latency.
+      const auto failed = node->unreachable_nbrs_.find(pre_nbr);
+      if (failed != node->unreachable_nbrs_.end() && failed->second > 2)
         continue;
-      }
       pre_nbrs_set_tmp.insert(pre_nbr);
     }
     for (auto &pre_nbr : node->unreachable_nbrs_) {
@@ -1083,10 +1116,11 @@ void TopoGraph::getPreNbrs(TopoNode::Ptr &node, vector<TopoNode::Ptr> &nbrs) {
                                  Eigen::Vector3i(1, 0, 1), Eigen::Vector3i(1, 0, -1), Eigen::Vector3i(-1, 0, 1), Eigen::Vector3i(-1, 0, -1),
                                  Eigen::Vector3i(0, 1, 1), Eigen::Vector3i(0, 1, -1), Eigen::Vector3i(0, -1, 1), Eigen::Vector3i(0, -1, -1)};
 
-  // for (int i = 0; i < steps1.size() + steps2.size(); i++) {
-  //   if (i >= steps1.size() && nbrs.size() > 4)
-  //     break;
-  for (int i = 0; i < steps1.size() ; i++) {
+  // Include diagonal neighboring regions as well as axis-aligned regions.
+  // Bubble centers near a region corner can be connected through a clear
+  // diagonal corridor; restricting this to steps1 leaves two valid bubbles
+  // present but permanently disconnected.
+  for (int i = 0; i < static_cast<int>(steps1.size() + steps2.size()); ++i) {
     Eigen::Vector3i step = i < steps1.size() ? steps1[i] : steps2[i - steps1.size()];
     Eigen::Vector3i nbr_idx = idx + step;
     auto nbr_region_node = getRegionNode(nbr_idx);
@@ -1187,6 +1221,7 @@ void TopoGraph::insertNodes(vector<TopoNode::Ptr> &nodes, bool only_raycast) {
   // 获得节点对的vector
   vector<vector<Eigen::Vector3f>> path_vec; // 初始是start和end两个点, 算完是path+一个zero/one表示成功/失败
   path_vec.resize(pair_vector.size());
+  vector<int> connection_results(pair_vector.size(), ParallelBubbleAstar::NO_PATH);
 
   // 并行A*搜索路径并写入结果
   omp_set_num_threads(6);
@@ -1202,18 +1237,39 @@ void TopoGraph::insertNodes(vector<TopoNode::Ptr> &nodes, bool only_raycast) {
       res = searchPathWithBoundary(start, end, insert_node_timeout, path);
     } else
       res = parallel_bubble_astar_->search(start, end, path, insert_node_timeout, false, true);
+    connection_results[i] = res;
     if (res != ParallelBubbleAstar::REACH_END)
       path.push_back(Eigen::Vector3f::Zero());
     else if (!only_raycast) {
       bool safe = parallel_bubble_astar_->collisionCheck_shortenPath(path);
       if (safe)
         path.push_back(Eigen::Vector3f::Ones());
-      else
+      else {
+        connection_results[i] = -1;  // reached end, but shortening rejected it
         path.push_back(Eigen::Vector3f::Zero());
+      }
     } else {
       path.push_back(Eigen::Vector3f::Ones()); // 1表示安全，0表示危险
     }
     path_vec[i].swap(path);
+  }
+
+  last_update_timing_.insert_candidate_edges += pair_vector.size();
+  for (size_t i = 0; i < connection_results.size(); ++i) {
+    const int result = connection_results[i];
+    if (result == ParallelBubbleAstar::REACH_END) {
+      ++last_update_timing_.insert_success_edges;
+    } else if (result == -1) {
+      ++last_update_timing_.insert_collision_reject_edges;
+    } else if (result == ParallelBubbleAstar::TIME_OUT) {
+      ++last_update_timing_.insert_timeout_edges;
+    } else if (result == ParallelBubbleAstar::START_FAIL) {
+      ++last_update_timing_.insert_start_fail_edges;
+    } else if (result == ParallelBubbleAstar::END_FAIL) {
+      ++last_update_timing_.insert_end_fail_edges;
+    } else {
+      ++last_update_timing_.insert_no_path_edges;
+    }
   }
 
   // 串行更新节点
@@ -1233,6 +1289,7 @@ void TopoGraph::insertNodes(vector<TopoNode::Ptr> &nodes, bool only_raycast) {
     node1->weight_[node2] = cost;
     node2->weight_[node1] = cost;
   }
+
 }
 
 size_t TopoGraph::insertSpeculativeNodes(
@@ -1241,10 +1298,10 @@ size_t TopoGraph::insertSpeculativeNodes(
     std::int64_t stamp_ns) {
   const auto is_stale = [stamp_ns](const TopoNode::Ptr &node) {
     if (!node || node->semantic_stamp_ns_ <= 0 || stamp_ns <= 0) return true;
-    // Keep a short prediction horizon across one missed/low-confidence frame.
+    // Keep a short prediction horizon across delayed or low-confidence frames.
     // This prevents a 2 Hz semantic stream from deleting the only far-field
     // branch before the next inference result arrives.
-    return std::llabs(stamp_ns - node->semantic_stamp_ns_) > 1500LL * 1000000LL;
+    return std::llabs(stamp_ns - node->semantic_stamp_ns_) > 3000LL * 1000000LL;
   };
   if (centers.empty() || !lidar_map_interface_ || !parallel_bubble_astar_)
   {
@@ -1378,10 +1435,8 @@ void TopoGraph::getRegionsToUpdate() {
   unordered_set<RegionNode::Ptr> region_set;
   unordered_set<RegionNode::Ptr> occupied_region_set;
   unordered_set<RegionNode::Ptr> free_region_set;
-  auto graphPoint = [this](Eigen::Vector3f point) {
-    if (planar_graph_)
-      point.z() = planar_z_;
-    return point;
+  auto graphPoint = [this](const Eigen::Vector3f &point) {
+    return projectGraphPoint(point, planar_graph_, planar_z_);
   };
   const Eigen::Vector3f lidar_pose = lidar_map_interface_->poseSnapshot();
   const auto latest_cloud = lidar_map_interface_->latestCloudSnapshot();
@@ -1408,14 +1463,13 @@ void TopoGraph::getRegionsToUpdate() {
   // corridors where the depth frame has no occupied return. Keep it in the
   // same bounded region set as occupied returns.
   const auto free_cloud = lidar_map_interface_->freeSpaceSnapshot();
-  const float free_layer_tolerance = planar_graph_ ?
-    std::max(0.5F * lidar_map_interface_->voxelSize(), 0.05F) :
-    std::numeric_limits<float>::infinity();
   for (const auto &point : free_cloud.points) {
-    if (planar_graph_ && std::abs(point.z - planar_z_) > free_layer_tolerance)
-      continue;
-    const Eigen::Vector3f free_point = graphPoint(
-      Eigen::Vector3f(point.x, point.y, point.z));
+    // A camera ray endpoint is generally far above/below the fixed graph
+    // layer (especially at 20 m).  Its x/y footprint is still valid free
+    // evidence for the planar graph, so project it exactly like an occupied
+    // return instead of rejecting it by endpoint height.
+    const Eigen::Vector3f free_point = graphPoint(Eigen::Vector3f(
+      point.x, point.y, point.z));
     Eigen::Vector3i region_idx;
     getIndex(free_point, region_idx);
     const auto region = getRegionNode(region_idx);
@@ -1483,6 +1537,11 @@ void TopoGraph::updateSkeleton() {
   using Clock = std::chrono::steady_clock;
   const auto total_start = Clock::now();
   last_update_timing_ = TopoGraphUpdateTiming{};
+  // A region rebuild can produce the same Bubble center from two adjacent
+  // regions.  Clean the persistent graph before matching the new skeleton;
+  // otherwise each copy keeps a different subset of the incident edges and
+  // isolated degree-zero vertices accumulate over time.
+  last_update_timing_.duplicate_nodes_merged = deduplicateNearbyNodes();
   last_update_timing_.regions = toponodes_update_region_arr_.size();
   last_update_timing_.occupied_regions = selected_occupied_regions_;
   last_update_timing_.free_regions = selected_free_regions_;
@@ -1573,6 +1632,39 @@ void TopoGraph::updateSkeleton() {
   last_update_timing_.planar_bubbles = static_cast<size_t>(generated_planar_bubbles);
   last_update_timing_.new_nodes = static_cast<size_t>(generated_nodes);
 
+  // Bubble clustering is local to a region, so adjacent regions can still
+  // emit duplicate centers in the same rebuild.  Collapse those candidates
+  // before overlap/setdiff; they must not enter insertNodes as separate
+  // vertices.
+  // Only collapse numerical jitter from adjacent-region clustering.  The
+  // 0.25 m map voxel is a valid topology spacing and must not be treated as a
+  // duplicate distance.
+  const float new_node_merge_distance = 0.05F;
+  vector<TopoNode::Ptr> unique_new_nodes;
+  unique_new_nodes.reserve(new_nodes.size());
+  for (const auto &candidate : new_nodes) {
+    if (!candidate) continue;
+    TopoNode::Ptr match;
+    for (const auto &existing : unique_new_nodes) {
+      if ((candidate->center_ - existing->center_).norm() <= new_node_merge_distance) {
+        match = existing;
+        break;
+      }
+    }
+    if (!match) {
+      unique_new_nodes.push_back(candidate);
+      continue;
+    }
+    // Keep the more open representative.  Semantic state is restored by
+    // persistent id after the geometric diff, so this merge is lossless for
+    // newly generated candidates.
+    if (candidate->bubble_radius_ > match->bubble_radius_) {
+      match->center_ = candidate->center_;
+      match->bubble_radius_ = candidate->bubble_radius_;
+    }
+  }
+  new_nodes.swap(unique_new_nodes);
+
   // A newly observed Bubble is authoritative geometry. If it lands on a
   // speculative candidate, promote the candidate instead of keeping two
   // vertices at the same location. This preserves semantic identity while
@@ -1613,6 +1705,34 @@ void TopoGraph::updateSkeleton() {
   const auto diff_start = Clock::now();
   overlap(new_nodes, old_nodes, nodes_remained);
   setdiff(old_nodes, new_nodes, nodes2remove);
+
+  // A missing Bubble is not proof that the corresponding free space vanished:
+  // the current map snapshot may still be ray-carving that region, or an
+  // insertion search may have failed transiently. Keep the old vertex and its
+  // identity for two consecutive misses, while refreshing its incident edges
+  // through the normal remained-node path. Only a persistent miss is removed.
+  constexpr std::uint8_t kGeometryMissGrace = 2;
+  for (const auto &node : nodes_remained) {
+    if (node) node->geometry_miss_count_ = 0;
+  }
+  vector<TopoNode::Ptr> deferred_removals;
+  deferred_removals.reserve(nodes2remove.size());
+  vector<TopoNode::Ptr> confirmed_removals;
+  confirmed_removals.reserve(nodes2remove.size());
+  for (const auto &node : nodes2remove) {
+    if (!node) continue;
+    node->geometry_miss_count_ = static_cast<std::uint8_t>(
+      std::min<int>(255, static_cast<int>(node->geometry_miss_count_) + 1));
+    if (retainGeometryAfterMiss(node->geometry_miss_count_, kGeometryMissGrace)) {
+      deferred_removals.push_back(node);
+    } else {
+      confirmed_removals.push_back(node);
+    }
+  }
+  nodes2remove.swap(confirmed_removals);
+  last_update_timing_.deferred_nodes = deferred_removals.size();
+  nodes_remained.insert(nodes_remained.end(), deferred_removals.begin(),
+                        deferred_removals.end());
   setdiff(new_nodes, old_nodes, nodes2insert);
   unordered_set<TopoNode::Ptr> removed_set(nodes2remove.begin(), nodes2remove.end());
   unordered_set<std::uint64_t> active_semantic_ids;
@@ -1645,8 +1765,17 @@ void TopoGraph::updateSkeleton() {
   insertNodes(nodes2insert);
   last_update_timing_.insert_ms =
       std::chrono::duration<double, std::milli>(Clock::now() - insert_start).count();
+  // Keep an isolated Bubble in the persistent graph.  EPIC's bounded A* can
+  // reject all candidate edges for one frame because the map snapshot is
+  // still being updated; deleting the vertex here loses the branch before
+  // the next frame can retry it.  The existing isolated-node retry in
+  // insertNodes() and the next incremental update are the recovery path.
   last_update_timing_.total_ms =
       std::chrono::duration<double, std::milli>(Clock::now() - total_start).count();
+  // New vertices can expose stale half-edges from an earlier incremental
+  // diff, and duplicate candidates only become visible after insertion.
+  last_update_timing_.duplicate_nodes_merged += deduplicateNearbyNodes();
+  last_update_timing_.half_edges_removed = normalizeConnectivity();
   vector<TopoNode::Ptr> unreachable_nodes;
 
 
@@ -1778,16 +1907,171 @@ void TopoGraph::updateOdomNode(Eigen::Vector3f &odom_pos, float &yaw) {
   // }
 }
 
+size_t TopoGraph::deduplicateNearbyNodes(float tolerance_m) {
+  if (!(tolerance_m > 0.0F) || !std::isfinite(tolerance_m)) return 0;
+
+  vector<TopoNode::Ptr> nodes;
+  unordered_set<TopoNode::Ptr> seen;
+  auto collect_node = [&](const TopoNode::Ptr &node) {
+    if (!node || node->is_viewpoint_ || node->role_ != TopoNodeRole::Geometric ||
+        !seen.insert(node).second) return;
+    nodes.push_back(node);
+  };
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second) continue;
+    for (const auto &node : entry.second->topo_nodes_) {
+      collect_node(node);
+    }
+  }
+  // A stale edge can retain a node after its region membership was removed.
+  // Include that reachable component in the same pass; otherwise the node is
+  // visible in diagnostics but can never be merged by the region-only scan.
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    for (const auto &neighbor : nodes[i]->neighbors_) collect_node(neighbor);
+  }
+
+  auto preferred = [](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
+    const bool left_persistent = left->persistent_id_ != 0;
+    const bool right_persistent = right->persistent_id_ != 0;
+    if (left_persistent != right_persistent) return left_persistent;
+    if (left->neighbors_.size() != right->neighbors_.size())
+      return left->neighbors_.size() > right->neighbors_.size();
+    return left->persistent_id_ < right->persistent_id_;
+  };
+
+  const float tolerance_sq = tolerance_m * tolerance_m;
+  vector<bool> consumed(nodes.size(), false);
+  size_t merged = 0;
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    if (consumed[i] || !nodes[i]) continue;
+    vector<size_t> members;
+    members.push_back(i);
+    consumed[i] = true;
+    for (size_t j = i + 1; j < nodes.size(); ++j) {
+      if (consumed[j] || !nodes[j]) continue;
+      if ((nodes[i]->center_ - nodes[j]->center_).squaredNorm() <= tolerance_sq) {
+        members.push_back(j);
+        consumed[j] = true;
+      }
+    }
+    if (members.size() < 2) continue;
+
+    size_t canonical_index = members.front();
+    for (const auto index : members) {
+      if (preferred(nodes[index], nodes[canonical_index])) canonical_index = index;
+    }
+    const auto canonical = nodes[canonical_index];
+    unordered_set<TopoNode::Ptr> duplicate_set;
+    for (const auto index : members) duplicate_set.insert(nodes[index]);
+
+    // Preserve semantic memory and the largest free-space representative.
+    for (const auto index : members) {
+      const auto duplicate = nodes[index];
+      if (duplicate == canonical) continue;
+      canonical->bubble_radius_ = std::max(canonical->bubble_radius_, duplicate->bubble_radius_);
+      if (duplicate->semantic_observations_ > canonical->semantic_observations_ ||
+          (duplicate->semantic_observations_ == canonical->semantic_observations_ &&
+           duplicate->semantic_score_ > canonical->semantic_score_)) {
+        canonical->semantic_score_ = duplicate->semantic_score_;
+        canonical->semantic_confidence_ = duplicate->semantic_confidence_;
+        canonical->semantic_stamp_ns_ = duplicate->semantic_stamp_ns_;
+      }
+      canonical->semantic_observations_ = std::max(
+        canonical->semantic_observations_, duplicate->semantic_observations_);
+    }
+
+    // Redirect every incident edge to the canonical vertex.  The old edge is
+    // removed from both endpoint maps first, so no one-way neighbor survives.
+    for (const auto index : members) {
+      const auto duplicate = nodes[index];
+      if (duplicate == canonical) continue;
+      const auto neighbors = duplicate->neighbors_;
+      for (const auto &neighbor : neighbors) {
+        if (!neighbor || duplicate_set.count(neighbor)) continue;
+        const auto path_it = duplicate->paths_.find(neighbor);
+        const auto weight_it = duplicate->weight_.find(neighbor);
+        neighbor->neighbors_.erase(duplicate);
+        neighbor->paths_.erase(duplicate);
+        neighbor->weight_.erase(duplicate);
+        canonical->neighbors_.insert(neighbor);
+        neighbor->neighbors_.insert(canonical);
+        if (canonical->paths_.find(neighbor) == canonical->paths_.end() &&
+            path_it != duplicate->paths_.end()) {
+          canonical->paths_[neighbor] = path_it->second;
+          auto reverse_path = path_it->second;
+          std::reverse(reverse_path.begin(), reverse_path.end());
+          neighbor->paths_[canonical] = reverse_path;
+        }
+        if (canonical->weight_.find(neighbor) == canonical->weight_.end() &&
+            weight_it != duplicate->weight_.end()) {
+          canonical->weight_[neighbor] = weight_it->second;
+          neighbor->weight_[canonical] = weight_it->second;
+        }
+      }
+      // The rolling map can expand after insertion, so the current getIndex
+      // is not guaranteed to be the region that owns this pointer.  Remove
+      // it from every region to prevent stale duplicates from reappearing.
+      for (const auto &entry : reg_map_idx2ptr_) {
+        if (entry.second) entry.second->topo_nodes_.erase(duplicate);
+      }
+      duplicate->neighbors_.clear();
+      duplicate->paths_.clear();
+      duplicate->weight_.clear();
+      duplicate->unreachable_nbrs_.clear();
+      ++merged;
+    }
+  }
+  return merged;
+}
+
+size_t TopoGraph::normalizeConnectivity() {
+  unordered_set<TopoNode::Ptr> active;
+  vector<TopoNode::Ptr> nodes;
+  if (odom_node_) {
+    active.insert(odom_node_);
+    nodes.push_back(odom_node_);
+  }
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second) continue;
+    for (const auto &node : entry.second->topo_nodes_) {
+      if (node && active.insert(node).second) nodes.push_back(node);
+    }
+  }
+  size_t removed = 0;
+  for (const auto &node : nodes) {
+    vector<TopoNode::Ptr> stale;
+    for (const auto &neighbor : node->neighbors_) {
+      if (!neighbor || !active.count(neighbor) ||
+          !neighbor->neighbors_.count(node)) {
+        stale.push_back(neighbor);
+      }
+    }
+    for (const auto &neighbor : stale) {
+      node->neighbors_.erase(neighbor);
+      node->paths_.erase(neighbor);
+      node->weight_.erase(neighbor);
+      node->unreachable_nbrs_.erase(neighbor);
+      if (neighbor) {
+        neighbor->neighbors_.erase(node);
+        neighbor->paths_.erase(node);
+        neighbor->weight_.erase(node);
+        neighbor->unreachable_nbrs_.erase(node);
+      }
+      ++removed;
+    }
+  }
+  return removed;
+}
+
 void TopoGraph::removeNode(TopoNode::Ptr &node) {
   if (node == nullptr)
     return;
-  Eigen::Vector3i region_idx;
-  getIndex(node->center_, region_idx);
-  auto region_node = getRegionNode(region_idx);
-  if (region_node == nullptr) {
-    debug_exit("TopoGraph::removeNodes :region_node == nullptr ");
+  // A rolling map may have changed the node's computed region since it was
+  // inserted.  Erase by pointer from all regions instead of trusting the
+  // current coordinate-to-region lookup.
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (entry.second) entry.second->topo_nodes_.erase(node);
   }
-  region_node->topo_nodes_.erase(node);
 
   // nbrs
   for (auto &nbr : node->neighbors_) {

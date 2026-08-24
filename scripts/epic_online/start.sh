@@ -44,7 +44,12 @@ done
 echo "Starting online ScaleNav: prompt=${PROMPT@Q}, PEARL=${START_SEMANTIC}, rate=${SEMANTIC_RATE}Hz"
 echo "UE/AirSim must already be running and set to the selected map."
 
-# Apply semantic risk early enough to bias the next topological branch.
+# Original EPIC baseline for diagnosis: semantic data may still be logged and
+# visualized, but it does not alter the geometric A* route.
+
+# Rebuild the incremental skeleton on the same 200 ms cadence as the depth/map
+# update. A 1 s gate lets a fast vehicle travel several metres before newly
+# observed free space can become graph topology.
 # Keep real-node association close to the observed semantic surface; the
 # geometric clearance cost handles obstacle proximity independently.
 exec env \
@@ -69,28 +74,32 @@ exec env \
   MISSION_STOP_SPEED=0.3 \
   FINAL_SUBGOAL_TOLERANCE=0.25 \
   EPIC_UPDATE_PERIOD_MS=200 \
-  EPIC_SKELETON_REBUILD_PERIOD_MS=1000.0 \
+  EPIC_DIAGNOSTIC_LOG_PERIOD_MS=2000 \
+  EPIC_SKELETON_REBUILD_PERIOD_MS=200.0 \
   EPIC_MAP_VOXEL_SIZE=0.25 \
   EPIC_MAP_HISTORY_RADIUS_M=20.0 \
   EPIC_MAP_MAX_POINTS=20000 \
   EPIC_MAP_PRUNE_DISTANCE_M=0.5 \
   EPIC_LOCAL_GOAL_MIN_ADVANCE_M=0.75 \
-  EPIC_LOCAL_GOAL_LOOKAHEAD_M=10.0 \
-  EPIC_ROUTE_PLAN_PERIOD_MS=2000 \
-  EPIC_LOCAL_GOAL_RESERVE_M=5.0 \
+  EPIC_LOCAL_GOAL_LOOKAHEAD_M=5.0 \
+  EPIC_ROUTE_PLAN_PERIOD_MS=100 \
+  EPIC_LOCAL_GOAL_RESERVE_M=0.0 \
+  EPIC_LOCAL_GRAPH_RADIUS_M="${EPIC_LOCAL_GRAPH_RADIUS_M:-35.0}" \
   EPIC_USE_EDGE_WITNESS_PATH=true \
   EPIC_RAYCAST_SHORTCUT_SAMPLE_STEP_M=0.25 \
   EPIC_RAYCAST_SHORTCUT_CLEARANCE_MARGIN_M=0.05 \
   EPIC_GOAL_PATH_COST_WEIGHT=0.2 \
-  EPIC_SEMANTIC_COST_WEIGHT=2.0 \
+  EPIC_SEMANTIC_COST_WEIGHT=0.0 \
   EPIC_SEMANTIC_NODE_EMA_ALPHA=0.3 \
-  EPIC_SEMANTIC_VISUALIZATION_MAX_SCORE=1.0 \
+  EPIC_SEMANTIC_ROUTE_REPLAN_ENABLED=false \
+  EPIC_SEMANTIC_VISUALIZATION_MAX_SCORE=0.4 \
+  EPIC_SEMANTIC_BASELINE_QUANTILE=0.25 \
   EPIC_SEMANTIC_ASSOCIATION_RADIUS_M=1.5 \
   EPIC_SEMANTIC_DEPTH_CLIP_M=20.0 \
   EPIC_SEMANTIC_DEPTH_SYNC_TOLERANCE_MS=250.0 \
   EPIC_SEMANTIC_PATCH_COLS=5 \
   EPIC_SEMANTIC_PATCH_ROWS=3 \
-  EPIC_SPECULATIVE_ENABLED=true \
+  EPIC_SPECULATIVE_ENABLED=false \
   EPIC_SPECULATIVE_MIN_SCORE=0.35 \
   EPIC_SPECULATIVE_FORWARD_M=22.0 \
   EPIC_SPECULATIVE_PATCH_SEPARATION_M=1.5 \
@@ -117,6 +126,7 @@ exec env \
   EPIC_TRAJECTORY_SPEED_COLOR_MAX_MPS=8.0 \
   EPIC_TRAJECTORY_MAX_POINTS=50000 \
   EPIC_FLIGHT_STATISTICS_FILE="$ROOT_DIR/log_event/epic_flight_statistics.csv" \
+  EPIC_GRAPH_LOG_FILE="$ROOT_DIR/log_event/epic_graph_snapshots.jsonl" \
   EPIC_GRAPH_FIXED_LAYER=true \
   EPIC_GRAPH_LAYER_Z=1.6 \
   EPIC_REUSE_GRAPH_ON_GOAL=true \

@@ -148,4 +148,38 @@ TEST(EpicIntegration, TenHertzDepthAndFreeRayUpdatesPreserveTheMapContract)
   EXPECT_NEAR(map.getDisToOcc(p(20.0F, 0.0F)), 0.0, 1e-5);
 }
 
+TEST(EpicIntegration, PlanarGraphProjectsFarFreeRayOntoItsLayer)
+{
+  // At 20 m, a pixel away from the optical center has a large vertical
+  // displacement.  The planar graph must retain its horizontal free-space
+  // evidence rather than rejecting the endpoint by z.
+  const Eigen::Vector3f far_ray(20.0F, 8.0F, 8.0F);
+  const auto projected = projectGraphPoint(far_ray, true, 1.6F);
+  EXPECT_FLOAT_EQ(projected.x(), 20.0F);
+  EXPECT_FLOAT_EQ(projected.y(), 8.0F);
+  EXPECT_FLOAT_EQ(projected.z(), 1.6F);
+}
+
+TEST(EpicIntegration, OpenLongBubbleEdgeIsNotRejectedByAnArbitraryTwoMeterCap)
+{
+  auto map = std::make_shared<LIOInterface>();
+  map->configureBounds(Eigen::Vector3f(-10.0F, -10.0F, 0.0F),
+                       Eigen::Vector3f(20.0F, 20.0F, 4.0F));
+  map->configureStorage(0.25F, 20.0F, 20000, 0.5F);
+  // The obstacle is five metres to the side.  The six-metre edge is open,
+  // but the old min(2 m, clearance) code gave 2+2 < 6 and rejected it.
+  const auto obstacle = singlePoint(PointType(0.0F, 5.0F, 1.6F));
+  map->updateCloudWorld(obstacle, Eigen::Vector3f::Zero(),
+                        Eigen::Quaternionf::Identity());
+
+  ParallelBubbleAstar astar;
+  astar.lidar_map_interface_ = map;
+  astar.safe_distance_ = 0.0;
+  std::vector<Eigen::Vector3f> path = {p(0.0F, 0.0F), p(6.0F, 0.0F)};
+  EXPECT_TRUE(astar.collisionCheck_shortenPath(path));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_TRUE(path.front().isApprox(p(0.0F, 0.0F)));
+  EXPECT_TRUE(path.back().isApprox(p(6.0F, 0.0F)));
+}
+
 }  // namespace

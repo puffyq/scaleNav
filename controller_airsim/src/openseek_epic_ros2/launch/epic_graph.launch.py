@@ -19,6 +19,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "flight_statistics_file",
             default_value="/mnt/code/lab/yopo/OpenSeek/log_event/epic_flight_statistics.csv"),
+        DeclareLaunchArgument(
+            "graph_log_file",
+            default_value="/mnt/code/lab/yopo/OpenSeek/log_event/epic_graph_snapshots.jsonl"),
         DeclareLaunchArgument("trajectory_speed_color_max_mps", default_value="8.0"),
         DeclareLaunchArgument("trajectory_max_points", default_value="50000"),
         DeclareLaunchArgument("graph_fixed_layer", default_value="true"),
@@ -30,11 +33,12 @@ def generate_launch_description():
         DeclareLaunchArgument("map_max_points", default_value="20000"),
         DeclareLaunchArgument("map_prune_distance_m", default_value="0.5"),
         DeclareLaunchArgument("update_period_ms", default_value="100"),
-        DeclareLaunchArgument("skeleton_rebuild_period_ms", default_value="500.0"),
+        DeclareLaunchArgument("skeleton_rebuild_period_ms", default_value="200.0"),
         DeclareLaunchArgument("local_goal_min_advance_m", default_value="0.75"),
-        DeclareLaunchArgument("local_goal_lookahead_m", default_value="10.0"),
-        DeclareLaunchArgument("route_plan_period_ms", default_value="2000"),
-        DeclareLaunchArgument("local_goal_reserve_m", default_value="5.0"),
+        DeclareLaunchArgument("local_goal_lookahead_m", default_value="5.0"),
+        # Compatibility arguments; the planner publishes every update tick.
+        DeclareLaunchArgument("route_plan_period_ms", default_value="100"),
+        DeclareLaunchArgument("local_goal_reserve_m", default_value="0.0"),
         DeclareLaunchArgument("use_edge_witness_path", default_value="true"),
         DeclareLaunchArgument("enable_raycast_shortcut", default_value="false"),
         DeclareLaunchArgument("raycast_shortcut_sample_step_m", default_value="0.25"),
@@ -42,7 +46,11 @@ def generate_launch_description():
         DeclareLaunchArgument("goal_path_cost_weight", default_value="0.2"),
         DeclareLaunchArgument("semantic_cost_weight", default_value="1.0"),
         DeclareLaunchArgument("semantic_node_ema_alpha", default_value="0.3"),
-        DeclareLaunchArgument("semantic_visualization_max_score", default_value="1.0"),
+        DeclareLaunchArgument("semantic_route_replan_delta", default_value="0.15"),
+        DeclareLaunchArgument("semantic_route_replan_enabled", default_value="false"),
+        DeclareLaunchArgument("semantic_route_influence_m", default_value="5.0"),
+        DeclareLaunchArgument("semantic_visualization_max_score", default_value="0.4"),
+        DeclareLaunchArgument("semantic_baseline_quantile", default_value="0.25"),
         DeclareLaunchArgument("semantic_speculative_influence_m", default_value="5.0"),
         DeclareLaunchArgument("bubble_topo/clearance_cost_weight", default_value="2.0"),
         DeclareLaunchArgument("bubble_topo/clearance_target_m", default_value="1.2"),
@@ -93,6 +101,7 @@ def generate_launch_description():
                 "visualization_frame": LaunchConfiguration("visualization_frame"),
                 "odom_twist_frame": LaunchConfiguration("odom_twist_frame"),
                 "flight_statistics_file": LaunchConfiguration("flight_statistics_file"),
+                "graph_log_file": LaunchConfiguration("graph_log_file"),
                 "trajectory_speed_color_max_mps": LaunchConfiguration(
                     "trajectory_speed_color_max_mps"),
                 "trajectory_max_points": LaunchConfiguration("trajectory_max_points"),
@@ -119,8 +128,16 @@ def generate_launch_description():
                 "goal_path_cost_weight": LaunchConfiguration("goal_path_cost_weight"),
                 "semantic_cost_weight": LaunchConfiguration("semantic_cost_weight"),
                 "semantic_node_ema_alpha": LaunchConfiguration("semantic_node_ema_alpha"),
+                "semantic_route_replan_delta": LaunchConfiguration(
+                    "semantic_route_replan_delta"),
+                "semantic_route_replan_enabled": LaunchConfiguration(
+                    "semantic_route_replan_enabled"),
+                "semantic_route_influence_m": LaunchConfiguration(
+                    "semantic_route_influence_m"),
                 "semantic_visualization_max_score": LaunchConfiguration(
                     "semantic_visualization_max_score"),
+                "semantic_baseline_quantile": LaunchConfiguration(
+                    "semantic_baseline_quantile"),
                 "bubble_topo/semantic_speculative_influence_m": LaunchConfiguration(
                     "semantic_speculative_influence_m"),
                 "bubble_topo/clearance_cost_weight": LaunchConfiguration(

@@ -185,21 +185,6 @@ inline bool shouldReuseTerminal(const Eigen::Vector3f &vehicle,
   return (vehicle - terminal).norm() > std::max(0.0F, release_distance);
 }
 
-inline float velocityCompensatedLookahead(float minimum_lookahead,
-                                          float speed,
-                                          float planning_period_seconds,
-                                          float reserve_distance)
-{
-  if (!std::isfinite(minimum_lookahead) || !std::isfinite(speed) ||
-      !std::isfinite(planning_period_seconds) || !std::isfinite(reserve_distance)) {
-    return std::max(0.0F, minimum_lookahead);
-  }
-  return std::max(
-    std::max(0.0F, minimum_lookahead),
-    std::max(0.0F, speed) * std::max(0.0F, planning_period_seconds) +
-      std::max(0.0F, reserve_distance));
-}
-
 // A remembered terminal is valid only while the vehicle remains on the
 // directed witness route that led to it.  Distance to the terminal alone is
 // insufficient: a vehicle that has passed or circled around the terminal is
@@ -235,6 +220,25 @@ inline bool canReuseForwardRoute(const Eigen::Vector3f &vehicle,
     return false;
   }
   return total_length - nearest_progress > std::max(0.0F, release_distance);
+}
+
+// Semantic heatmaps arrive more often than a route should be replaced.  A
+// route is invalidated only when the risk field changes materially; ordinary
+// EMA updates and unrelated patches must leave the YOPO guide stable.
+inline bool semanticRiskChangeRequiresReplan(float before, float after,
+                                             float minimum_delta)
+{
+  if (!std::isfinite(before) || !std::isfinite(after)) return true;
+  return std::abs(after - before) >= std::max(0.0F, minimum_delta);
+}
+
+// The original EPIC route is geometry-driven.  Semantic frames may update the
+// cost field without invalidating a valid rolling route; route replacement is
+// opt-in because noisy semantic streams otherwise cause branch oscillation.
+inline bool semanticRouteResetRequested(bool enabled, float before, float after,
+                                        float minimum_delta)
+{
+  return enabled && semanticRiskChangeRequiresReplan(before, after, minimum_delta);
 }
 
 }  // namespace openseek_epic

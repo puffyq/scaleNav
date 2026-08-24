@@ -48,20 +48,6 @@ TEST(RouteMemory, HoldsTheRollingTerminalUntilItIsActuallyReached)
   EXPECT_FALSE(openseek_epic::shouldReuseTerminal(point(1.2F), point(2.0F), 1.0F));
 }
 
-TEST(RouteLookahead, KeepsTheConfiguredMinimumAtLowSpeed)
-{
-  EXPECT_FLOAT_EQ(
-    openseek_epic::velocityCompensatedLookahead(10.0F, 1.0F, 2.0F, 5.0F), 10.0F);
-}
-
-TEST(RouteLookahead, PreservesReserveUntilTheNextPlanningCycle)
-{
-  EXPECT_FLOAT_EQ(
-    openseek_epic::velocityCompensatedLookahead(10.0F, 4.0F, 2.0F, 5.0F), 13.0F);
-  EXPECT_FLOAT_EQ(
-    openseek_epic::velocityCompensatedLookahead(10.0F, 5.0F, 2.0F, 5.0F), 15.0F);
-}
-
 TEST(RouteMemory, ReleasesAStaleTerminalAfterLeavingTheDirectedRoute)
 {
   const std::vector<Eigen::Vector3f> route = {point(0.0F), point(0.0F, 2.0F)};
@@ -76,15 +62,30 @@ TEST(RouteMemory, ReleasesAStaleTerminalAfterLeavingTheDirectedRoute)
 TEST(RouteMemory, ExtendsBeforeTheLookaheadReachesTheRememberedTerminal)
 {
   const std::vector<Eigen::Vector3f> route = {point(0.0F), point(20.0F)};
-  const float lookahead =
-    openseek_epic::velocityCompensatedLookahead(10.0F, 4.0F, 2.0F, 5.0F);
+  const float lookahead = 5.0F;
 
   EXPECT_TRUE(openseek_epic::canReuseForwardRoute(
     point(0.0F), route, lookahead, 1.0F));
-  EXPECT_FALSE(openseek_epic::canReuseForwardRoute(
+  EXPECT_TRUE(openseek_epic::canReuseForwardRoute(
     point(8.0F), route, lookahead, 1.0F));
+  EXPECT_FALSE(openseek_epic::canReuseForwardRoute(
+    point(16.0F), route, lookahead, 1.0F));
   EXPECT_TRUE(openseek_epic::canReuseForwardRoute(
     point(8.0F), route, 0.0F, 1.0F));
+}
+
+TEST(RouteMemory, IgnoresSmallSemanticEmaChanges)
+{
+  EXPECT_FALSE(openseek_epic::semanticRiskChangeRequiresReplan(0.20F, 0.30F, 0.15F));
+  EXPECT_TRUE(openseek_epic::semanticRiskChangeRequiresReplan(0.20F, 0.36F, 0.15F));
+  EXPECT_TRUE(openseek_epic::semanticRiskChangeRequiresReplan(
+    std::numeric_limits<float>::quiet_NaN(), 0.2F, 0.15F));
+}
+
+TEST(RouteMemory, StaticGeometryDoesNotResetOnSemanticFrameNoiseByDefault)
+{
+  EXPECT_FALSE(openseek_epic::semanticRouteResetRequested(false, 0.10F, 0.90F, 0.15F));
+  EXPECT_TRUE(openseek_epic::semanticRouteResetRequested(true, 0.10F, 0.90F, 0.15F));
 }
 
 TEST(RaycastShortcut, CollapsesAnOpenPolylineToItsEndpoints)

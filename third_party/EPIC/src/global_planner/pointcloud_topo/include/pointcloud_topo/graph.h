@@ -24,10 +24,12 @@
 #include <pcl_ros/point_cloud.h>
 #include <pointcloud_topo/parallel_bubble_astar.h>
 #include <random>
+#include <algorithm>
 #include <cstdint>
 #include <cmath>
 #include <limits>
 #include <mutex>
+#include <vector>
 #include <ros/ros.h>
 #include <thread>
 #include <lidar_map/lidar_map.h>
@@ -120,6 +122,49 @@ enum class TopoGeometryState : std::uint8_t {
   Unknown = 1,
 };
 
+// A speculative endpoint is a risk anchor only when the semantic evidence is
+// strong enough to overcome the heatmap/EMA noise floor.  Keep this predicate
+// shared by planning diagnostics and RViz so a tiny residual score is never
+// presented as a block risk.
+inline bool isSemanticRiskAnchor(
+    float score, float confidence, float minimum_score = 0.35F,
+    float minimum_confidence = 0.5F) {
+  return std::isfinite(score) && std::isfinite(confidence) &&
+         score >= minimum_score && confidence >= minimum_confidence;
+}
+
+// PEARL's per-pixel output is a similarity/probability map, not a calibrated
+// obstacle probability: an empty frame commonly has a non-zero background.
+// Subtract a frame background estimate and retain only positive contrast.
+inline float calibrateSemanticScore(float score, float frame_baseline) {
+  if (!std::isfinite(score) || !std::isfinite(frame_baseline)) return 0.0F;
+  const float denominator = std::max(1.0e-3F, 1.0F - frame_baseline);
+  return std::clamp((score - frame_baseline) / denominator, 0.0F, 1.0F);
+}
+
+// Patch scores are max-pooled, so their median is biased toward the most
+// salient pixels in every patch and is not a stable background estimate.
+// A lower quantile keeps ordinary patches as the reference while preserving
+// positive contrast for the few high-risk patches.
+inline float semanticFrameBaseline(std::vector<float> scores,
+                                   float quantile = 0.25F) {
+  if (scores.empty()) return 0.0F;
+  scores.erase(std::remove_if(scores.begin(), scores.end(),
+    [](float value) { return !std::isfinite(value); }), scores.end());
+  if (scores.empty()) return 0.0F;
+  const float q = std::clamp(quantile, 0.0F, 1.0F);
+  const std::size_t index = static_cast<std::size_t>(
+    std::floor(q * static_cast<float>(scores.size() - 1)));
+  auto middle = scores.begin() + static_cast<std::ptrdiff_t>(index);
+  std::nth_element(scores.begin(), middle, scores.end());
+  return std::clamp(*middle, 0.0F, 1.0F);
+}
+
+inline bool retainGeometryAfterMiss(
+    std::uint8_t miss_count, std::uint8_t grace = 2U) {
+  return miss_count <= grace;
+}
+
 class TopoNode {
 public:
   typedef std::shared_ptr<TopoNode> Ptr;
@@ -128,6 +173,10 @@ public:
   bool is_history_odom_node_ = false;
   TopoNodeRole role_ = TopoNodeRole::Geometric;
   TopoGeometryState geometry_state_ = TopoGeometryState::Verified;
+  // A Bubble can be absent for one map snapshot while the ray-carved map and
+  // the topology update are catching up.  Keep a short miss count so one
+  // failed regeneration cannot make a persistent node disappear.
+  std::uint8_t geometry_miss_count_ = 0;
   float yaw_;
   Eigen::Vector3f center_;
   // Radius of the representative real BubbleNode used to create this node.
@@ -232,7 +281,21 @@ struct TopoGraphUpdateTiming {
   size_t new_nodes = 0;
   size_t remained_nodes = 0;
   size_t removed_nodes = 0;
+  size_t deferred_nodes = 0;
   size_t inserted_nodes = 0;
+  // Connection diagnostics are intentionally separate from inserted_nodes:
+  // the latter counts vertices accepted by the topology diff, not reachable
+  // vertices.  A vertex can therefore be inserted while all candidate edges
+  // time out or fail collision validation.
+  size_t insert_candidate_edges = 0;
+  size_t insert_success_edges = 0;
+  size_t insert_timeout_edges = 0;
+  size_t insert_no_path_edges = 0;
+  size_t insert_start_fail_edges = 0;
+  size_t insert_end_fail_edges = 0;
+  size_t insert_collision_reject_edges = 0;
+  size_t duplicate_nodes_merged = 0;
+  size_t half_edges_removed = 0;
   size_t semantic_restored_nodes = 0;
   size_t semantic_memory_records = 0;
 };
@@ -246,6 +309,17 @@ struct TopoSemanticRecord {
   std::uint32_t observations = 0;
   std::int64_t stamp_ns = 0;
 };
+
+// The online graph is optionally represented on one horizontal layer.  All
+// observations (occupied returns and free-ray endpoints) must use the same
+// projection before region selection; filtering by the original camera
+// endpoint height drops valid side-corridor evidence at long range.
+inline Eigen::Vector3f projectGraphPoint(const Eigen::Vector3f &point,
+                                         bool planar, float planar_z) {
+  Eigen::Vector3f projected = point;
+  if (planar) projected.z() = planar_z;
+  return projected;
+}
 
 class TopoGraph {
 public:
@@ -299,14 +373,17 @@ public:
   RegionNode::Ptr getRegionNode(const Eigen::Vector3i &region_idx_);
   bool graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr &end_node, std::vector<TopoNode::Ptr> &path, double time_out,
                    bool kino = false, std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> last_path = {},
-                   float semantic_cost_weight = 0.0F);
+                   float semantic_cost_weight = 0.0F,
+                   float max_search_radius_m = std::numeric_limits<float>::infinity());
   bool goalDirectedSearch(
       const TopoNode::Ptr &start_node, const Eigen::Vector3f &goal,
       std::vector<TopoNode::Ptr> &path, double time_out,
       float path_cost_weight = 0.2f, float previous_path_cost_factor = 0.05f,
       const std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> &last_path = {},
-      float semantic_cost_weight = 0.0F);
+      float semantic_cost_weight = 0.0F,
+      float max_search_radius_m = std::numeric_limits<float>::infinity());
   float semanticRiskForEdge(const TopoNode::Ptr &from, const TopoNode::Ptr &to) const;
+  float clearanceCostForEdge(const TopoNode::Ptr &from, const TopoNode::Ptr &to) const;
   void init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, ParallelBubbleAstar::Ptr &parallel_bubble_astar);
   void cauculateMemoryConsumption();
   double getPathLength(const vector<TopoNode::Ptr> &topo_path);
@@ -333,6 +410,16 @@ public:
   size_t restoreNodeSemanticMemory(
       vector<TopoNode::Ptr> &nodes,
       const unordered_set<std::uint64_t> &unavailable_ids = {});
+  // Merge geometrically duplicate persistent vertices without discarding
+  // their incident edges or semantic memory.  The return value is the number
+  // of vertices removed from the graph.
+  // Bubble centers can move by a few centimetres between map snapshots. A
+  // quarter-metre tolerance is the map voxel size, so it also merges genuine
+  // adjacent topology vertices and removes valid branches.
+  size_t deduplicateNearbyNodes(float tolerance_m = 0.05F);
+  // Remove stale one-way neighbor references left by an incremental diff.
+  // EPIC edges are undirected; a half-edge is never a valid planning edge.
+  size_t normalizeConnectivity();
   void removeNode(TopoNode::Ptr &node);
   std::vector<TopoNode::Ptr> speculativeNodes() const;
   float estimateRoughDistance(const Eigen::Vector3f &goal, const int his_idx);

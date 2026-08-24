@@ -3,12 +3,12 @@
 
 The defaults mirror scripts/epic_online/start.sh:
   depth/free-rays 10 Hz, semantic heatmap 2 Hz, planner 5 Hz,
-  skeleton rebuild 1 Hz, route decision 0.5 Hz.
+  skeleton rebuild 5 Hz, route decision 0.5 Hz.
 
 This is a contract test for scheduling and observable behavior. It does not
 pretend to be AirSim physics; the C++ integration test covers the real graph
 and map data structures, while this script covers stream cadence, latency and
-backlog behavior.
+rebuild freshness.
 """
 
 from __future__ import annotations
@@ -27,14 +27,14 @@ PARAMETERS = {
     "odom_hz": 50.0,
     "semantic_hz": 2.0,
     "planner_hz": 5.0,
-    "skeleton_hz": 1.0,
+    "skeleton_hz": 5.0,
     "route_hz": 0.5,
     "cloud_latency_ms": 100.0,
     "semantic_latency_ms": 20.0,
-    # Latest AirSim logs show 0.67-1.34 s incremental rebuilds while the
-    # configured period is 1 s.  This deliberately exercises the backlog.
-    "skeleton_base_ms": 1000.0,
-    "skeleton_jitter_ms": 340.0,
+    # The latest graph timings are generally 20-100 ms. Keep a bounded
+    # deterministic jitter to exercise the real 200 ms rebuild cadence.
+    "skeleton_base_ms": 80.0,
+    "skeleton_jitter_ms": 30.0,
     "route_latency_ms": 200.0,
     "depth_clip_m": 20.0,
     "speculative_range_m": 22.0,
@@ -94,19 +94,21 @@ def simulate() -> dict:
                 missed_rebuilds += 1
                 events.append({"t": now, "kind": "rebuild_missed", "value": missed_rebuilds})
             else:
-                # Deterministic variation reflects the 0.67-1.34 s observed
-                # in the latest AirSim log without using random state.
+                # Deterministic variation reflects the measured 20-100 ms
+                # incremental update cost without using random state.
                 jitter = p["skeleton_jitter_ms"] * math.sin(1.7 * now + 0.4)
                 duration_ms = p["skeleton_base_ms"] + jitter
-                duration_ms = max(300.0, duration_ms)
+                duration_ms = max(30.0, duration_ms)
                 graph_rebuild_done = now + duration_ms / 1000.0
                 rebuilds.append({"start": now, "done": graph_rebuild_done,
                                  "duration_ms": duration_ms})
                 events.append({"t": now, "kind": "rebuild_start", "value": duration_ms})
                 graph_version += 1
-                graph_last_update = graph_rebuild_done
                 events.append({"t": graph_rebuild_done, "kind": "rebuild_done", "value": graph_version})
             next_skeleton += 1.0 / p["skeleton_hz"]
+
+        if graph_rebuild_done >= 0.0 and graph_rebuild_done <= now:
+            graph_last_update = max(graph_last_update, graph_rebuild_done)
 
         if due(now, 1.0 / p["planner_hz"], next_planner):
             planner_count += 1
@@ -148,9 +150,9 @@ def simulate() -> dict:
          "detail": f"counts={counts}, expected={expected}"},
         {"name": "semantic turn is early", "passed": first_turn_time is not None and first_turn_time <= 2.0,
          "detail": f"first_turn_time_s={first_turn_time}"},
-        {"name": "graph rebuild backlog is observable", "passed": missed_rebuilds >= 1,
+        {"name": "graph rebuild has no backlog", "passed": missed_rebuilds == 0,
          "detail": f"missed_rebuilds={missed_rebuilds}"},
-        {"name": "planner sees stale graph age", "passed": max_graph_age >= 0.2,
+        {"name": "planner sees a fresh graph", "passed": max_graph_age <= 0.3,
          "detail": f"max_graph_age_s={max_graph_age:.3f}"},
     ]
     return {

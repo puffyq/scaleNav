@@ -190,6 +190,16 @@ int ParallelBubbleAstar::search(const Eigen::Vector3f &start, const Eigen::Vecto
     vector<Eigen::Vector3f> step_lis{
       Eigen::Vector3f(resolution_, 0, 0), Eigen::Vector3f(-resolution_, 0, 0),
       Eigen::Vector3f(0, resolution_, 0), Eigen::Vector3f(0, -resolution_, 0)};
+    // EPIC's original planar stencil was 4-connected, which forces every
+    // witness path into Manhattan stair-steps.  Add the four XY diagonals;
+    // bubble clearance is still checked by isNodeSafe/collisionCheck, while
+    // open corridors now produce the expected diagonal route.
+    if (planar_search_) {
+      step_lis.push_back(Eigen::Vector3f(resolution_, resolution_, 0));
+      step_lis.push_back(Eigen::Vector3f(resolution_, -resolution_, 0));
+      step_lis.push_back(Eigen::Vector3f(-resolution_, resolution_, 0));
+      step_lis.push_back(Eigen::Vector3f(-resolution_, -resolution_, 0));
+    }
     if (!planar_search_) {
       step_lis.push_back(Eigen::Vector3f(0, 0, resolution_));
       step_lis.push_back(Eigen::Vector3f(0, 0, -resolution_));
@@ -293,7 +303,13 @@ bool ParallelBubbleAstar::collisionCheck_shortenPath(vector<Eigen::Vector3f> &pa
   std::vector<Eigen::Vector3f> path_shorten;
   std::vector<double> raduis_lis;
   for (int i = 0; i < path.size(); i++) {
-    double dis = min(2.0, lidar_map_interface_->getDisToOcc(path[i]) - safe_distance_);
+    // Do not impose an unrelated 2 m radius cap here.  EPIC's witness path
+    // is already sampled through safe bubbles, and the overlap test below is
+    // the actual proof that a shortcut is covered by those bubbles.  The cap
+    // made every open-space edge longer than roughly 4 m fail even when the
+    // clearance field showed ample free space, leaving newly inserted nodes
+    // isolated.  Use the measured bubble clearance instead.
+    double dis = lidar_map_interface_->getDisToOcc(path[i]) - safe_distance_;
     raduis_lis.push_back(dis);
     if (raduis_lis.back() < 1e-3) {
       return false;

@@ -2,17 +2,17 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-GOAL_X="0.0"
-GOAL_Y="0.0"
-GOAL_Z="1.6"
+# GOAL_X="0.0"
+# GOAL_Y="0.0"
+# GOAL_Z="1.6"
 
 # GOAL_X="-0.0"
 # GOAL_Y="0.0"
 # GOAL_Z="1.6"
 
-# GOAL_X="-80.0"
-# GOAL_Y="0.0"
-# GOAL_Z="1.6"
+GOAL_X="-80.0"
+GOAL_Y="0.0"
+GOAL_Z="1.6"
 
 if (( $# >= 1 )); then GOAL_X="$1"; fi
 if (( $# >= 2 )); then GOAL_Y="$2"; fi

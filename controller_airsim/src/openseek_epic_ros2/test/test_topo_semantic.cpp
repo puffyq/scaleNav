@@ -56,6 +56,46 @@ TEST(TopoNodeModel, SpeculativeSnapshotUsesTheUnifiedTopoNodeRole)
   EXPECT_EQ(candidates.front()->geometry_state_, TopoGeometryState::Unknown);
 }
 
+TEST(TopoSemanticCost, RiskAnchorHasAnExplicitNoiseFloor)
+{
+  EXPECT_FALSE(isSemanticRiskAnchor(0.02F, 1.0F, 0.35F));
+  EXPECT_FALSE(isSemanticRiskAnchor(0.34F, 1.0F, 0.35F));
+  EXPECT_FALSE(isSemanticRiskAnchor(0.80F, 0.49F, 0.35F));
+  EXPECT_TRUE(isSemanticRiskAnchor(0.80F, 0.50F, 0.35F));
+}
+
+TEST(TopoSemanticCost, RawHeatmapIsConvertedToFrameRelativeRisk)
+{
+  EXPECT_FLOAT_EQ(calibrateSemanticScore(0.40F, 0.40F), 0.0F);
+  EXPECT_NEAR(calibrateSemanticScore(0.70F, 0.40F), 0.5F, 1e-6F);
+  EXPECT_FLOAT_EQ(calibrateSemanticScore(0.20F, 0.40F), 0.0F);
+}
+
+TEST(TopoSemanticCost, MaxPooledPatchBaselineUsesLowerBackgroundQuantile)
+{
+  const std::vector<float> patches{0.70F, 0.72F, 0.74F, 0.76F, 0.78F,
+                                   0.80F, 0.82F, 0.84F, 0.86F};
+  EXPECT_NEAR(semanticFrameBaseline(patches, 0.25F), 0.74F, 1e-6F);
+  EXPECT_GT(calibrateSemanticScore(0.86F,
+                                   semanticFrameBaseline(patches, 0.25F)),
+            calibrateSemanticScore(0.86F, 0.78F));
+}
+
+TEST(TopoSemanticCost, BaselineIgnoresNonFinitePatchScores)
+{
+  const std::vector<float> patches{
+    std::numeric_limits<float>::quiet_NaN(), 0.2F,
+    std::numeric_limits<float>::infinity(), 0.8F};
+  EXPECT_NEAR(semanticFrameBaseline(patches, 0.25F), 0.2F, 1e-6F);
+}
+
+TEST(TopoGraphPersistence, KeepsAOneFrameGeometryMiss)
+{
+  EXPECT_TRUE(retainGeometryAfterMiss(1U));
+  EXPECT_TRUE(retainGeometryAfterMiss(2U));
+  EXPECT_FALSE(retainGeometryAfterMiss(3U));
+}
+
 TEST(TopoGraphPersistence, DetachedRebuildCarriesVerifiedNodesAndEdges)
 {
   TopoGraph source;
@@ -125,6 +165,125 @@ TEST(TopoGraphPersistence, DetachedRebuildCarriesSpeculativeNodes)
   EXPECT_EQ(candidates.front()->persistent_id_, 19U);
   EXPECT_EQ(candidates.front()->geometry_state_, TopoGeometryState::Unknown);
   EXPECT_NEAR(candidates.front()->semantic_score_, 0.8F, 1e-6F);
+}
+
+TEST(TopoGraphConnectivity, DuplicateVerticesAreMergedAndEdgesArePreserved)
+{
+  TopoGraph graph;
+  graph.min_bd = Eigen::Vector3f::Zero();
+  graph.init_region_size_x_ = 10.0;
+  graph.init_region_size_y_ = 10.0;
+  graph.init_region_size_z_ = 3.0;
+
+  auto duplicate_a = std::make_shared<TopoNode>();
+  duplicate_a->center_ = Eigen::Vector3f(2.0F, 2.0F, 1.0F);
+  duplicate_a->persistent_id_ = 10;
+  auto duplicate_b = std::make_shared<TopoNode>();
+  duplicate_b->center_ = Eigen::Vector3f(2.02F, 2.0F, 1.0F);
+  duplicate_b->persistent_id_ = 11;
+  auto left = std::make_shared<TopoNode>();
+  left->center_ = Eigen::Vector3f(0.0F, 2.0F, 1.0F);
+  auto right = std::make_shared<TopoNode>();
+  right->center_ = Eigen::Vector3f(4.0F, 2.0F, 1.0F);
+
+  duplicate_a->neighbors_.insert(left);
+  left->neighbors_.insert(duplicate_a);
+  duplicate_a->paths_[left] = {duplicate_a->center_, left->center_};
+  left->paths_[duplicate_a] = {left->center_, duplicate_a->center_};
+  duplicate_a->weight_[left] = 2.0F;
+  left->weight_[duplicate_a] = 2.0F;
+  duplicate_b->neighbors_.insert(right);
+  right->neighbors_.insert(duplicate_b);
+  duplicate_b->paths_[right] = {duplicate_b->center_, right->center_};
+  right->paths_[duplicate_b] = {right->center_, duplicate_b->center_};
+  duplicate_b->weight_[right] = 2.0F;
+  right->weight_[duplicate_b] = 2.0F;
+
+  const auto region = graph.getRegionNode(Eigen::Vector3i(0, 0, 0));
+  region->topo_nodes_.insert(duplicate_a);
+  region->topo_nodes_.insert(duplicate_b);
+  region->topo_nodes_.insert(left);
+  region->topo_nodes_.insert(right);
+
+  EXPECT_EQ(graph.deduplicateNearbyNodes(0.05F), 1U);
+  ASSERT_EQ(region->topo_nodes_.size(), 3U);
+  TopoNode::Ptr canonical;
+  for (const auto &node : region->topo_nodes_) {
+    if (node->persistent_id_ == 10 || node->persistent_id_ == 11) canonical = node;
+  }
+  ASSERT_TRUE(canonical);
+  EXPECT_EQ(canonical->neighbors_.size(), 2U);
+  EXPECT_EQ(left->neighbors_.count(canonical), 1U);
+  EXPECT_EQ(right->neighbors_.count(canonical), 1U);
+  EXPECT_EQ(canonical->paths_.count(left), 1U);
+  EXPECT_EQ(canonical->paths_.count(right), 1U);
+  const auto stale = canonical == duplicate_a ? duplicate_b : duplicate_a;
+  EXPECT_EQ(left->neighbors_.count(stale), 0U);
+  EXPECT_EQ(right->neighbors_.count(stale), 0U);
+}
+
+TEST(TopoGraphConnectivity, NearbyValidVerticesAreNotCollapsedAsDuplicates)
+{
+  TopoGraph graph;
+  auto region = graph.getRegionNode(Eigen::Vector3i(0, 0, 0));
+  auto left = std::make_shared<TopoNode>();
+  auto right = std::make_shared<TopoNode>();
+  left->center_ = Eigen::Vector3f(1.0F, 1.0F, 1.0F);
+  right->center_ = Eigen::Vector3f(1.20F, 1.0F, 1.0F);
+  left->neighbors_.insert(right);
+  right->neighbors_.insert(left);
+  left->paths_[right] = {left->center_, right->center_};
+  right->paths_[left] = {right->center_, left->center_};
+  region->topo_nodes_.insert(left);
+  region->topo_nodes_.insert(right);
+
+  EXPECT_EQ(graph.deduplicateNearbyNodes(), 0U);
+  EXPECT_EQ(region->topo_nodes_.size(), 2U);
+  EXPECT_EQ(left->neighbors_.count(right), 1U);
+  EXPECT_EQ(right->neighbors_.count(left), 1U);
+}
+
+TEST(TopoGraphConnectivity, SemanticAssociationRadiusDoesNotMergeGeometryDiff)
+{
+  TopoGraph graph;
+  auto old_a = std::make_shared<TopoNode>();
+  auto old_b = std::make_shared<TopoNode>();
+  auto new_a = std::make_shared<TopoNode>();
+  old_a->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.0F);
+  old_b->center_ = Eigen::Vector3f(2.0F, 0.0F, 1.0F);
+  new_a->center_ = Eigen::Vector3f(0.9F, 0.0F, 1.0F);
+  std::vector<TopoNode::Ptr> old_nodes{old_a, old_b};
+  std::vector<TopoNode::Ptr> new_nodes{new_a};
+  std::vector<TopoNode::Ptr> remained;
+  std::vector<TopoNode::Ptr> removed;
+  graph.overlap(new_nodes, old_nodes, remained);
+  graph.setdiff(old_nodes, new_nodes, removed);
+
+  // 0.9 m is outside geometric jitter but inside the 2.5 m semantic
+  // association radius. Only the latter must remain unmatched and removed.
+  ASSERT_EQ(remained.size(), 0U);
+  ASSERT_EQ(removed.size(), 2U);
+}
+
+TEST(TopoGraphConnectivity, HalfEdgesAreRemovedFromThePersistentGraph)
+{
+  TopoGraph graph;
+  auto region = graph.getRegionNode(Eigen::Vector3i(0, 0, 0));
+  auto left = std::make_shared<TopoNode>();
+  auto right = std::make_shared<TopoNode>();
+  left->center_ = Eigen::Vector3f(1.0F, 1.0F, 1.0F);
+  right->center_ = Eigen::Vector3f(2.0F, 1.0F, 1.0F);
+  left->neighbors_.insert(right);
+  left->paths_[right] = {left->center_, right->center_};
+  left->weight_[right] = 1.0F;
+  region->topo_nodes_.insert(left);
+  region->topo_nodes_.insert(right);
+
+  EXPECT_EQ(graph.normalizeConnectivity(), 1U);
+  EXPECT_TRUE(left->neighbors_.empty());
+  EXPECT_TRUE(left->paths_.empty());
+  EXPECT_TRUE(left->weight_.empty());
+  EXPECT_TRUE(right->neighbors_.empty());
 }
 
 TEST(TopoSemanticCost, SpeculativeNodeUsesTheSameEndpointCostAsAnyTopoNode)
@@ -288,6 +447,124 @@ TEST(TopoSemanticCost, AstarTurnsAwayFromNearbySpeculativeRisk)
   ASSERT_EQ(path.size(), 2U);
   EXPECT_EQ(path.front(), start);
   EXPECT_EQ(path.back(), far_side);
+}
+
+TEST(TopoSemanticCost, OriginalModeKeepsGeometryRouteWhenSemanticScoresChange)
+{
+  TopoGraph graph;
+  auto region = std::make_shared<RegionNode>(Eigen::Vector3i(0, 0, 0));
+  graph.reg_map_idx2ptr_[Eigen::Vector3i(0, 0, 0)] = region;
+  auto start = std::make_shared<TopoNode>();
+  auto lower = std::make_shared<TopoNode>();
+  auto upper = std::make_shared<TopoNode>();
+  auto goal = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  lower->center_ = Eigen::Vector3f(5.0F, 0.0F, 1.6F);
+  upper->center_ = Eigen::Vector3f(5.0F, 6.0F, 1.6F);
+  goal->center_ = Eigen::Vector3f(10.0F, 0.0F, 1.6F);
+  for (const auto &node : {start, lower, upper, goal}) region->topo_nodes_.insert(node);
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    a->neighbors_.insert(b);
+    b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    const float length = (a->center_ - b->center_).norm();
+    a->weight_[b] = length;
+    b->weight_[a] = length;
+  };
+  connect(start, lower);
+  connect(lower, goal);
+  connect(start, upper);
+  connect(upper, goal);
+
+  std::vector<TopoNode::Ptr> first_path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, goal->center_, first_path, 0.2, 0.2F, 1.0F, {}, 0.0F, 20.0F));
+  ASSERT_EQ(first_path.size(), 3U);
+  EXPECT_EQ(first_path[1], lower);
+
+  lower->semantic_score_ = 1.0F;
+  upper->semantic_score_ = 0.0F;
+  std::vector<TopoNode::Ptr> second_path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, goal->center_, second_path, 0.2, 0.2F, 1.0F, {}, 0.0F, 20.0F));
+  ASSERT_EQ(second_path.size(), 3U);
+  EXPECT_EQ(second_path[1], lower);
+}
+
+TEST(TopoSearchRadius, GoalDirectedSearchStopsAtLocalForwardNode)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto near = std::make_shared<TopoNode>();
+  auto far = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  near->center_ = Eigen::Vector3f(10.0F, 0.0F, 1.6F);
+  far->center_ = Eigen::Vector3f(30.0F, 0.0F, 1.6F);
+
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    a->neighbors_.insert(b);
+    b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    const float length = (a->center_ - b->center_).norm();
+    a->weight_[b] = length;
+    b->weight_[a] = length;
+  };
+  connect(start, near);
+  connect(near, far);
+
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(100.0F, 0.0F, 1.6F), path, 0.2,
+    0.2F, 1.0F, {}, 0.0F, 15.0F));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.front(), start);
+  EXPECT_EQ(path.back(), near);
+}
+
+TEST(TopoSearchRadius, GraphSearchRejectsEndOutsideLocalWindow)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto far = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  far->center_ = Eigen::Vector3f(30.0F, 0.0F, 1.6F);
+  start->neighbors_.insert(far);
+  far->neighbors_.insert(start);
+  start->paths_[far] = {start->center_, far->center_};
+  far->paths_[start] = {far->center_, start->center_};
+  start->weight_[far] = 30.0F;
+  far->weight_[start] = 30.0F;
+
+  std::vector<TopoNode::Ptr> path;
+  EXPECT_FALSE(graph.graphSearch(
+    start, far, path, 0.2, false, {}, 0.0F, 15.0F));
+  EXPECT_TRUE(path.empty());
+}
+
+TEST(TopoGraphConnectivity, IncludesDiagonalRegionNeighbors)
+{
+  TopoGraph graph;
+  graph.min_bd = Eigen::Vector3f::Zero();
+  graph.init_region_size_x_ = 3.3;
+  graph.init_region_size_y_ = 3.3;
+  graph.init_region_size_z_ = 2.0;
+
+  auto from = std::make_shared<TopoNode>();
+  auto diagonal = std::make_shared<TopoNode>();
+  from->center_ = Eigen::Vector3f(1.0F, 1.0F, 1.6F);
+  diagonal->center_ = Eigen::Vector3f(4.0F, 4.0F, 1.6F);
+  graph.reg_map_idx2ptr_[Eigen::Vector3i(0, 0, 0)] =
+    std::make_shared<RegionNode>(Eigen::Vector3i(0, 0, 0));
+  graph.reg_map_idx2ptr_[Eigen::Vector3i(1, 1, 0)] =
+    std::make_shared<RegionNode>(Eigen::Vector3i(1, 1, 0));
+  graph.reg_map_idx2ptr_[Eigen::Vector3i(0, 0, 0)]->topo_nodes_.insert(from);
+  graph.reg_map_idx2ptr_[Eigen::Vector3i(1, 1, 0)]->topo_nodes_.insert(diagonal);
+
+  std::vector<TopoNode::Ptr> neighbors;
+  graph.getPreNbrs(from, neighbors);
+  EXPECT_NE(std::find(neighbors.begin(), neighbors.end(), diagonal), neighbors.end());
 }
 
 TEST(TopoSemanticMemory, RestoresSemanticsAfterANodeIsRecreated)

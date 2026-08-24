@@ -32,6 +32,9 @@ class DepthPlanarToPointCloudNode final : public rclcpp::Node {
     max_range_m_ = declare_parameter<double>("max_range_m", 20.0);
     free_ray_pixel_stride_ = static_cast<int>(std::max<std::int64_t>(
         1, declare_parameter<int>("free_ray_pixel_stride", 4)));
+    diagnostic_log_period_ms_ = std::max(
+        250, static_cast<int>(declare_parameter<int>(
+            "diagnostic_log_period_ms", 2000)));
     default_fx_ = declare_parameter<double>("fx", 0.0);
     default_fy_ = declare_parameter<double>("fy", 0.0);
     default_cx_ = declare_parameter<double>("cx", 0.0);
@@ -175,7 +178,7 @@ class DepthPlanarToPointCloudNode final : public rclcpp::Node {
       free_y_max = bounds.second->y;
     }
     RCLCPP_INFO_THROTTLE(
-        get_logger(), *get_clock(), 1000,
+        get_logger(), *get_clock(), diagnostic_log_period_ms_,
         "[FRGraph timing] DepthPlanar->PointCloud2: %.3f ms, input=%ux%u, "
         "points=%zu free_rays=%zu free_y=[%.2f,%.2f]",
         elapsed_ms, image->width, image->height, points.size(), free_rays.size(),
@@ -189,6 +192,7 @@ class DepthPlanarToPointCloudNode final : public rclcpp::Node {
   std::string output_frame_;
   double max_range_m_ = 20.0;
   int free_ray_pixel_stride_ = 4;
+  int diagnostic_log_period_ms_ = 2000;
   double default_fx_ = 0.0;
   double default_fy_ = 0.0;
   double default_cx_ = 0.0;
