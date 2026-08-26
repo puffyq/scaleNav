@@ -1510,6 +1510,8 @@ class EpicGraphNode final : public rclcpp::Node {
     const float vehicle_to_goal = (position_ - layer_goal).norm();
     const bool goal_in_window = have_goal_ &&
       vehicle_to_goal <= static_cast<float>(local_graph_radius_m_);
+    const std::int64_t active_virtual_semantic_stamp_ns =
+      activeVirtualSemanticStampNs();
     bool current_route_blocked = false;
     if (last_witness_path_.size() >= 2 && active_topo->parallel_bubble_astar_) {
       std::vector<Eigen::Vector3f> probe = last_witness_path_;
@@ -1550,7 +1552,8 @@ class EpicGraphNode final : public rclcpp::Node {
         incumbent_recovered = active_topo->graphSearch(
           active_topo->odom_node_, terminal, incumbent_nodes, 0.05, true, last_path_edges,
           static_cast<float>(semantic_cost_weight_),
-          static_cast<float>(local_graph_radius_m_), &incumbent_search_stats);
+          static_cast<float>(local_graph_radius_m_), &incumbent_search_stats,
+          active_virtual_semantic_stamp_ns);
         incumbent_result = incumbent_recovered ? "RECOVERED" : "SEARCH_FAILED";
       }
     }
@@ -1593,7 +1596,7 @@ class EpicGraphNode final : public rclcpp::Node {
         static_cast<float>(frontier_direction_loss_weight_),
         static_cast<float>(frontier_fov_loss_weight_),
         static_cast<float>(frontier_smoothness_loss_weight_),
-        &candidate_search_stats);
+        &candidate_search_stats, active_virtual_semantic_stamp_ns);
       candidate_nodes.swap(path_nodes);
     }
     // Compare the newly searched route with the accepted incumbent. The
@@ -1608,8 +1611,10 @@ class EpicGraphNode final : public rclcpp::Node {
     struct RouteMetrics { float risk; float objective; float progress; };
     const float local_semantic_radius_m = static_cast<float>(
       local_graph_radius_m_ + std::max(0.0, semantic_route_influence_m_));
+    std::size_t local_inactive_virtual_semantic_nodes = 0;
     const auto local_semantic_nodes = active_topo->semanticNodes(
-      &position_, local_semantic_radius_m);
+      &position_, local_semantic_radius_m, active_virtual_semantic_stamp_ns,
+      &local_inactive_virtual_semantic_nodes);
     const auto metrics_for = [&](const std::vector<TopoNode::Ptr> &nodes) {
       const auto points = route_points(nodes);
       RouteMetrics metrics{semanticRiskAlongRoute(active_topo, points), 0.0F, 0.0F};
@@ -1778,6 +1783,9 @@ class EpicGraphNode final : public rclcpp::Node {
     const std::size_t astar_semantic_nodes = std::max(
       incumbent_search_stats.semantic_query_nodes,
       candidate_search_stats.semantic_query_nodes);
+    const std::size_t astar_inactive_virtual_semantic_nodes = std::max(
+      incumbent_search_stats.semantic_inactive_virtual_nodes_skipped,
+      candidate_search_stats.semantic_inactive_virtual_nodes_skipped);
     const std::size_t astar_semantic_checks =
       incumbent_search_stats.semantic_candidate_checks +
       candidate_search_stats.semantic_candidate_checks;
@@ -1791,10 +1799,11 @@ class EpicGraphNode final : public rclcpp::Node {
       "persistent_semantic_records=%zu global_nodes=%zu global_edges=%zu "
       "global_semantic_nodes=%zu global_verified_semantic_nodes=%zu "
       "global_virtual_semantic_nodes=%zu local_graph_nodes=%zu local_semantic_nodes=%zu "
-      "local_semantic_radius=%.1f m "
+      "local_inactive_virtual_semantic_nodes=%zu local_semantic_radius=%.1f m "
       "astar_searches=%zu astar_expanded_nodes=%zu incumbent_expanded_nodes=%zu "
       "candidate_expanded_nodes=%zu astar_edge_evaluations=%zu "
-      "astar_semantic_nodes=%zu astar_semantic_checks=%zu "
+      "astar_semantic_nodes=%zu astar_inactive_virtual_semantic_nodes=%zu "
+      "astar_semantic_checks=%zu "
       "astar_candidate_terminals=%zu astar_timed_out=%d "
       "geometry_source=%s "
       "remembered_edges=%zu/%zu geometric_edges=%zu route_mode=%s "
@@ -1814,10 +1823,12 @@ class EpicGraphNode final : public rclcpp::Node {
       stats.skeleton_nodes, stats.edges, global_semantic_nodes,
       stats.semantic_nodes, stats.virtual_semantic_nodes,
       local_graph_nodes, local_semantic_nodes.size(),
+      local_inactive_virtual_semantic_nodes,
       static_cast<double>(local_semantic_radius_m), astar_searches,
       astar_expanded_nodes, incumbent_search_stats.expanded_nodes,
       candidate_search_stats.expanded_nodes, astar_edge_evaluations,
-      astar_semantic_nodes, astar_semantic_checks,
+      astar_semantic_nodes, astar_inactive_virtual_semantic_nodes,
+      astar_semantic_checks,
       candidate_search_stats.candidate_terminals,
       static_cast<int>(astar_timed_out),
       use_edge_witness_path_ ? "EDGE_WITNESS" : "TOPO_CENTERS",
@@ -2065,8 +2076,16 @@ class EpicGraphNode final : public rclcpp::Node {
     return true;
   }
 
+  std::int64_t activeVirtualSemanticStampNs()
+  {
+    if (last_semantic_applied_stamp_ns_ <= 0) return -1;
+    const double age_ms = static_cast<double>(std::llabs(
+      get_clock()->now().nanoseconds() - last_semantic_applied_stamp_ns_)) / 1.0e6;
+    return age_ms <= semantic_max_age_ms_ ? last_semantic_applied_stamp_ns_ : -1;
+  }
+
   float semanticRiskAlongRoute(const TopoGraph::Ptr &topo,
-                               const std::vector<Eigen::Vector3f> &route) const
+                               const std::vector<Eigen::Vector3f> &route)
   {
     if (!topo || route.size() < 2) return 0.0F;
     const float influence = static_cast<float>(std::max(0.0, semantic_route_influence_m_));
@@ -2074,7 +2093,8 @@ class EpicGraphNode final : public rclcpp::Node {
     const float sigma = std::max(0.25F, influence * 0.5F);
     float risk = 0.0F;
     const float query_radius = static_cast<float>(local_graph_radius_m_) + influence;
-    const auto semantic_nodes = topo->semanticNodes(&position_, query_radius);
+    const auto semantic_nodes = topo->semanticNodes(
+      &position_, query_radius, activeVirtualSemanticStampNs());
     for (const auto &node : semantic_nodes) {
       const float confidence_score = std::clamp(
         node->semantic_score_ * node->semantic_confidence_, 0.0F, 1.0F);
@@ -2165,6 +2185,10 @@ class EpicGraphNode final : public rclcpp::Node {
       }
     }
     mergeSemanticMemory(topo->semanticMemorySnapshot());
+    // Unknown fixed-depth endpoints are transient planning evidence. Mark the
+    // newly applied frame active before evaluating its route impact; older
+    // virtual nodes remain persisted but no longer contribute to route cost.
+    last_semantic_applied_stamp_ns_ = frame->stamp_ns;
     // Semantic costs can change the preferred route without changing the
     // geometric graph. Request a candidate evaluation, but keep the accepted
     // terminal and witness alive until that candidate is compared.
@@ -2207,7 +2231,6 @@ class EpicGraphNode final : public rclcpp::Node {
     // latest frame once to that graph even when its timestamp was already
     // consumed by the previous graph.
     semantic_applied_topo_ = topo;
-    last_semantic_applied_stamp_ns_ = frame->stamp_ns;
   }
 
   static std_msgs::msg::ColorRGBA semanticColor(float normalized, bool enabled)
@@ -2411,7 +2434,8 @@ class EpicGraphNode final : public rclcpp::Node {
     }
     const auto local_semantic_nodes = topo->semanticNodes(
       &position_, static_cast<float>(local_graph_radius_m_ +
-        std::max(0.0, semantic_route_influence_m_)));
+        std::max(0.0, semantic_route_influence_m_)),
+      activeVirtualSemanticStampNs());
     for (std::size_t i = 1; i < path_nodes.size(); ++i) {
       const auto &from = path_nodes[i - 1];
       const auto &to = path_nodes[i];
