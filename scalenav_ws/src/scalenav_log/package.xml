@@ -2,7 +2,7 @@
 <package format="3">
   <name>scalenav_log</name>
   <version>0.1.0</version>
-  <description>ROS 2 sensor and planner logger with sliding retention and a replay viewer.</description>
+  <description>ROS 2 sensor and planner logger with append-only sessions and a replay viewer.</description>
   <maintainer email="puffy@example.com">OpenSeek</maintainer>
   <license>BSD-3-Clause</license>
 

@@ -29,13 +29,13 @@ TEST(TopoGraphConcurrency, CreatesLazyRegionsFromMultipleWorkers)
             static_cast<std::size_t>(kWorkers * kRegionsPerWorker));
 }
 
-TEST(TopoNodeModel, UsesOneNodeStructureForSpeculativePromotion)
+TEST(TopoNodeModel, UsesOneNodeStructureForSemanticPromotion)
 {
   auto node = std::make_shared<TopoNode>();
   EXPECT_EQ(node->role_, TopoNodeRole::Geometric);
   EXPECT_EQ(node->geometry_state_, TopoGeometryState::Verified);
 
-  node->role_ = TopoNodeRole::Speculative;
+  node->role_ = TopoNodeRole::Geometric;
   node->geometry_state_ = TopoGeometryState::Unknown;
   node->center_ = Eigen::Vector3f(5.0F, 0.0F, 1.6F);
   node->semantic_score_ = 0.85F;
@@ -62,7 +62,7 @@ TEST(TopoNodeModel, OdomUsesTheSamePersistentNodeStructure)
   EXPECT_EQ(node->geometry_state_, TopoGeometryState::Verified);
 }
 
-TEST(TopoNodeModel, SpeculativeUpdateKeepsOdomOnPlanarLayer)
+TEST(TopoNodeModel, SemanticUpdateKeepsOdomOnPlanarLayer)
 {
   TopoGraph graph;
   graph.planar_graph_ = true;
@@ -72,30 +72,78 @@ TEST(TopoNodeModel, SpeculativeUpdateKeepsOdomOnPlanarLayer)
   graph.parallel_bubble_astar_ = std::make_shared<ParallelBubbleAstar>();
 
   const float nan = std::numeric_limits<float>::quiet_NaN();
-  graph.insertSpeculativeNodes(
+  graph.insertSemanticNodes(
     {Eigen::Vector3f(nan, nan, nan)}, {0.5F}, 0.5F,
     Eigen::Vector3f(0.0F, 0.0F, 1.600000F), 1);
 
   EXPECT_FLOAT_EQ(graph.odom_node_->center_.z(), graph.planar_z_);
 }
 
-TEST(TopoNodeModel, SpeculativeSnapshotUsesTheUnifiedTopoNodeRole)
+TEST(TopoNodeModel, SemanticSnapshotUsesOrdinaryObservedNodes)
 {
   TopoGraph graph;
   auto region = std::make_shared<RegionNode>(Eigen::Vector3i(0, 0, 0));
-  auto speculative = std::make_shared<TopoNode>();
-  speculative->role_ = TopoNodeRole::Speculative;
-  speculative->geometry_state_ = TopoGeometryState::Unknown;
+  auto semantic = std::make_shared<TopoNode>();
+  semantic->role_ = TopoNodeRole::Geometric;
+  semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->semantic_observations_ = 1;
   auto geometric = std::make_shared<TopoNode>();
   geometric->role_ = TopoNodeRole::Geometric;
-  region->topo_nodes_.insert(speculative);
+  region->topo_nodes_.insert(semantic);
   region->topo_nodes_.insert(geometric);
   graph.reg_map_idx2ptr_[Eigen::Vector3i(0, 0, 0)] = region;
 
-  const auto candidates = graph.speculativeNodes();
+  const auto candidates = graph.semanticNodes();
   ASSERT_EQ(candidates.size(), 1U);
-  EXPECT_EQ(candidates.front(), speculative);
+  EXPECT_EQ(candidates.front(), semantic);
   EXPECT_EQ(candidates.front()->geometry_state_, TopoGeometryState::Unknown);
+}
+
+TEST(TopoNodeModel, SemanticSnapshotCanBeLimitedToTheLocalPlanningWindow)
+{
+  TopoGraph graph;
+  auto region = std::make_shared<RegionNode>(Eigen::Vector3i(0, 0, 0));
+  auto local = std::make_shared<TopoNode>();
+  local->center_ = Eigen::Vector3f(5.0F, 0.0F, 1.6F);
+  local->semantic_observations_ = 1;
+  auto history = std::make_shared<TopoNode>();
+  history->center_ = Eigen::Vector3f(80.0F, 0.0F, 1.6F);
+  history->semantic_observations_ = 1;
+  region->topo_nodes_.insert(local);
+  region->topo_nodes_.insert(history);
+  graph.reg_map_idx2ptr_[Eigen::Vector3i(0, 0, 0)] = region;
+
+  const Eigen::Vector3f origin = Eigen::Vector3f::Zero();
+  const auto candidates = graph.semanticNodes(&origin, 40.0F);
+  ASSERT_EQ(candidates.size(), 1U);
+  EXPECT_EQ(candidates.front(), local);
+  EXPECT_EQ(graph.semanticNodes().size(), 2U);
+}
+
+TEST(TopoNodeModel, SemanticPatchUsesFixedVirtualDepth)
+{
+  const Eigen::Vector3f camera_translation(0.5F, 0.0F, -0.1F);
+  const Eigen::Vector3f center = virtualSemanticPointFlu(
+    0.5F, 0.5F, 90.0F, 60.0F, 30.0F, camera_translation);
+  const Eigen::Vector3f corner = virtualSemanticPointFlu(
+    0.0F, 0.0F, 90.0F, 60.0F, 30.0F, camera_translation);
+
+  EXPECT_NEAR((center - camera_translation).norm(), 30.0F, 1e-5F);
+  EXPECT_GT((corner - camera_translation).norm(), 30.0F);
+  EXPECT_NEAR(center.x(), 30.5F, 1e-5F);
+  EXPECT_NEAR(corner.x(), 30.5F, 1e-5F);
+  EXPECT_GT(corner.y(), 0.0F);
+  EXPECT_GT(corner.z(), camera_translation.z());
+}
+
+TEST(TopoNodeModel, VirtualSemanticDepthDoesNotDependOnMeasuredDepth)
+{
+  const Eigen::Vector3f camera_translation = Eigen::Vector3f::Zero();
+  const Eigen::Vector3f point = virtualSemanticPointFlu(
+    0.5F, 0.5F, 90.0F, 60.0F, 30.0F, camera_translation);
+
+  EXPECT_FLOAT_EQ(point.x(), 30.0F);
+  EXPECT_GT(point.x(), 20.0F);
 }
 
 TEST(TopoSemanticCost, RiskAnchorHasAnExplicitNoiseFloor)
@@ -108,9 +156,15 @@ TEST(TopoSemanticCost, RiskAnchorHasAnExplicitNoiseFloor)
 
 TEST(TopoSemanticCost, RawHeatmapIsConvertedToFrameRelativeRisk)
 {
-  EXPECT_FLOAT_EQ(calibrateSemanticScore(0.40F, 0.40F), 0.0F);
-  EXPECT_NEAR(calibrateSemanticScore(0.70F, 0.40F), 0.5F, 1e-6F);
-  EXPECT_FLOAT_EQ(calibrateSemanticScore(0.20F, 0.40F), 0.0F);
+  EXPECT_NEAR(calibrateSemanticScore(0.40F, 0.20F), 0.25F, 1e-6F);
+  EXPECT_NEAR(calibrateSemanticScore(0.70F, 0.20F), 0.625F, 1e-6F);
+  EXPECT_FLOAT_EQ(calibrateSemanticScore(0.10F, 0.20F), 0.0F);
+}
+
+TEST(TopoSemanticCost, ForestFilledFrameKeepsHighRisk)
+{
+  EXPECT_GT(calibrateSemanticScore(0.50F, 0.496F), 0.30F);
+  EXPECT_GT(calibrateSemanticScore(0.496F, 0.496F), 0.30F);
 }
 
 TEST(TopoSemanticCost, MaxPooledPatchBaselineUsesLowerBackgroundQuantile)
@@ -118,9 +172,6 @@ TEST(TopoSemanticCost, MaxPooledPatchBaselineUsesLowerBackgroundQuantile)
   const std::vector<float> patches{0.70F, 0.72F, 0.74F, 0.76F, 0.78F,
                                    0.80F, 0.82F, 0.84F, 0.86F};
   EXPECT_NEAR(semanticFrameBaseline(patches, 0.25F), 0.74F, 1e-6F);
-  EXPECT_GT(calibrateSemanticScore(0.86F,
-                                   semanticFrameBaseline(patches, 0.25F)),
-            calibrateSemanticScore(0.86F, 0.78F));
 }
 
 TEST(TopoSemanticCost, BaselineIgnoresNonFinitePatchScores)
@@ -180,20 +231,21 @@ TEST(TopoGraphPersistence, DetachedRebuildCarriesVerifiedNodesAndEdges)
   EXPECT_FLOAT_EQ(copied_from->weight_.at(copied_to), 4.0F);
 }
 
-TEST(TopoGraphPersistence, DetachedRebuildCarriesSpeculativeNodes)
+TEST(TopoGraphPersistence, DetachedRebuildCarriesSemanticNodes)
 {
   TopoGraph source;
   source.min_bd = Eigen::Vector3f::Zero();
   source.init_region_size_x_ = 10.0;
   source.init_region_size_y_ = 10.0;
   source.init_region_size_z_ = 3.0;
-  auto speculative = std::make_shared<TopoNode>();
-  speculative->center_ = Eigen::Vector3f(5.0F, 1.0F, 1.0F);
-  speculative->role_ = TopoNodeRole::Speculative;
-  speculative->geometry_state_ = TopoGeometryState::Unknown;
-  speculative->persistent_id_ = 19;
-  speculative->semantic_score_ = 0.8F;
-  source.getRegionNode(Eigen::Vector3i(0, 0, 0))->topo_nodes_.insert(speculative);
+  auto semantic = std::make_shared<TopoNode>();
+  semantic->center_ = Eigen::Vector3f(5.0F, 1.0F, 1.0F);
+  semantic->role_ = TopoNodeRole::Geometric;
+  semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->persistent_id_ = 19;
+  semantic->semantic_score_ = 0.8F;
+  semantic->semantic_observations_ = 1;
+  source.getRegionNode(Eigen::Vector3i(0, 0, 0))->topo_nodes_.insert(semantic);
 
   TopoGraph rebuilt;
   rebuilt.min_bd = source.min_bd;
@@ -202,7 +254,7 @@ TEST(TopoGraphPersistence, DetachedRebuildCarriesSpeculativeNodes)
   rebuilt.init_region_size_z_ = source.init_region_size_z_;
   rebuilt.copyPersistentNodesFrom(source);
 
-  const auto candidates = rebuilt.speculativeNodes();
+  const auto candidates = rebuilt.semanticNodes();
   ASSERT_EQ(candidates.size(), 1U);
   EXPECT_EQ(candidates.front()->persistent_id_, 19U);
   EXPECT_EQ(candidates.front()->geometry_state_, TopoGeometryState::Unknown);
@@ -328,7 +380,7 @@ TEST(TopoGraphConnectivity, HalfEdgesAreRemovedFromThePersistentGraph)
   EXPECT_TRUE(right->neighbors_.empty());
 }
 
-TEST(TopoSemanticCost, SpeculativeNodeUsesTheSameEndpointCostAsAnyTopoNode)
+TEST(TopoSemanticCost, SemanticNodeUsesTheSameEndpointCostAsAnyTopoNode)
 {
   TopoGraph graph;
   auto region = std::make_shared<RegionNode>(Eigen::Vector3i(0, 0, 0));
@@ -343,13 +395,14 @@ TEST(TopoSemanticCost, SpeculativeNodeUsesTheSameEndpointCostAsAnyTopoNode)
   region->topo_nodes_.insert(from);
   region->topo_nodes_.insert(to);
   graph.reg_map_idx2ptr_[Eigen::Vector3i(0, 0, 0)] = region;
-  auto speculative = std::make_shared<TopoNode>();
-  speculative->center_ = Eigen::Vector3f(5.0F, 0.5F, 1.6F);
-  speculative->role_ = TopoNodeRole::Speculative;
-  speculative->geometry_state_ = TopoGeometryState::Unknown;
-  speculative->semantic_score_ = 0.9F;
-  speculative->semantic_confidence_ = 1.0F;
-  region->topo_nodes_.insert(speculative);
+  auto semantic = std::make_shared<TopoNode>();
+  semantic->center_ = Eigen::Vector3f(5.0F, 0.5F, 1.6F);
+  semantic->role_ = TopoNodeRole::Geometric;
+  semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->semantic_score_ = 0.9F;
+  semantic->semantic_confidence_ = 1.0F;
+  semantic->semantic_observations_ = 1;
+  region->topo_nodes_.insert(semantic);
 
   const float risk = graph.semanticRiskForEdge(from, to);
   auto far_from = std::make_shared<TopoNode>();
@@ -357,11 +410,11 @@ TEST(TopoSemanticCost, SpeculativeNodeUsesTheSameEndpointCostAsAnyTopoNode)
   far_from->center_ = Eigen::Vector3f(0.0F, 10.0F, 1.6F);
   far_to->center_ = Eigen::Vector3f(10.0F, 10.0F, 1.6F);
   const float far_risk = graph.semanticRiskForEdge(far_from, far_to);
-  // A speculative node contributes a continuous field to nearby edge costs,
-  // even when neither edge endpoint is the speculative node itself.
+  // A semantic node contributes a continuous field to nearby edge costs,
+  // even when neither edge endpoint is the semantic node itself.
   EXPECT_GT(risk, far_risk + 0.2F);
-  EXPECT_EQ(speculative->role_, TopoNodeRole::Speculative);
-  EXPECT_EQ(speculative->geometry_state_, TopoGeometryState::Unknown);
+  EXPECT_EQ(semantic->role_, TopoNodeRole::Geometric);
+  EXPECT_EQ(semantic->geometry_state_, TopoGeometryState::Unknown);
 
   from->semantic_score_ = 0.9F;
   from->semantic_confidence_ = 1.0F;
@@ -378,14 +431,15 @@ TEST(TopoSemanticCost, RiskUsesTheExecutedWitnessPolyline)
   from->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
   to->center_ = Eigen::Vector3f(10.0F, 0.0F, 1.6F);
   // The actual collision-free edge bends through y=5.  Its endpoint chord is
-  // far from the speculative point, so a chord-only implementation misses it.
+  // far from the semantic point, so a chord-only implementation misses it.
   from->paths_[to] = {from->center_, Eigen::Vector3f(5.0F, 5.0F, 1.6F), to->center_};
   auto risk = std::make_shared<TopoNode>();
   risk->center_ = Eigen::Vector3f(5.0F, 5.5F, 1.6F);
-  risk->role_ = TopoNodeRole::Speculative;
+  risk->role_ = TopoNodeRole::Geometric;
   risk->geometry_state_ = TopoGeometryState::Unknown;
   risk->semantic_score_ = 1.0F;
   risk->semantic_confidence_ = 1.0F;
+  risk->semantic_observations_ = 1;
   region->topo_nodes_.insert(from);
   region->topo_nodes_.insert(to);
   region->topo_nodes_.insert(risk);
@@ -393,43 +447,45 @@ TEST(TopoSemanticCost, RiskUsesTheExecutedWitnessPolyline)
   EXPECT_GT(graph.semanticRiskForEdge(from, to), 0.5F);
 }
 
-TEST(TopoSemanticCost, SpeculativeNodeRemainsAValidAstarCandidate)
+TEST(TopoSemanticCost, SemanticNodeRemainsAValidAstarCandidate)
 {
   TopoGraph graph;
   auto start = std::make_shared<TopoNode>();
-  auto speculative = std::make_shared<TopoNode>();
+  auto semantic = std::make_shared<TopoNode>();
   start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
-  speculative->center_ = Eigen::Vector3f(4.0F, 0.0F, 1.6F);
-  speculative->role_ = TopoNodeRole::Speculative;
-  speculative->geometry_state_ = TopoGeometryState::Unknown;
-  speculative->semantic_score_ = 0.9F;
-  speculative->semantic_confidence_ = 1.0F;
-  start->neighbors_.insert(speculative);
-  speculative->neighbors_.insert(start);
-  start->paths_[speculative] = {start->center_, speculative->center_};
-  speculative->paths_[start] = {speculative->center_, start->center_};
-  start->weight_[speculative] = 4.0F;
-  speculative->weight_[start] = 4.0F;
+  semantic->center_ = Eigen::Vector3f(4.0F, 0.0F, 1.6F);
+  semantic->role_ = TopoNodeRole::Geometric;
+  semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->semantic_score_ = 0.9F;
+  semantic->semantic_confidence_ = 1.0F;
+  semantic->semantic_observations_ = 1;
+  start->neighbors_.insert(semantic);
+  semantic->neighbors_.insert(start);
+  start->paths_[semantic] = {start->center_, semantic->center_};
+  semantic->paths_[start] = {semantic->center_, start->center_};
+  start->weight_[semantic] = 4.0F;
+  semantic->weight_[start] = 4.0F;
 
   std::vector<TopoNode::Ptr> path;
   ASSERT_TRUE(graph.goalDirectedSearch(
-    start, speculative->center_, path, 0.2, 1.0, 0.0, {}, 1.0F));
+    start, semantic->center_, path, 0.2, 1.0, 0.0, {}, 1.0F));
   ASSERT_EQ(path.size(), 2U);
   EXPECT_EQ(path.front(), start);
-  EXPECT_EQ(path.back(), speculative);
+  EXPECT_EQ(path.back(), semantic);
 }
 
-TEST(TopoSemanticCost, LowScoreSpeculativeNodeRemainsAValidSafeBranch)
+TEST(TopoSemanticCost, LowScoreSemanticNodeRemainsAValidSafeBranch)
 {
   TopoGraph graph;
   auto start = std::make_shared<TopoNode>();
   auto safe = std::make_shared<TopoNode>();
   start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
   safe->center_ = Eigen::Vector3f(12.0F, 0.0F, 1.6F);
-  safe->role_ = TopoNodeRole::Speculative;
+  safe->role_ = TopoNodeRole::Geometric;
   safe->geometry_state_ = TopoGeometryState::Unknown;
   safe->semantic_score_ = 0.0F;
   safe->semantic_confidence_ = 1.0F;
+  safe->semantic_observations_ = 1;
   start->neighbors_.insert(safe);
   safe->neighbors_.insert(start);
   start->paths_[safe] = {start->center_, safe->center_};
@@ -444,7 +500,7 @@ TEST(TopoSemanticCost, LowScoreSpeculativeNodeRemainsAValidSafeBranch)
   EXPECT_EQ(path.back(), safe);
 }
 
-TEST(TopoSemanticCost, AstarTurnsAwayFromNearbySpeculativeRisk)
+TEST(TopoSemanticCost, AstarTurnsAwayFromNearbySemanticRisk)
 {
   TopoGraph graph;
   auto region = std::make_shared<RegionNode>(Eigen::Vector3i(0, 0, 0));
@@ -461,10 +517,11 @@ TEST(TopoSemanticCost, AstarTurnsAwayFromNearbySpeculativeRisk)
 
   auto risk = std::make_shared<TopoNode>();
   risk->center_ = Eigen::Vector3f(5.0F, 0.5F, 1.6F);
-  risk->role_ = TopoNodeRole::Speculative;
+  risk->role_ = TopoNodeRole::Geometric;
   risk->geometry_state_ = TopoGeometryState::Unknown;
   risk->semantic_score_ = 1.0F;
   risk->semantic_confidence_ = 1.0F;
+  risk->semantic_observations_ = 1;
 
   for (const auto &node : {start, near_risk, far_side, goal, risk}) {
     region->topo_nodes_.insert(node);
@@ -521,17 +578,17 @@ TEST(TopoSemanticCost, OriginalModeKeepsGeometryRouteWhenSemanticScoresChange)
 
   std::vector<TopoNode::Ptr> first_path;
   ASSERT_TRUE(graph.goalDirectedSearch(
-    start, goal->center_, first_path, 0.2, 0.2F, 1.0F, {}, 0.0F, 20.0F));
-  ASSERT_EQ(first_path.size(), 3U);
-  EXPECT_EQ(first_path[1], lower);
+    start, goal->center_, first_path, 0.2, 0.2F, 1.0F, {}, 20.0F));
+  ASSERT_EQ(first_path.size(), 2U);
+  EXPECT_EQ(first_path.back(), lower);
 
   lower->semantic_score_ = 1.0F;
   upper->semantic_score_ = 0.0F;
   std::vector<TopoNode::Ptr> second_path;
   ASSERT_TRUE(graph.goalDirectedSearch(
-    start, goal->center_, second_path, 0.2, 0.2F, 1.0F, {}, 0.0F, 20.0F));
-  ASSERT_EQ(second_path.size(), 3U);
-  EXPECT_EQ(second_path[1], lower);
+    start, goal->center_, second_path, 0.2, 0.2F, 1.0F, {}, 20.0F));
+  ASSERT_EQ(second_path.size(), 2U);
+  EXPECT_EQ(second_path.back(), lower);
 }
 
 TEST(TopoSearchRadius, GoalDirectedSearchStopsAtLocalForwardNode)
@@ -563,6 +620,290 @@ TEST(TopoSearchRadius, GoalDirectedSearchStopsAtLocalForwardNode)
   ASSERT_EQ(path.size(), 2U);
   EXPECT_EQ(path.front(), start);
   EXPECT_EQ(path.back(), near);
+}
+
+TEST(TopoSearchRadius, GoalDirectedSearchPrefersCorridorTerminal)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto corridor = std::make_shared<TopoNode>();
+  auto bypass = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  corridor->center_ = Eigen::Vector3f(10.0F, 0.0F, 1.6F);
+  bypass->center_ = Eigen::Vector3f(10.5F, -4.0F, 1.6F);
+
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    a->neighbors_.insert(b);
+    b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    const float length = (a->center_ - b->center_).norm();
+    a->weight_[b] = length;
+    b->weight_[a] = length;
+  };
+  connect(start, corridor);
+  connect(start, bypass);
+
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(100.0F, 0.0F, 1.6F), path, 0.2,
+    0.2F, 1.0F, {}, 0.0F, 15.0F));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), corridor);
+}
+
+TEST(TopoSearchRadius, AstarDoesNotPreferAFartherDetourFrontier)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto corridor = std::make_shared<TopoNode>();
+  auto detour = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  corridor->center_ = Eigen::Vector3f(10.0F, 0.0F, 1.6F);
+  detour->center_ = Eigen::Vector3f(12.0F, 8.0F, 1.6F);
+
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    a->neighbors_.insert(b);
+    b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    const float length = (a->center_ - b->center_).norm();
+    a->weight_[b] = length;
+    b->weight_[a] = length;
+  };
+  connect(start, corridor);
+  connect(start, detour);
+
+  const Eigen::Vector3f vehicle = start->center_;
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(100.0F, 0.0F, 1.6F), path, 0.2,
+    0.2F, 1.0F, {}, 0.0F, 35.0F, &vehicle, 10.0F, false));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), corridor);
+}
+
+TEST(TopoSearchRadius, FrontierGoalUsesTheLocalGraphFrontier)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto local_goal_lookahead = std::make_shared<TopoNode>();
+  auto frontier_goal = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  local_goal_lookahead->center_ = Eigen::Vector3f(10.0F, 0.0F, 1.6F);
+  frontier_goal->center_ = Eigen::Vector3f(32.0F, 0.0F, 1.6F);
+
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    a->neighbors_.insert(b);
+    b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    const float length = (a->center_ - b->center_).norm();
+    a->weight_[b] = length;
+    b->weight_[a] = length;
+  };
+  connect(start, local_goal_lookahead);
+  connect(local_goal_lookahead, frontier_goal);
+
+  const Eigen::Vector3f vehicle = start->center_;
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(100.0F, 0.0F, 1.6F), path, 0.2,
+    0.2F, 1.0F, {}, 0.0F, 35.0F, &vehicle, 31.5F, false));
+  ASSERT_EQ(path.size(), 3U);
+  EXPECT_EQ(path[1], local_goal_lookahead);
+  EXPECT_EQ(path.back(), frontier_goal);
+}
+
+TEST(TopoSearchRadius, RadialFrontierAllowsWideSemanticDetour)
+{
+  TopoGraph graph;
+  auto region = std::make_shared<RegionNode>(Eigen::Vector3i(0, 0, 0));
+  graph.reg_map_idx2ptr_[Eigen::Vector3i(0, 0, 0)] = region;
+  auto start = std::make_shared<TopoNode>();
+  auto risky_forward = std::make_shared<TopoNode>();
+  auto safe_detour = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  risky_forward->center_ = Eigen::Vector3f(32.0F, 0.0F, 1.6F);
+  safe_detour->center_ = Eigen::Vector3f(24.0F, 18.0F, 1.6F);
+  risky_forward->semantic_score_ = 0.9F;
+  risky_forward->semantic_confidence_ = 1.0F;
+  risky_forward->semantic_observations_ = 1;
+  safe_detour->semantic_score_ = 0.0F;
+  safe_detour->semantic_confidence_ = 1.0F;
+  safe_detour->semantic_observations_ = 1;
+  for (const auto &node : {start, risky_forward, safe_detour}) {
+    region->topo_nodes_.insert(node);
+  }
+
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    a->neighbors_.insert(b);
+    b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    const float length = (a->center_ - b->center_).norm();
+    a->weight_[b] = length;
+    b->weight_[a] = length;
+  };
+  connect(start, risky_forward);
+  connect(start, safe_detour);
+
+  const Eigen::Vector3f vehicle = start->center_;
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(100.0F, 0.0F, 1.6F), path, 0.2,
+    0.2F, 1.0F, {}, 4.0F, 35.0F, &vehicle, 31.5F, false, 30.0F));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), safe_detour);
+  EXPECT_NEAR((safe_detour->center_ - vehicle).norm(), 30.0F, 1e-5F);
+  EXPECT_LT(safe_detour->center_.x(), 31.5F);
+}
+
+TEST(TopoSearchRadius, GeometryWeightBalancesSemanticFrontierRisk)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto direct_mid = std::make_shared<TopoNode>();
+  auto direct_frontier = std::make_shared<TopoNode>();
+  auto safe_mid = std::make_shared<TopoNode>();
+  auto safe_frontier = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  direct_mid->center_ = Eigen::Vector3f(15.0F, 0.0F, 1.6F);
+  direct_frontier->center_ = Eigen::Vector3f(32.0F, 0.0F, 1.6F);
+  safe_mid->center_ = Eigen::Vector3f(15.0F, 10.0F, 1.6F);
+  safe_frontier->center_ = Eigen::Vector3f(31.5F, 10.0F, 1.6F);
+  direct_frontier->semantic_score_ = 0.1F;
+  direct_frontier->semantic_confidence_ = 1.0F;
+
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    a->neighbors_.insert(b);
+    b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    const float length = (a->center_ - b->center_).norm();
+    a->weight_[b] = length;
+    b->weight_[a] = length;
+  };
+  connect(start, direct_mid);
+  connect(direct_mid, direct_frontier);
+  connect(start, safe_mid);
+  connect(safe_mid, safe_frontier);
+
+  const Eigen::Vector3f mission_goal(100.0F, 0.0F, 1.6F);
+  const Eigen::Vector3f vehicle = start->center_;
+  std::vector<TopoNode::Ptr> balanced_path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, mission_goal, balanced_path, 0.2, 0.2F, 1.0F, {}, 2.0F,
+    35.0F, &vehicle, 31.0F, false));
+  ASSERT_EQ(balanced_path.size(), 3U);
+  EXPECT_EQ(balanced_path.back(), safe_frontier);
+
+  std::vector<TopoNode::Ptr> distance_dominated_path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, mission_goal, distance_dominated_path, 0.2, 1.0F, 1.0F, {}, 2.0F,
+    35.0F, &vehicle, 31.0F, false));
+  ASSERT_EQ(distance_dominated_path.size(), 3U);
+  EXPECT_EQ(distance_dominated_path.back(), direct_frontier);
+}
+
+TEST(TopoSearchRadius, IncompleteFrontierFallbackStillUsesCombinedLoss)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto risky_frontier = std::make_shared<TopoNode>();
+  auto safe_frontier = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  risky_frontier->center_ = Eigen::Vector3f(25.0F, 0.0F, 1.6F);
+  safe_frontier->center_ = Eigen::Vector3f(24.0F, 5.0F, 1.6F);
+  risky_frontier->semantic_score_ = 0.1F;
+  risky_frontier->semantic_confidence_ = 1.0F;
+
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    a->neighbors_.insert(b);
+    b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    const float length = (a->center_ - b->center_).norm();
+    a->weight_[b] = length;
+    b->weight_[a] = length;
+  };
+  connect(start, risky_frontier);
+  connect(start, safe_frontier);
+
+  const Eigen::Vector3f vehicle = start->center_;
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(100.0F, 0.0F, 1.6F), path, 0.2,
+    0.2F, 1.0F, {}, 2.0F, 35.0F, &vehicle, 31.5F, false));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), safe_frontier);
+}
+
+TEST(TopoSearchRadius, GoalDirectedSearchPrefersSaferTerminalOverFartherRisk)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto safe = std::make_shared<TopoNode>();
+  auto risky = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  safe->center_ = Eigen::Vector3f(10.0F, 1.5F, 1.6F);
+  risky->center_ = Eigen::Vector3f(12.0F, 0.0F, 1.6F);
+  risky->semantic_score_ = 0.9F;
+  risky->semantic_confidence_ = 1.0F;
+
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    a->neighbors_.insert(b);
+    b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    const float length = (a->center_ - b->center_).norm();
+    a->weight_[b] = length;
+    b->weight_[a] = length;
+  };
+  connect(start, safe);
+  connect(start, risky);
+
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(100.0F, 0.0F, 1.6F), path, 0.2,
+    0.2F, 1.0F, {}, 2.0F, 20.0F));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), safe);
+}
+
+TEST(TopoSearchRadius, GoalInWindowSelectsNearestGoalNode)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto intermediate = std::make_shared<TopoNode>();
+  auto at_goal = std::make_shared<TopoNode>();
+  auto overshoot = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  intermediate->center_ = Eigen::Vector3f(5.0F, 0.0F, 1.6F);
+  at_goal->center_ = Eigen::Vector3f(10.2F, 0.4F, 1.6F);
+  overshoot->center_ = Eigen::Vector3f(20.0F, -4.0F, 1.6F);
+
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    a->neighbors_.insert(b);
+    b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    const float length = (a->center_ - b->center_).norm();
+    a->weight_[b] = length;
+    b->weight_[a] = length;
+  };
+  connect(start, intermediate);
+  connect(intermediate, at_goal);
+  connect(start, overshoot);
+
+  const Eigen::Vector3f goal(10.0F, 0.0F, 1.6F);
+  const Eigen::Vector3f vehicle = start->center_;
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, goal, path, 0.2, 0.2F, 1.0F, {}, 0.0F, 35.0F, &vehicle, 0.0F, true));
+  ASSERT_EQ(path.size(), 3U);
+  EXPECT_EQ(path[1], intermediate);
+  EXPECT_EQ(path.back(), at_goal);
 }
 
 TEST(TopoSearchRadius, GraphSearchRejectsEndOutsideLocalWindow)

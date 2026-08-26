@@ -1,0 +1,80 @@
+\documentclass[tikz,border=3pt]{standalone}
+\usepackage{xcolor}
+\usetikzlibrary{arrows.meta}
+\definecolor{ink}{HTML}{19232C}
+\definecolor{subink}{HTML}{5B6872}
+\definecolor{orange}{HTML}{D97706}
+\definecolor{orangebg}{HTML}{FFF8F0}
+\definecolor{green}{HTML}{168A50}
+\definecolor{greenbg}{HTML}{F2FBF5}
+\definecolor{blue}{HTML}{2767D4}
+\definecolor{bluebg}{HTML}{F2F6FD}
+\definecolor{grayedge}{HTML}{77838D}
+\begin{document}
+\begin{tikzpicture}[
+ x=1mm,y=1mm,font=\sffamily,
+ group/.style={font=\sffamily\bfseries\fontsize{7.2}{8}\selectfont,text=ink},
+ node/.style={rounded corners=1mm,line width=.45pt,fill=white,align=center,
+              font=\sffamily\bfseries\fontsize{5.5}{6.3}\selectfont,text=ink},
+ note/.style={font=\sffamily\fontsize{4.3}{5}\selectfont,text=subink,align=center},
+ panel/.style={rounded corners=1.5mm,line width=.6pt,dashed,dash pattern=on 2.5pt off 1.8pt},
+ flow/.style={-{Latex[length=1.7mm,width=1.1mm]},line width=.8pt,draw=grayedge},
+ sem/.style={flow,draw=green}, depth/.style={flow,draw=blue}, route/.style={flow,draw=orange,line width=1pt}
+]
+% Input
+\filldraw[panel,fill=orangebg,draw=orange] (0,0) rectangle (31,30);
+\node[group,anchor=west] at (2.5,26.5) {Inputs};
+\filldraw[node,draw=orange!65] (3,15) rectangle (14.5,23);
+\node[node,draw=none,fill=none] at (8.75,19) {Text};
+\filldraw[node,draw=orange!65] (16.5,15) rectangle (28,23);
+\node[node,draw=none,fill=none] at (22.25,19) {RGB};
+\filldraw[node,draw=blue!65,fill=blue!5] (3,4) rectangle (28,12);
+\node[node,draw=none,fill=none] at (15.5,8.5) {Depth + state};
+
+% Perception
+\filldraw[panel,fill=greenbg,draw=green] (35,0) rectangle (76,30);
+\node[group,anchor=west] at (37.5,26.5) {Semantic perception};
+\filldraw[node,draw=green!60] (38,10) rectangle (52,21);
+\node[node,draw=none,fill=none] at (45,17) {Frozen PEARL};
+\node[note] at (45,12.8) {RGB $\times$ text};
+\filldraw[node,draw=green!60] (58,10) rectangle (73,21);
+\node[node,draw=none,fill=none] at (65.5,17) {Risk map};
+\node[note] at (65.5,12.8) {valid / clipped depth};
+\draw[sem] (52,15.5)--(58,15.5);
+
+% Persistent graph
+\filldraw[panel,fill=orangebg,draw=orange] (80,0) rectangle (126,30);
+\node[group,anchor=west] at (82.5,26.5) {Persistent free-space topology};
+\filldraw[node,draw=orange!60] (83,10) rectangle (96,21);
+\node[node,draw=none,fill=none] at (89.5,17) {Bounded points};
+\node[note] at (89.5,12.8) {obstacles + rays};
+\filldraw[node,draw=orange!60] (101,10) rectangle (123,21);
+\node[node,draw=none,fill=none] at (112,17) {EPIC graph + memory};
+\node[note] at (112,12.8) {witnesses + anchors};
+\draw[flow] (96,15.5)--(101,15.5);
+
+% Planning
+\filldraw[panel,fill=bluebg,draw=blue] (130,0) rectangle (178,30);
+\node[group,anchor=west] at (132.5,26.5) {Risk-aware rolling planning};
+\filldraw[node,draw=blue!60] (133,10) rectangle (147,21);
+\node[node,draw=none,fill=none] at (140,17) {Rolling A*};
+\node[note] at (140,12.8) {route identity};
+\filldraw[node,draw=green!60,fill=green!5] (153,10) rectangle (166,21);
+\node[node,draw=none,fill=none] at (159.5,17) {YOPO};
+\node[note] at (159.5,12.8) {unchanged};
+\filldraw[node,draw=grayedge] (170,10) rectangle (175.5,21);
+\node[note,rotate=90] at (172.75,15.5) {trajectory};
+\draw[route] (147,15.5)--(153,15.5);
+\draw[flow] (166,15.5)--(170,15.5);
+
+% Cross-panel flow
+% Cross-panel buses stay on clear horizontal lanes. The graph box owns memory,
+% so no long feedback line is drawn across unrelated modules.
+\draw[sem] (8.75,23)--(8.75,24.5)--(43,24.5)--(43,21);
+\draw[sem] (28,19)--(38,19);
+\draw[sem] (73,15.5)--(77,15.5)--(77,23.5)--(112,23.5)--(112,21);
+\draw[depth] (28,8)--(81,8)--(83,13);
+\draw[depth] (28,8)--(159.5,8)--(159.5,10);
+\draw[flow] (123,15.5)--(133,15.5);
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,51 @@
+\documentclass[tikz,border=3pt]{standalone}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usetikzlibrary{arrows.meta}
+\definecolor{ink}{HTML}{19232C}
+\definecolor{subink}{HTML}{5B6872}
+\definecolor{orange}{HTML}{D97706}
+\definecolor{orangebg}{HTML}{FFF8F0}
+\definecolor{green}{HTML}{168A50}
+\definecolor{greenbg}{HTML}{F2FBF5}
+\definecolor{blue}{HTML}{2767D4}
+\definecolor{red}{HTML}{D83C48}
+\definecolor{grayedge}{HTML}{77838D}
+\begin{document}
+\begin{tikzpicture}[
+ x=1mm,y=1mm,font=\sffamily,
+ group/.style={font=\sffamily\bfseries\fontsize{6.8}{8}\selectfont,text=ink},
+ note/.style={font=\sffamily\fontsize{4.5}{5.3}\selectfont,text=subink,align=center},
+ panel/.style={rounded corners=1.5mm,line width=.55pt,dashed,dash pattern=on 2.5pt off 1.8pt},
+ arrow/.style={-{Latex[length=1.5mm,width=1mm]},line width=.75pt},
+ edge/.style={draw=grayedge!65,line width=.7pt}
+]
+\filldraw[panel,fill=greenbg,draw=green] (0,0) rectangle (24,31);
+\node[group] at (12,27.5) {Clipped evidence};
+\filldraw[fill=white,draw=green!55,rounded corners=.8mm] (5,9) rectangle (19,20);
+\fill[blue!15] (5.5,9.5) rectangle (18.5,19.5);
+\fill[green!28] (5.5,9.5) rectangle (18.5,12.5);
+\fill[red!65] (14.5,11) rectangle (18,17.5);
+\fill[red!80!black] (13.8,17.5)--(16.2,19.5)--(18.6,17.5)--cycle;
+\node[note] at (12,5.5) {risk patch, no valid depth};
+
+\filldraw[panel,fill=orangebg,draw=orange] (28,0) rectangle (90,31);
+\node[group] at (52,27.5) {Continuous risk on witness paths};
+\coordinate (s) at (33,7); \coordinate (u) at (53,18); \coordinate (ut) at (84,19);
+\coordinate (l) at (55,6); \coordinate (lt) at (85,8);
+\draw[orange,line width=1.4pt] (s)..controls(41,16)and(46,18)..(u)..controls(66,19)and(75,19)..(ut);
+\draw[blue,line width=1.35pt] (s)..controls(43,5)and(48,5)..(l)..controls(68,5)and(77,7)..(lt);
+\foreach \p in {u,ut,l,lt}{\fill[white,draw=grayedge] (\p) circle (1.15mm);}
+\fill[green] (s) circle (1.5mm);
+\shade[inner color=red!70,outer color=red!2,opacity=.6] (69,23) circle (4.5mm);
+\fill[red] (69,23) circle (1.7mm);
+\draw[red!75!black,dashed,line width=.65pt] (69,21.3)--(69,19);
+\node[note,text=red!75!black,anchor=west] at (70.5,21) {$d_{k,ij}$};
+\draw[arrow,draw=green] (24,13.5)--(26,13.5)--(26,23)--(67.3,23);
+\node[note,text=green,fill=orangebg,inner sep=.5pt] at (41,24.3) {semantic ray};
+\node[note,text=orange] at (50,12) {risk-exposed witness};
+\node[note,text=blue] at (67,3) {selected low-risk branch};
+\filldraw[fill=white,draw=red!45,rounded corners=.8mm] (61,8.5) rectangle (84,13.5);
+\node[note] at (72.5,11) {$C_{\rm sem}=\lambda L[-\log(1-r)]$};
+\end{tikzpicture}
+\end{document}

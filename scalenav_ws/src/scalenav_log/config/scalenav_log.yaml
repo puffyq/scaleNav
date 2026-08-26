@@ -12,10 +12,7 @@ scalenav_log_node:
     control_topic: "/scalenav/trajectory_point"
     semantic_topic: "/scalenav/text_heatmap_raw"
     goal_topic: "/goal_pose"
-    max_total_bytes: 10737418240
-    max_sessions: 20
-    max_session_bytes: 1073741824
-    prune_period_s: 10.0
+    clearance_topic: "/epic/clearance"
     pointcloud_max_points: 200000
     pointcloud_stride: 1
     qos_depth: 10

@@ -143,4 +143,41 @@ TEST(LidarMapBounds, ExpansionPreservesMapMemory)
     Eigen::Vector3f(50.0F, 10.0F, 2.0F)));
 }
 
+TEST(LidarMapBounds, SlidingWindowDropsPointsOutsideRadiusEvenInsideMissionBox)
+{
+  LIOInterface map;
+  map.configureBounds(
+    Eigen::Vector3f(-20.0F, -20.0F, -5.0F),
+    Eigen::Vector3f(100.0F, 20.0F, 5.0F));
+  map.configureStorage(0.25F, 20.0F, 1000U, 0.5F);
+  ASSERT_TRUE(map.updateCloudWorld(
+    cloud({PointType(10.0F, 0.0F, 1.6F)}),
+    Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity()));
+  ASSERT_TRUE(map.updateCloudWorld(
+    cloud({PointType(80.0F, 0.0F, 1.6F)}),
+    Eigen::Vector3f(80.0F, 0.0F, 1.6F), Eigen::Quaternionf::Identity()));
+  const auto accumulated = map.accumulatedCloudSnapshot();
+  ASSERT_EQ(accumulated.size(), 1U);
+  EXPECT_NEAR(accumulated.front().x, 80.0F, 1e-6F);
+}
+
+TEST(LidarMapOccupied, CapacityKeepsPointsNearestToVehicle)
+{
+  LIOInterface map;
+  map.configureStorage(0.05F, 40.0F, 1000U, 0.1F);
+  pcl::PointCloud<PointType> frame;
+  frame.reserve(1200);
+  for (int i = 0; i < 1200; ++i) {
+    frame.push_back(PointType(0.05F * static_cast<float>(i), 0.0F, 1.6F));
+  }
+
+  const Eigen::Vector3f pose(20.0F, 0.0F, 1.6F);
+  ASSERT_TRUE(map.updateCloudWorld(frame, pose, Eigen::Quaternionf::Identity()));
+  const auto accumulated = map.accumulatedCloudSnapshot();
+  ASSERT_EQ(accumulated.size(), 1000U);
+  EXPECT_NEAR(map.getDisToOcc(pose), 0.0, 1e-5);
+  EXPECT_LT(map.getDisToOcc(Eigen::Vector3f(0.0F, 0.0F, 1.6F)), 10.1);
+  EXPECT_GT(map.getDisToOcc(Eigen::Vector3f(59.95F, 0.0F, 1.6F)), 9.9);
+}
+
 }  // namespace

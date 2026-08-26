@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+dataset/*
+!dataset/README.md
+saved/
+runs/
+*.pth
+*.pt
+events.out.tfevents.*

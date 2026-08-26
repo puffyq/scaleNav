@@ -43,10 +43,16 @@ from planner_continuity import (
 )
 from text_tracker.heatmap import goal_body_to_heatmap
 from graph import (
+    CANDIDATE_TOPOLOGY_RGBA,
     DepthSafeVolumeQuery,
     GraphConfig,
+    LOCAL_GOAL_RGBA,
+    MISSION_GOAL_RGBA,
+    ORDINARY_TOPOLOGY_RGBA,
+    SELECTED_PATH_RGBA,
     SparseDepthGraph,
     STATE_RGBA,
+    UAV_RGBA,
     build_graph_visualization,
 )
 
@@ -507,19 +513,24 @@ class OnlinePlanner(Node):
     @staticmethod
     def speed_color(speed: float, maximum: float) -> tuple[float, float, float]:
         t = min(1.0, max(0.0, speed / max(0.1, maximum)))
-        anchors = ((0.05, 0.20, 0.95), (0.05, 0.85, 0.35),
-                   (1.00, 0.85, 0.05), (0.95, 0.05, 0.03))
-        scaled = t * 3.0
-        index = min(2, int(scaled))
+        anchors = (
+            CANDIDATE_TOPOLOGY_RGBA[:3],
+            ORDINARY_TOPOLOGY_RGBA[:3],
+            UAV_RGBA[:3],
+        )
+        scaled = t * 2.0
+        index = min(1, int(scaled))
         local = scaled - index
-        return tuple(anchors[index][axis] * (1.0 - local) +
-                     anchors[index + 1][axis] * local for axis in range(3))
+        return tuple(
+            anchors[index][axis] * (1.0 - local)
+            + anchors[index + 1][axis] * local
+            for axis in range(3)
+        )
 
     def publish_flight_telemetry(self) -> None:
         with self.flight_lock:
             samples = list(self.flight_samples)
             latest_sample = samples[-1] if samples else None
-            current_velocity = self.velocity_world.copy()
             current_odom = self.odom
         if len(samples) > self.flight_visualization_max_points:
             step = max(1, math.ceil(
@@ -552,12 +563,9 @@ class OnlinePlanner(Node):
         vehicle.id = 1
         vehicle.type = Marker.ARROW
         vehicle.action = Marker.ADD
+        vehicle.color = self.color_msg(*UAV_RGBA[:3])
         if current_odom is not None:
             vehicle.pose = current_odom.pose.pose
-            r, g, b = self.speed_color(
-                float(np.linalg.norm(current_velocity)),
-                self.args.trajectory_speed_color_max_mps)
-            vehicle.color = self.color_msg(r, g, b)
         vehicle.scale.x = 1.25
         vehicle.scale.y = 0.30
         vehicle.scale.z = 0.30
@@ -1126,8 +1134,8 @@ class OnlinePlanner(Node):
                 markers.markers.append(marker)
 
         for name, path, rgba, scale in (
-            ("optimistic_path", snapshot.optimistic_path, STATE_RGBA["UNVALIDATED"], 0.10),
-            ("certified_path", snapshot.certified_path, STATE_RGBA["CERTIFIED"], 0.14),
+            ("optimistic_path", snapshot.optimistic_path, CANDIDATE_TOPOLOGY_RGBA, 0.10),
+            ("certified_path", snapshot.certified_path, SELECTED_PATH_RGBA, 0.14),
         ):
             if len(path) < 2:
                 continue
@@ -1138,8 +1146,8 @@ class OnlinePlanner(Node):
             markers.markers.append(marker)
 
         for label, point, rgba, marker_type, scale in (
-            ("current", snapshot.current, (0.10, 0.42, 0.75, 1.0), Marker.SPHERE, 0.55),
-            ("goal", snapshot.goal, (1.0, 1.0, 1.0, 1.0), Marker.CUBE, 0.60),
+            ("current", snapshot.current, UAV_RGBA, Marker.SPHERE, 0.55),
+            ("goal", snapshot.goal, MISSION_GOAL_RGBA, Marker.CUBE, 0.60),
         ):
             marker = self._marker(stamp, marker_id, marker_type, rgba, scale=scale)
             marker_id += 1
@@ -1151,7 +1159,7 @@ class OnlinePlanner(Node):
                 stamp,
                 marker_id,
                 Marker.CUBE,
-                (0.0, 0.75, 0.80, 1.0),
+                LOCAL_GOAL_RGBA,
                 scale=0.52,
             )
             marker.ns = "scalenav_graph/waypoint"

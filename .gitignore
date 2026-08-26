@@ -15,6 +15,7 @@ runs/
 *.egg-info/
 *.html
 !tools/*.html
+!scalenav_ws/src/scalenav_log/web/index.html
 *.engine
 *.onnx
 *.trt
@@ -62,6 +63,8 @@ paper/**/*.out
 paper/**/*.toc
 paper/**/*.zip
 paper/**/missfont.log
+paper/**/*.fls
+paper/**/*.fdb_latexmk
 
 # Workspace migration backups and generated ROS/colcon outputs.
 bc/

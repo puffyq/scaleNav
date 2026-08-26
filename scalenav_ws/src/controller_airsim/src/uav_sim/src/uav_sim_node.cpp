@@ -195,7 +195,7 @@ private:
     desired_.position = initial_position_;
     desired_.velocity.setZero();
     desired_.acceleration.setZero();
-    desired_.yaw = 0.0;
+    desired_.yaw = 1.57;
     desired_.yaw_rate = 0.0;
     emergency_stop_latched_ = false;
     timeout_hold_active_ = false;

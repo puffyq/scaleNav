@@ -32,7 +32,7 @@ Visualization Manager:
     - Alpha: 0.5
       Cell Size: 1
       Class: rviz_default_plugins/Grid
-      Color: 160; 160; 164
+      Color: 101; 121; 133
       Enabled: true
       Line Style:
         Line Width: 0.029999999329447746
@@ -66,7 +66,7 @@ Visualization Manager:
       Covariance:
         Orientation:
           Alpha: 0.5
-          Color: 255; 255; 127
+          Color: 181; 193; 200
           Color Style: Unique
           Frame: Local
           Offset: 1
@@ -74,7 +74,7 @@ Visualization Manager:
           Value: true
         Position:
           Alpha: 0.30000001192092896
-          Color: 204; 51; 204
+          Color: 101; 121; 133
           Scale: 1
           Value: true
         Value: true
@@ -86,7 +86,7 @@ Visualization Manager:
         Alpha: 1
         Axes Length: 1
         Axes Radius: 0.10000000149011612
-        Color: 255; 25; 0
+        Color: 36; 52; 61
         Head Length: 0.30000001192092896
         Head Radius: 0.10000000149011612
         Shaft Length: 1
@@ -131,19 +131,19 @@ Visualization Manager:
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
-      Color: 0; 255; 0
+      Color: 0; 124; 131
       Enabled: true
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
       Line Style: Lines
-      Line Width: 0.029999999329447746
+      Line Width: 0.07999999821186066
       Name: Planned Path
       Offset:
         X: 0
         Y: 0
         Z: 0
-      Pose Color: 255; 85; 255
+      Pose Color: 141; 96; 145
       Pose Style: None
       Radius: 0.029999999329447746
       Shaft Diameter: 0.10000000149011612
@@ -160,7 +160,7 @@ Visualization Manager:
       Axes Length: 1
       Axes Radius: 0.10000000149011612
       Class: rviz_default_plugins/Pose
-      Color: 255; 64; 64
+      Color: 49; 94; 120
       Enabled: true
       Head Length: 0.5
       Head Radius: 0.20000000298023224
@@ -218,7 +218,7 @@ Visualization Manager:
       Value: true
   Enabled: true
   Global Options:
-    Background Color: 48; 48; 48
+    Background Color: 250; 250; 247
     Fixed Frame: world_enu
     Frame Rate: 30
   Name: root

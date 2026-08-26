@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-x="80.0"
+# x="-80.0"
+# y="0.0"
+# z="1.6"
+
+x="0.0"
 y="0.0"
 z="1.6"
+
 if (($# >= 1)); then x="$1"; fi
 if (($# >= 2)); then y="$2"; fi
 if (($# >= 3)); then z="$3"; fi

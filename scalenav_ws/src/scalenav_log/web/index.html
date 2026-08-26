@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ScaleNav Log Replay</title>
+  <style>
+    :root { color-scheme:light; --bg:#f4f6f8; --panel:#fff; --line:#d8dee5; --muted:#627181; --text:#1b2733; --accent:#087ea4; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:14px system-ui,sans-serif; }
+    header { display:flex; align-items:center; gap:14px; padding:14px 20px; border-bottom:1px solid var(--line); background:#fff; }
+    h1 { margin:0; font-size:18px; letter-spacing:0; } select,button,input { background:#fff; color:var(--text); border:1px solid #b9c4ce; border-radius:4px; padding:7px 9px; }
+    button { cursor:pointer; } button:hover { border-color:var(--accent); } .spacer { flex:1; } .muted { color:var(--muted); }
+    main { display:grid; grid-template-columns:minmax(700px,1fr) 360px; gap:12px; padding:12px; min-height:calc(100vh - 64px); }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:6px; overflow:hidden; } .panel h2 { margin:0; padding:10px 12px; font-size:13px; color:#33475a; border-bottom:1px solid var(--line); }
+    .controls { padding:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; } #timeline { width:100%; accent-color:var(--accent); } .stage { padding:10px; display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+    canvas { display:block; width:100%; aspect-ratio:5/3; background:#fff; border:1px solid var(--line); image-rendering:auto; } .wide { grid-column:1/-1; } .wide canvas { aspect-ratio:64/31; } .image-title { margin:0; padding:7px 8px; color:#33475a; font-size:12px; }
+    .graph-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:4px 0; }
+    .graph-heading .image-title { flex:1; }
+    .graph-layers { display:flex; align-items:center; justify-content:flex-end; gap:5px 12px; flex-wrap:wrap; padding:4px 8px; color:#526475; font-size:11px; }
+    .graph-layers label { display:flex; align-items:center; gap:4px; white-space:nowrap; cursor:pointer; }
+    .graph-layers input { margin:0; padding:0; accent-color:var(--accent); }
+    .sidebar { min-width:0; display:grid; grid-template-rows:auto minmax(0,1fr); gap:12px; }
+    .evaluation-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px; border-bottom:1px solid var(--line); }
+    .evaluation-head h2 { padding:0; border:0; }
+    .evaluation-status { color:#087345; font:600 11px/1.2 ui-monospace,monospace; }
+    .evaluation-grid { display:grid; grid-template-columns:1fr 1fr; }
+    .evaluation-grid div { min-width:0; padding:8px 10px; border-right:1px solid #e3e8ec; border-bottom:1px solid #e3e8ec; }
+    .evaluation-grid div:nth-child(even) { border-right:0; }
+    .evaluation-grid div:last-child:nth-child(odd) { grid-column:1/-1; border-right:0; }
+    .evaluation-grid dt { color:var(--muted); font-size:10px; }
+    .evaluation-grid dd { margin:3px 0 0; color:#1c3041; font:600 12px/1.35 ui-monospace,monospace; overflow-wrap:anywhere; }
+    .evaluation-note { margin:0; padding:8px 10px; color:#667788; background:#f8fafb; font-size:10px; line-height:1.4; }
+    .events-panel { min-height:0; }
+    .details { padding:12px; white-space:pre-wrap; color:#394b5c; background:#fbfcfd; font-family:ui-monospace,monospace; font-size:12px; line-height:1.5; max-height:260px; overflow:auto; }
+    .events { max-height:calc(100vh - 250px); overflow:auto; } table { width:100%; border-collapse:collapse; font-size:12px; } th,td { padding:7px 8px; border-bottom:1px solid #e1e6eb; text-align:left; } th { position:sticky; top:0; background:#f7f9fa; } tr.active { background:#dff3fa; color:#075f7c; } tr:hover { background:#eef5f8; cursor:pointer; }
+    @media (max-width:1100px) { main { grid-template-columns:1fr; } .sidebar { grid-template-columns:1fr; } .events { max-height:360px; } }
+    @media (max-width:700px) { .stage { grid-template-columns:1fr; } .wide { grid-column:auto; } }
+  </style>
+</head>
+<body>
+  <header><h1>ScaleNav Log Replay</h1><span class="muted">session</span><select id="sessions"></select><button id="refresh">刷新</button><span class="spacer"></span><span id="sessionInfo" class="muted"></span></header>
+  <main>
+    <section class="panel">
+      <h2>回放视图</h2>
+      <div class="controls"><button id="play">播放</button><button id="first">回到开头</button><button id="prev">上一条</button><button id="next">下一条</button><label class="muted" for="playbackSpeed">倍速</label><select id="playbackSpeed" aria-label="播放倍速"><option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option><option value="8">8x</option></select><input id="timeline" type="range" min="0" max="0" value="0"><span id="cursor" class="muted">0/0</span></div>
+      <div class="stage"><div><h3 class="image-title">Depth</h3><canvas id="depth" width="640" height="400"></canvas></div><div><h3 class="image-title">RGB</h3><canvas id="rgb" width="640" height="400"></canvas></div><div><h3 class="image-title">Heatmap</h3><canvas id="heatmap" width="640" height="400"></canvas></div><div class="wide"><div class="graph-heading"><h3 class="image-title">Point Cloud + Graph + Path (world XY)</h3><div class="graph-layers" aria-label="Graph 显示元素"><label><input type="checkbox" data-layer="cloud" checked>点云</label><label><input type="checkbox" data-layer="rays" checked>自由射线</label><label><input type="checkbox" data-layer="skeleton" checked>骨架</label><label><input type="checkbox" data-layer="witness" checked>边 Witness</label><label><input type="checkbox" data-layer="topologyPath" checked>A* 路径</label><label><input type="checkbox" data-layer="selectedPath" checked>执行路径</label><label><input type="checkbox" data-layer="speculative" checked>推测节点</label><label><input type="checkbox" data-layer="bubbles" checked>Bubble</label><label><input type="checkbox" data-layer="goals" checked>目标</label><label><input type="checkbox" data-layer="robot" checked>车辆</label></div></div><canvas id="graph" width="1280" height="620"></canvas></div></div>
+      <div id="details" class="details">选择一个 session 开始回放。</div>
+    </section>
+    <aside class="sidebar">
+      <section class="panel evaluation-panel" aria-label="ICRA 飞行评价">
+        <div class="evaluation-head"><h2>ICRA 飞行评价</h2><span id="evaluationStatus" class="evaluation-status">等待目标</span></div>
+        <dl id="evaluationMetrics" class="evaluation-grid"></dl>
+        <p id="evaluationNote" class="evaluation-note">统计随当前回放进度更新，目标位置变化时自动开始新的任务段。</p>
+      </section>
+      <section class="panel events-panel"><h2>事件索引</h2><div class="events"><table><thead><tr><th>#</th><th>类型</th><th>时间(ns)</th><th>文件</th><th>大小</th></tr></thead><tbody id="events"></tbody></table></div></section>
+    </aside>
+  </main>
+<script>
+const $ = id => document.getElementById(id);
+let sessions = [], records = [], active = 0, timer = null, base = '', renderToken = 0, lastWorldState = null;
+const assetCache = new Map();
+const palette = {cloud:'#526b78', ray:'#aebbc4', graph:'#087ea4', bubble:'#dc7b16', path:'#139b54', robot:'#d35400'};
+const layerVisibility = Object.fromEntries(
+  [...document.querySelectorAll('[data-layer]')].map(input=>[input.dataset.layer,input.checked]));
+const layerVisible = name=>layerVisibility[name]!==false;
+
+function clearCanvas(id, message='no data') {
+  const c=$(id), x=c.getContext('2d');
+  x.fillStyle='#ffffff'; x.fillRect(0,0,c.width,c.height);
+  x.fillStyle='#6c7c89'; x.font='14px system-ui'; x.textAlign='center';
+  x.fillText(message,c.width/2,c.height/2); x.textAlign='left';
+}
+
+function parseNetpbm(buffer, expectedMagic) {
+  const bytes=new Uint8Array(buffer); let pos=0;
+  const skip=()=>{for(;;){while(pos<bytes.length&&bytes[pos]<=32)pos++;if(bytes[pos]!==35)return;while(pos<bytes.length&&bytes[pos]!==10)pos++;}};
+  const token=()=>{skip();const begin=pos;while(pos<bytes.length&&bytes[pos]>32&&bytes[pos]!==35)pos++;return new TextDecoder().decode(bytes.subarray(begin,pos));};
+  const magic=token(), width=Number(token()), height=Number(token()), max=Number(token());
+  if(magic!==expectedMagic||!Number.isInteger(width)||!Number.isInteger(height)||width<1||height<1||max<1)throw Error(`invalid ${expectedMagic} image`);
+  if(bytes[pos]===13&&bytes[pos+1]===10)pos+=2;else if(bytes[pos]<=32)pos++;
+  return {bytes,offset:pos,width,height,max};
+}
+
+function readP5(buffer) {
+  const image=parseNetpbm(buffer,'P5'), count=image.width*image.height, bpp=image.max>255?2:1;
+  if(image.offset+count*bpp>image.bytes.length)throw Error('truncated P5 image');
+  const values=new Uint32Array(count);
+  for(let i=0,o=image.offset;i<count;i++,o+=bpp)values[i]=bpp===2?image.bytes[o]*256+image.bytes[o+1]:image.bytes[o];
+  return {...image,values};
+}
+
+function drawDepth(buffer) {
+  const src=readP5(buffer), valid=[];
+  for(const v of src.values)if(v>0&&v<src.max)valid.push(v);
+  if(!valid.length){clearCanvas('depth','no valid depth');return;}
+  valid.sort((a,b)=>a-b);
+  const low=valid[Math.floor((valid.length-1)*.02)], high=valid[Math.floor((valid.length-1)*.98)];
+  const c=$('depth'); c.width=src.width; c.height=src.height; const x=c.getContext('2d'), out=x.createImageData(src.width,src.height);
+  for(let i=0;i<src.values.length;i++){
+    const v=src.values[i], validPixel=v>0&&v<src.max, q=validPixel?Math.round(255*(1-Math.max(0,Math.min(1,(v-low)/(high-low||1))))):0;
+    out.data[i*4]=q;out.data[i*4+1]=q;out.data[i*4+2]=q;out.data[i*4+3]=255;
+  }
+  x.putImageData(out,0,0); x.fillStyle='#ffffff'; x.font='9px monospace';
+  x.fillText(`${(low/1000).toFixed(2)}..${(high/1000).toFixed(2)}m  valid ${valid.length}/${src.values.length}`,5,11);
+}
+
+function drawRgb(buffer) {
+  const src=parseNetpbm(buffer,'P6'), count=src.width*src.height;
+  if(src.max>255||src.offset+count*3>src.bytes.length)throw Error('unsupported or truncated P6 image');
+  const c=$('rgb'); c.width=src.width; c.height=src.height; const x=c.getContext('2d'), out=x.createImageData(src.width,src.height);
+  for(let i=0,o=src.offset;i<count;i++,o+=3){out.data[i*4]=src.bytes[o];out.data[i*4+1]=src.bytes[o+1];out.data[i*4+2]=src.bytes[o+2];out.data[i*4+3]=255;}
+  x.putImageData(out,0,0);
+}
+
+function heatColor(t) {
+  t=Math.max(0,Math.min(1,t));
+  const stops=[[25,48,110],[25,155,210],[70,205,145],[245,210,65],[225,55,45]], scaled=t*(stops.length-1), i=Math.min(stops.length-2,Math.floor(scaled)), f=scaled-i;
+  return stops[i].map((v,n)=>Math.round(v+(stops[i+1][n]-v)*f));
+}
+
+function drawHeatmap(buffer) {
+  const src=readP5(buffer), c=$('heatmap'); c.width=src.width; c.height=src.height; const x=c.getContext('2d'), out=x.createImageData(src.width,src.height);
+  for(let i=0;i<src.values.length;i++){const col=heatColor(src.values[i]/1000);out.data[i*4]=col[0];out.data[i*4+1]=col[1];out.data[i*4+2]=col[2];out.data[i*4+3]=255;}
+  x.putImageData(out,0,0); x.fillStyle='#ffffff'; x.font='9px monospace'; x.fillText('semantic 0.0 -> 1.0',5,11);
+}
+
+function parsePcd(text) {
+  const lines=text.split(/\r?\n/), start=lines.findIndex(line=>/^DATA\s+ascii\s*$/i.test(line.trim()));
+  if(start<0)throw Error('only ASCII PCD is supported');
+  const points=[];
+  for(let i=start+1;i<lines.length;i++){const values=lines[i].trim().split(/\s+/);if(values.length<3)continue;const p=[Number(values[0]),Number(values[1]),Number(values[2])];if(p.every(Number.isFinite))points.push(p);}
+  return points;
+}
+
+function vec3(value, fallback=[0,0,0]) {
+  if(Array.isArray(value))return [Number(value[0])||0,Number(value[1])||0,Number(value[2])||0];
+  if(value&&typeof value==='object')return [Number(value.x)||0,Number(value.y)||0,Number(value.z)||0];
+  return fallback.slice();
+}
+
+function magnitude(value){const p=vec3(value);return Math.hypot(p[0],p[1],p[2]);}
+function distance(a,b){const p=vec3(a),q=vec3(b);return Math.hypot(p[0]-q[0],p[1]-q[1],p[2]-q[2]);}
+function vectorDifference(a,b,dt){const p=vec3(a),q=vec3(b);return [(p[0]-q[0])/dt,(p[1]-q[1])/dt,(p[2]-q[2])/dt];}
+function pointSegmentDistance(point,start,end){
+  const p=vec3(point),a=vec3(start),b=vec3(end),d=[b[0]-a[0],b[1]-a[1],b[2]-a[2]],length2=d[0]**2+d[1]**2+d[2]**2;
+  if(length2<1e-9)return distance(p,a);
+  const t=Math.max(0,Math.min(1,((p[0]-a[0])*d[0]+(p[1]-a[1])*d[1]+(p[2]-a[2])*d[2])/length2));
+  return distance(p,[a[0]+t*d[0],a[1]+t*d[1],a[2]+t*d[2]]);
+}
+function fixed(value,digits=2,suffix=''){return Number.isFinite(value)?`${value.toFixed(digits)}${suffix}`:'-';}
+function finiteValues(values){return values.map(Number).filter(Number.isFinite);}
+function sampleStats(values){
+  const sorted=finiteValues(values).sort((a,b)=>a-b);if(!sorted.length)return null;
+  const percentile=ratio=>{const position=(sorted.length-1)*ratio,lower=Math.floor(position),fraction=position-lower;return sorted[lower]+(sorted[Math.min(lower+1,sorted.length-1)]-sorted[lower])*fraction;};
+  return {count:sorted.length,mean:sorted.reduce((sum,value)=>sum+value,0)/sorted.length,min:sorted[0],p05:percentile(.05)};
+}
+
+function evaluationMetric(label,value,title=''){
+  const wrapper=document.createElement('div'),term=document.createElement('dt'),detail=document.createElement('dd');
+  term.textContent=label;detail.textContent=value;if(title)wrapper.title=title;wrapper.append(term,detail);return wrapper;
+}
+
+function missionSegments(index){
+  const segments=[];let goal=null;
+  for(let i=0;i<=index;i++){
+    const record=records[i];if(record.kind!=='goal'||!record.data?.position)continue;
+    const candidate=vec3(record.data.position);
+    if(!goal||distance(candidate,goal)>.5){if(segments.length)segments.at(-1).endIndex=i-1;goal=candidate;segments.push({goal,startIndex:i,endIndex:index,number:segments.length+1});}
+  }
+  return segments;
+}
+
+function calculateFlightEvaluation(index){
+  const segments=missionSegments(index),mission=segments.at(-1);if(!mission)return null;
+  let reachedMissions=0;
+  for(const segment of segments){
+    let minimumError=Infinity;
+    for(let i=segment.startIndex;i<=segment.endIndex;i++){const record=records[i];if(record.kind==='odom'&&record.data?.position)minimumError=Math.min(minimumError,distance(record.data.position,segment.goal));}
+    if(minimumError<=1)reachedMissions++;
+  }
+  const odoms=[],vehicleClearances=[],pathMinimumClearances=[],pathMeanClearances=[];let pathUpdates=0,latestOdom=null,trackingSquared=0,trackingCount=0;
+  for(let i=mission.startIndex;i<=index;i++){
+    const record=records[i];
+    if(record.kind==='odom'&&record.data?.position&&record.stamp_ns){odoms.push(record);latestOdom=record;}
+    else if(record.kind==='path')pathUpdates++;
+    else if(record.kind==='control'&&record.data?.position&&latestOdom?.data?.position){const error=distance(record.data.position,latestOdom.data.position);trackingSquared+=error*error;trackingCount++;}
+    else if(record.kind==='clearance'){
+      vehicleClearances.push(record.data?.vehicle_m);pathMinimumClearances.push(record.data?.path_min_m);pathMeanClearances.push(record.data?.path_mean_m);
+    }
+  }
+  if(!odoms.length)return {...mission,odomCount:0,missionCount:segments.length,reachedMissions};
+  const start=vec3(odoms[0].data.position),current=vec3(odoms.at(-1).data.position);
+  let elapsed=Math.max(0,(Number(odoms.at(-1).stamp_ns)-Number(odoms[0].stamp_ns))*1e-9),pathLength=0,maxSpeed=magnitude(odoms[0].data.velocity);
+  let accelerationIntegral=0,accelerationDuration=0,maxAcceleration=0,smoothedAcceleration=null,previousSmoothed=null,jerkSquaredIntegral=0,jerkDuration=0,maxJerk=0,maxDeviation=0;
+  for(let i=0;i<odoms.length;i++)maxDeviation=Math.max(maxDeviation,pointSegmentDistance(odoms[i].data.position,start,mission.goal));
+  for(let i=1;i<odoms.length;i++){
+    const previous=odoms[i-1],sample=odoms[i],dt=(Number(sample.stamp_ns)-Number(previous.stamp_ns))*1e-9;
+    if(!(dt>.001&&dt<2))continue;
+    pathLength+=distance(previous.data.position,sample.data.position);
+    const previousSpeed=magnitude(previous.data.velocity),sampleSpeed=magnitude(sample.data.velocity);
+    maxSpeed=Math.max(maxSpeed,previousSpeed,sampleSpeed);
+    const rawAcceleration=vectorDifference(sample.data.velocity,previous.data.velocity,dt);
+    smoothedAcceleration=smoothedAcceleration?rawAcceleration.map((value,n)=>.2*value+.8*smoothedAcceleration[n]):rawAcceleration;
+    const acceleration=magnitude(smoothedAcceleration);accelerationIntegral+=acceleration*dt;accelerationDuration+=dt;maxAcceleration=Math.max(maxAcceleration,acceleration);
+    if(previousSmoothed){const jerk=magnitude(vectorDifference(smoothedAcceleration,previousSmoothed,dt));jerkSquaredIntegral+=jerk*jerk*dt;jerkDuration+=dt;maxJerk=Math.max(maxJerk,jerk);}
+    previousSmoothed=smoothedAcceleration.slice();
+  }
+  const goalError=distance(current,mission.goal),initialGoalDistance=distance(start,mission.goal),displacement=distance(start,current);
+  return {...mission,odomCount:odoms.length,elapsed,pathLength,goalError,maxDeviation,missionCount:segments.length,reachedMissions,
+    progress:initialGoalDistance>1e-3?100*(initialGoalDistance-goalError)/initialGoalDistance:100,
+    efficiency:pathLength>1e-3?100*displacement/pathLength:0,
+    averageSpeed:elapsed>1e-3?pathLength/elapsed:0,maxSpeed,
+    averageAcceleration:accelerationDuration>0?accelerationIntegral/accelerationDuration:0,maxAcceleration,
+    jerkRms:jerkDuration>0?Math.sqrt(jerkSquaredIntegral/jerkDuration):0,maxJerk,
+    trackingRmse:trackingCount?Math.sqrt(trackingSquared/trackingCount):NaN,trackingCount,
+    vehicleClearance:sampleStats(vehicleClearances),pathMinimumClearance:sampleStats(pathMinimumClearances),pathMeanClearance:sampleStats(pathMeanClearances),
+    pathUpdateRate:elapsed>1e-3?pathUpdates/elapsed:0,pathUpdates,reached:goalError<=1};
+}
+
+function updateFlightEvaluation(index){
+  const result=calculateFlightEvaluation(index),grid=$('evaluationMetrics'),status=$('evaluationStatus'),note=$('evaluationNote');grid.replaceChildren();
+  if(!result){status.textContent='等待目标';status.style.color='#627181';note.textContent='日志中尚未出现任务目标。';return;}
+  if(!result.odomCount){status.textContent='等待里程计';status.style.color='#9a6412';note.textContent=`任务段 ${result.number} 已开始，等待 odom 数据。`;return;}
+  const replayEnded=index>=records.length-1;
+  status.textContent=result.reached?'已到达（位置）':replayEnded?'回放结束 · 未到达':'飞行中';
+  status.style.color=result.reached?'#087345':replayEnded?'#a14f24':'#087ea4';
+  grid.replaceChildren(
+    evaluationMetric('任务段 / 进度',`${result.number} / ${fixed(Math.max(0,Math.min(100,result.progress)),1,'%')}`),
+    evaluationMetric('位置到达率',`${result.reachedMissions}/${result.missionCount} (${fixed(100*result.reachedMissions/result.missionCount,0,'%')})`,'仅按目标误差 ≤ 1 m 统计，不包含碰撞判据'),
+    evaluationMetric('飞行时间',fixed(result.elapsed,2,' s')),
+    evaluationMetric('实际路程',fixed(result.pathLength,2,' m')),
+    evaluationMetric('路径效率',fixed(result.efficiency,1,'%'),'当前位置直线位移 / 实际飞行路程'),
+    evaluationMetric('目标误差',fixed(result.goalError,2,' m')),
+    evaluationMetric('最大横向偏差',fixed(result.maxDeviation,2,' m'),'相对任务起点到目标连线'),
+    evaluationMetric('平均速度',fixed(result.averageSpeed,2,' m/s'),'实际飞行路程 / 飞行时间'),
+    evaluationMetric('最大速度',fixed(result.maxSpeed,2,' m/s'),'odom 线速度模长峰值'),
+    evaluationMetric('平均障碍物距离',result.vehicleClearance?fixed(result.vehicleClearance.mean,2,' m'):'未记录','车辆当前位置到规划器障碍距离场最近点的样本均值'),
+    evaluationMetric('净空 5% 分位',result.vehicleClearance?fixed(result.vehicleClearance.p05,2,' m'):'未记录','车辆净空样本的第 5 百分位，比单帧最小值更抗异常点'),
+    evaluationMetric('最小障碍物距离',result.vehicleClearance?fixed(result.vehicleClearance.min,2,' m'):'未记录','车辆当前位置的最小规划器净空'),
+    evaluationMetric('平均路径净空',result.pathMeanClearance?fixed(result.pathMeanClearance.mean,2,' m'):'未记录','每次规划路径的沿线平均净空，再对任务段取均值'),
+    evaluationMetric('最小路径净空',result.pathMinimumClearance?fixed(result.pathMinimumClearance.min,2,' m'):'未记录','任务段所有已发布路径的沿线最小净空'),
+    evaluationMetric('平均加速度',fixed(result.averageAcceleration,2,' m/s²')),
+    evaluationMetric('最大加速度',fixed(result.maxAcceleration,2,' m/s²')),
+    evaluationMetric('Jerk RMS',fixed(result.jerkRms,2,' m/s³')),
+    evaluationMetric('Jerk 峰值',fixed(result.maxJerk,2,' m/s³')),
+    evaluationMetric('控制跟踪 RMSE',fixed(result.trackingRmse,3,' m'),`${result.trackingCount} 个控制样本`),
+    evaluationMetric('路径更新率',fixed(result.pathUpdateRate,2,' Hz'),`${result.pathUpdates} 条 path 消息`),
+    evaluationMetric('碰撞次数','未记录','当前系统没有独立、可信的碰撞事件源')
+  );
+  const clearanceNote=result.vehicleClearance?`clearance=${result.vehicleClearance.count}`:'该 session 没有 clearance 事件（需用新版本重新采集）';
+  note.textContent=`任务段 ${result.number} · target=[${result.goal.map(value=>value.toFixed(1)).join(', ')}] · odom=${result.odomCount} · ${clearanceNote}。到达判据为目标误差 ≤ 1 m；净空来自规划器使用的地面过滤障碍距离场，不等同于全局占据地图真值。`;
+}
+
+function quat(value) {
+  const number=(v,fallback)=>Number.isFinite(Number(v))?Number(v):fallback;
+  if(Array.isArray(value))return [number(value[0],0),number(value[1],0),number(value[2],0),number(value[3],1)];
+  if(value&&typeof value==='object')return [number(value.x,0),number(value.y,0),number(value.z,0),number(value.w,1)];
+  return [0,0,0,1];
+}
+
+function rotate(point, orientation) {
+  let [qx,qy,qz,qw]=quat(orientation);const norm=Math.hypot(qx,qy,qz,qw)||1;qx/=norm;qy/=norm;qz/=norm;qw/=norm;
+  const [x,y,z]=point, tx=2*(qy*z-qz*y), ty=2*(qz*x-qx*z), tz=2*(qx*y-qy*x);
+  return [x+qw*tx+qy*tz-qz*ty,y+qw*ty+qz*tx-qx*tz,z+qw*tz+qx*ty-qy*tx];
+}
+
+function transform(point, position, orientation) {
+  const p=rotate(vec3(point),orientation), t=vec3(position);return [p[0]+t[0],p[1]+t[1],p[2]+t[2]];
+}
+
+function worldCloud(points, record, odom) {
+  const frame=(record?.data?.frame_id||'').replace(/^\//,'');
+  if(frame==='world_enu'||frame==='map'||frame==='odom')return points;
+  if(!odom?.data?.position)return points;
+  return points.map(p=>transform(p,odom.data.position,odom.data.orientation));
+}
+
+function rgba(value, fallback) {
+  if(!Array.isArray(value)||value.length<4||value[3]<=0)return fallback;
+  return `rgba(${Math.round(255*value[0])},${Math.round(255*value[1])},${Math.round(255*value[2])},${Math.max(.25,value[3])})`;
+}
+
+function markerLayer(marker,kind) {
+  if(kind==='bubbles')return 'bubbles';
+  const ns=String(marker?.ns||'').toLowerCase();
+  if(ns.includes('speculative'))return 'speculative';
+  if(ns.includes('edge_witness'))return 'witness';
+  if(ns.includes('astar_topology'))return 'topologyPath';
+  if(ns.includes('selected_witness'))return 'selectedPath';
+  if(ns.includes('vehicle'))return 'robot';
+  if(ns.includes('goal')||ns.includes('terminal')||ns.includes('subgoal'))return 'goals';
+  return 'skeleton';
+}
+
+function markerGeometry(data, kind) {
+  const result={lines:[],points:[]}, fallback=kind==='bubbles'?palette.bubble:palette.graph;
+  for(const marker of (data?.markers||[])){
+    const layer=markerLayer(marker,kind);
+    if(marker.action===2||marker.action===3||!layerVisible(layer))continue;
+    const pose=marker.pose||{}, position=vec3(pose.position), orientation=quat(pose.orientation), color=rgba(marker.color,fallback);
+    const points=(marker.points||[]).map(p=>transform(p,position,orientation));
+    if(marker.type===4&&points.length>1)result.lines.push({points,color,pairs:false,layer});
+    else if(marker.type===5&&points.length>1)result.lines.push({points,color,pairs:true,layer});
+    else if(points.length)for(const point of points)result.points.push({point,color,radius:marker.type===7?4:2.5,layer});
+    else result.points.push({point:position,color,radius:kind==='bubbles'?5:4,layer});
+  }
+  if(Array.isArray(data?.nodes)&&layerVisible('skeleton')){
+    const byId=new Map(data.nodes.map((node,index)=>[node.id??index,node]));
+    const seen=new Set();
+    for(const [index,node] of data.nodes.entries()){
+      const point=vec3(node.center||node.position), id=node.id??index;
+      const layer=node.role==='speculative'?'speculative':node.role==='odom'?'robot':'skeleton';
+      if(layerVisible(layer))result.points.push({point,color:node.role==='odom'?palette.robot:node.role==='speculative'?'#df4d35':fallback,radius:4,layer});
+      for(const neighborId of (node.neighbors||[])){const neighbor=byId.get(neighborId),key=[id,neighborId].sort().join(':');if(neighbor&&!seen.has(key)){seen.add(key);result.lines.push({points:[point,vec3(neighbor.center||neighbor.position)],color:fallback,pairs:false,layer:'skeleton'});}}
+    }
+    if(layerVisible('topologyPath')&&Array.isArray(data.path)&&data.path.length>1){const path=data.path.map(id=>byId.get(id)).filter(Boolean).map(node=>vec3(node.center||node.position));result.lines.push({points:path,color:palette.path,pairs:false,layer:'topologyPath'});}
+  }
+  return result;
+}
+
+function drawWorld(state) {
+  lastWorldState=state;
+  const c=$('graph'), x=c.getContext('2d');x.fillStyle='#ffffff';x.fillRect(0,0,c.width,c.height);
+  const cloud=layerVisible('cloud')&&state.cloud?worldCloud(state.cloud,state.cloudRecord,state.odom):[], rays=layerVisible('rays')&&state.rays?worldCloud(state.rays,state.rayRecord,state.odom):[];
+  const graph=markerGeometry(state.graph,'graph'), bubbles=markerGeometry(state.bubbles,'bubbles');
+  const path=layerVisible('selectedPath')?(state.path?.poses||[]).map(vec3):[], robot=layerVisible('robot')&&state.odom?.data?.position?vec3(state.odom.data.position):null;
+  const all=[...cloud,...rays,...graph.points.map(v=>v.point),...bubbles.points.map(v=>v.point),...graph.lines.flatMap(v=>v.points),...bubbles.lines.flatMap(v=>v.points),...path];if(robot)all.push(robot);
+  if(!all.length){clearCanvas('graph','no point cloud / graph / path record');return;}
+  let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+  for(const point of all){minX=Math.min(minX,point[0]);maxX=Math.max(maxX,point[0]);minY=Math.min(minY,point[1]);maxY=Math.max(maxY,point[1]);}
+  const span=Math.max(maxX-minX,maxY-minY,4),margin=Math.max(1,span*.06),pad=42,scale=Math.min((c.width-2*pad)/(span+2*margin),(c.height-2*pad)/(span+2*margin));
+  const midX=(minX+maxX)/2,midY=(minY+maxY)/2,sx=v=>c.width/2+(v-midX)*scale,sy=v=>c.height/2-(v-midY)*scale;
+  const viewW=(c.width-2*pad)/scale,viewH=(c.height-2*pad)/scale;minX=midX-viewW/2;maxX=midX+viewW/2;minY=midY-viewH/2;maxY=midY+viewH/2;
+  const grid=Math.pow(10,Math.floor(Math.log10(span)))/2;
+  x.strokeStyle='#e4e9ed';x.lineWidth=1;x.beginPath();for(let gx=Math.ceil(minX/grid)*grid;gx<=maxX;gx+=grid){x.moveTo(sx(gx),pad);x.lineTo(sx(gx),c.height-pad);}for(let gy=Math.ceil(minY/grid)*grid;gy<=maxY;gy+=grid){x.moveTo(pad,sy(gy));x.lineTo(c.width-pad,sy(gy));}x.stroke();
+  if(0>=minX&&0<=maxX){x.strokeStyle='#a9b5bf';x.beginPath();x.moveTo(sx(0),pad);x.lineTo(sx(0),c.height-pad);x.stroke();}if(0>=minY&&0<=maxY){x.strokeStyle='#a9b5bf';x.beginPath();x.moveTo(pad,sy(0));x.lineTo(c.width-pad,sy(0));x.stroke();}
+  const drawSamples=(points,color,size,maxPoints)=>{x.fillStyle=color;const step=Math.max(1,Math.ceil(points.length/maxPoints));for(let i=0;i<points.length;i+=step)x.fillRect(sx(points[i][0])-size/2,sy(points[i][1])-size/2,size,size);};
+  drawSamples(rays,palette.ray,1,20000);drawSamples(cloud,palette.cloud,1.5,60000);
+  const drawGeometry=geometry=>{for(const line of geometry.lines){x.strokeStyle=line.color;x.lineWidth=2;x.beginPath();for(let i=0;i<line.points.length;i++){const p=line.points[i];if(i===0||(line.pairs&&i%2===0))x.moveTo(sx(p[0]),sy(p[1]));else x.lineTo(sx(p[0]),sy(p[1]));}x.stroke();}for(const node of geometry.points){x.fillStyle=node.color;x.beginPath();x.arc(sx(node.point[0]),sy(node.point[1]),node.radius,0,Math.PI*2);x.fill();}};
+  drawGeometry(graph);drawGeometry(bubbles);
+  if(path.length>1){x.strokeStyle=palette.path;x.lineWidth=3;x.beginPath();path.forEach((p,i)=>i?x.lineTo(sx(p[0]),sy(p[1])):x.moveTo(sx(p[0]),sy(p[1])));x.stroke();}
+  if(robot){x.fillStyle=palette.robot;x.beginPath();x.arc(sx(robot[0]),sy(robot[1]),6,0,Math.PI*2);x.fill();const heading=rotate([1,0,0],state.odom.data.orientation);x.strokeStyle=palette.robot;x.lineWidth=2;x.beginPath();x.moveTo(sx(robot[0]),sy(robot[1]));x.lineTo(sx(robot[0]+heading[0]*Math.max(1,span*.035)),sy(robot[1]+heading[1]*Math.max(1,span*.035)));x.stroke();}
+  x.font='12px monospace';x.fillStyle='#526475';x.fillText(`world_enu XY  cloud=${cloud.length}  graph=${graph.points.length}  bubbles=${bubbles.points.length}  path=${path.length}`,12,18);
+  const cloudFrame=state.cloudRecord?.data?.frame_id||'unknown', odomDelta=state.cloudRecord?.stamp_ns&&state.odom?.stamp_ns?Math.abs(Number(state.cloudRecord.stamp_ns)-Number(state.odom.stamp_ns))/1e6:null;
+  x.fillText(`cloud ${cloudFrame}${state.odom&&cloudFrame!=='world_enu'?' -> world_enu via odom':''}${odomDelta!==null?`  dt=${odomDelta.toFixed(1)} ms`:''}`,12,36);
+  x.fillText(`x [${minX.toFixed(1)}, ${maxX.toFixed(1)}] m   y [${minY.toFixed(1)}, ${maxY.toFixed(1)}] m`,12,c.height-12);
+  const legend=[['cloud',palette.cloud,'cloud'],['graph',palette.graph,'skeleton'],['bubbles',palette.bubble,'bubbles'],['path',palette.path,'selectedPath'],['robot',palette.robot,'robot']].filter(item=>layerVisible(item[2]));let lx=c.width-Math.max(12,legend.length*66);for(const [name,color] of legend){x.fillStyle=color;x.fillRect(lx,10,9,9);x.fillStyle='#526475';x.fillText(name,lx+13,18);lx+=66;}
+  if(!state.graph&&!state.bubbles&&!state.path){x.fillStyle='#ffb65c';x.textAlign='right';x.fillText('no graph / bubbles / path record',c.width-12,38);x.textAlign='left';}
+  if(cloud.length&&!state.odom&&state.cloudRecord?.data?.frame_id!=='world_enu'){x.fillStyle='#ff8060';x.textAlign='right';x.fillText('no odom: point cloud remains in local frame',c.width-12,56);x.textAlign='left';}
+}
+
+async function loadAsset(record,type) {
+  if(!record?.file)return null;const key=`${base}${record.file}:${type}`;
+  if(assetCache.has(key)){const value=assetCache.get(key);assetCache.delete(key);assetCache.set(key,value);return value;}
+  const response=await fetch(base+record.file.split('/').map(encodeURIComponent).join('/'));if(!response.ok)throw Error(`${response.status} ${record.file}`);
+  const value=type==='buffer'?await response.arrayBuffer():type==='json'?await response.json():await response.text();assetCache.set(key,value);
+  while(assetCache.size>18)assetCache.delete(assetCache.keys().next().value);return value;
+}
+
+function nearestOdom(index,stamp) {
+  let best=null,bestDelta=Infinity;
+  for(let i=0;i<=index;i++){const record=records[i];if(record.kind!=='odom')continue;const delta=stamp&&record.stamp_ns?Math.abs(Number(record.stamp_ns)-Number(stamp)):index-i;if(delta<bestDelta){best=record;bestDelta=delta;}}
+  return best;
+}
+
+async function selectRecord(index) {
+  if(!records.length)return;const token=++renderToken;active=Math.max(0,Math.min(records.length-1,index));$('timeline').value=active;$('cursor').textContent=`${active+1}/${records.length}`;updateFlightEvaluation(active);
+  document.querySelectorAll('#events tr').forEach((row,i)=>row.classList.toggle('active',i===active));
+  const latest={};for(let i=0;i<=active;i++){const record=records[i];if(record.file)latest[record.kind]=record;}
+  const odom=nearestOdom(active,latest.pointcloud?.stamp_ns), state={odom,cloudRecord:latest.pointcloud,rayRecord:latest.free_ray};
+  $('details').textContent=JSON.stringify({selected:records[active],synchronized:{depth:latest.depth?.file||null,rgb:latest.rgb?.file||null,heatmap:latest.semantic?.file||null,pointcloud:latest.pointcloud?.file||null,graph:latest.graph?.file||null,bubbles:latest.bubbles?.file||null,path:latest.path?.file||null,odom:odom?.data||null,clearance:latest.clearance?.data||null}},null,2);
+  const jobs=[
+    loadAsset(latest.depth,'buffer').then(v=>({key:'depth',value:v})),loadAsset(latest.rgb,'buffer').then(v=>({key:'rgb',value:v})),loadAsset(latest.semantic,'buffer').then(v=>({key:'heatmap',value:v})),
+    loadAsset(latest.pointcloud,'text').then(v=>({key:'cloud',value:v&&parsePcd(v)})),loadAsset(latest.free_ray,'text').then(v=>({key:'rays',value:v&&parsePcd(v)})),
+    loadAsset(latest.graph,'json').then(v=>({key:'graph',value:v})),loadAsset(latest.bubbles,'json').then(v=>({key:'bubbles',value:v})),loadAsset(latest.path,'json').then(v=>({key:'path',value:v}))
+  ];
+  const results=await Promise.all(jobs.map(job=>job.catch(error=>({error}))));if(token!==renderToken)return;
+  const errors=[];for(const result of results){if(result.error)errors.push(result.error.message);else state[result.key]=result.value;}
+  try{state.depth?drawDepth(state.depth):clearCanvas('depth','no depth record');}catch(error){clearCanvas('depth',error.message);errors.push(error.message);}
+  try{state.rgb?drawRgb(state.rgb):clearCanvas('rgb','no rgb record');}catch(error){clearCanvas('rgb',error.message);errors.push(error.message);}
+  try{state.heatmap?drawHeatmap(state.heatmap):clearCanvas('heatmap','no heatmap record');}catch(error){clearCanvas('heatmap',error.message);errors.push(error.message);}
+  drawWorld(state);if(errors.length)$('details').textContent+=`\n\nload errors:\n${errors.join('\n')}`;
+}
+
+function renderEvents() {
+  const body=$('events');body.replaceChildren();records.forEach((record,index)=>{const row=document.createElement('tr');for(const value of [index+1,record.kind,record.stamp_ns||'',record.file||'',record.bytes||0]){const cell=document.createElement('td');cell.textContent=value;row.appendChild(cell);}row.onclick=()=>selectRecord(index);body.appendChild(row);});
+  $('timeline').max=Math.max(0,records.length-1);$('timeline').value=0;active=0;if(records.length)selectRecord(0);else{updateFlightEvaluation(0);['depth','rgb','heatmap','graph'].forEach(id=>clearCanvas(id,'empty session'));}
+}
+
+async function loadSession() {
+  const name=$('sessions').value;if(!name)return;renderToken++;assetCache.clear();base=`/sessions/${encodeURIComponent(name)}/`;
+  const response=await fetch(base+'index.jsonl');if(!response.ok)throw Error(`failed to load ${name}`);const text=await response.text();records=text.split(/\n/).filter(Boolean).map(JSON.parse);
+  $('sessionInfo').textContent=`${name} · ${records.length} events`;renderEvents();
+}
+
+async function loadSessions() {
+  const response=await fetch('/api/sessions');sessions=await response.json();const select=$('sessions');select.replaceChildren();
+  for(const session of sessions){const option=document.createElement('option');option.value=session.name;option.textContent=`${session.name} (${(session.bytes/1048576).toFixed(1)} MiB)`;select.appendChild(option);}
+  if(sessions.length)await loadSession();
+}
+
+function playbackInterval(){const speed=Math.max(.25,Number($('playbackSpeed').value)||1);return Math.max(30,250/speed);}
+function startPlayback(){
+  if(timer||!records.length)return;
+  $('play').textContent='暂停';
+  timer=setInterval(()=>{if(active>=records.length-1)stopPlayback();else selectRecord(active+1);},playbackInterval());
+}
+function stopPlayback(){if(timer)clearInterval(timer);timer=null;$('play').textContent='播放';}
+$('refresh').onclick=()=>loadSessions().catch(error=>$('details').textContent=error.message);$('sessions').onchange=()=>{stopPlayback();loadSession().catch(error=>$('details').textContent=error.message);};
+$('timeline').oninput=event=>selectRecord(Number(event.target.value));$('first').onclick=()=>{stopPlayback();selectRecord(0);};$('prev').onclick=()=>selectRecord(active-1);$('next').onclick=()=>selectRecord(active+1);
+$('play').onclick=()=>timer?stopPlayback():startPlayback();
+$('playbackSpeed').onchange=()=>{if(timer){stopPlayback();startPlayback();}};
+document.querySelectorAll('[data-layer]').forEach(input=>{
+  input.onchange=()=>{layerVisibility[input.dataset.layer]=input.checked;if(lastWorldState)drawWorld(lastWorldState);};
+});
+['depth','rgb','heatmap','graph'].forEach(id=>clearCanvas(id));loadSessions().catch(error=>$('details').textContent=error.message);
+</script>
+</body>
+</html>

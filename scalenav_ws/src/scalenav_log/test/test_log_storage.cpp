@@ -6,12 +6,15 @@
 
 namespace fs = std::filesystem;
 
-TEST(ScalenavLogStore, WritesIndexAndRollsSessions)
+TEST(ScalenavLogStore, WritesIndexWithoutRollingOrDeletingSessions)
 {
   const auto root = fs::temp_directory_path() / "scalenav_log_store_test";
   std::error_code error;
   fs::remove_all(root, error);
-  scalenav_log::SlidingLogStore store(root, 1024 * 1024, 3, 1024);
+  const auto old_session = root / "session_20200101_000000_000";
+  fs::create_directories(old_session);
+  std::ofstream(old_session / "sentinel.txt") << "keep";
+  scalenav_log::SlidingLogStore store(root);
   store.open("{\"schema\":\"test\"}");
   const std::vector<std::uint8_t> payload(700, 7);
   store.writeAsset("depth/a.bin", payload);
@@ -22,5 +25,7 @@ TEST(ScalenavLogStore, WritesIndexAndRollsSessions)
   EXPECT_NE(text.find("\"kind\":\"depth\""), std::string::npos);
   store.writeAsset("depth/b.bin", payload);
   EXPECT_NE(store.activeSession().filename().string(), "");
+  EXPECT_TRUE(fs::exists(old_session / "sentinel.txt"));
+  EXPECT_EQ(store.activeSession().filename().string().rfind("session_", 0), 0U);
   fs::remove_all(root, error);
 }

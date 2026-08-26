@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 set -Eeo pipefail
 
+# ── Tuning ─────────────────────────────────────────────────────────────────
+PROMPT="tree, blocks, wall"   # PEARL prompt (higher score = higher risk)
+SEMANTIC=1                    # 1=text heatmap on, 0=geometry only
+SEMANTIC_COST_WEIGHT="2.0"    # A* semantic repulsion; 0=off
+DEVICE="cuda"
+RATE="2"                      # heatmap Hz
+SAVE_DEPTH=0
+LOG_ROOT=""                   # empty → $SCALENAV_LOG_DIR or ws/../log_scalenav
+# ───────────────────────────────────────────────────────────────────────────
+
 # Standalone online entry point. All project files are below this workspace.
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 WS="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 SRC="$WS/src"
+LOG_ROOT="${LOG_ROOT:-${SCALENAV_LOG_DIR:-$WS/../log_scalenav}}"
 
 PYTHON="$WS/../../YOPO-Rally/.venv/bin/python"
 MODEL="$SRC/models/original_yopo_simple/model.pt"
-DEVICE="cuda"
-PROMPT="tree"
-RATE="2"
-LOG_ROOT="${SCALENAV_LOG_DIR:-$WS/../log_scalenav}"
-
-SEMANTIC=1
-SAVE_DEPTH=0
 
 while (($#)); do
   case "$1" in
@@ -69,15 +73,11 @@ run ros2 launch scalenav_log scalenav_log.launch.py output_dir:="$LOG_ROOT"
 run ros2 launch airsim_renderer controller_airsim.launch.py
 run ros2 launch depth2points_ros2 depth_planar_to_pointcloud.launch.py
 run ros2 launch scalenav_graph_ros2 epic_graph.launch.py \
-  goal_topic:=/goal_pose next_goal_topic:=/epic/yopo_goal \
+  goal_topic:=/goal_pose next_goal_topic:=/epic/local_goal \
   next_goal_frame:=world_enu visualization_frame:=world_enu \
   odom_twist_frame:=body semantic_heatmap_topic:=/scalenav/text_heatmap_raw \
-  flight_statistics_file:=/dev/null \
-  graph_log_file:=/dev/null \
-  semantic_cost_weight:=0.0 speculative_enabled:=true \
-  map_history_radius_m:=50.0 map_max_points:=100000 map_margin:=50.0 \
-  local_graph_radius_m:=50.0 local_goal_lookahead_m:=10.0 \
-  max_update_region_num:=0
+  flight_statistics_file:=/dev/null graph_log_file:=/dev/null \
+  semantic_cost_weight:="$SEMANTIC_COST_WEIGHT"
 
 if ((SEMANTIC)); then
   run "$PYTHON" "$SRC/scalenav/text_heatmap_ros2.py" \
@@ -89,7 +89,7 @@ fi
 start_planner() {
   run "$PYTHON" "$SRC/scalenav/online_planner_ros2.py" \
     --model "$MODEL" --device "$DEVICE" \
-    --control --original-goal-input --goal-topic /epic/yopo_goal \
+    --control --original-goal-input --goal-topic /epic/local_goal \
     --mission-goal-topic /goal_pose --world-frame world_enu --odom-twist-frame body \
     --model-image-width 160 --model-image-height 96 --model-vertical-num 3 \
     --fixed-altitude --plan-from-reference --disable-event-log "$@"
@@ -101,5 +101,5 @@ else
   start_planner
 fi
 
-echo "started; goal=/goal_pose semantic=$SEMANTIC recorded_logs=$LOG_ROOT"
+echo "started; goal=/goal_pose semantic=$SEMANTIC semantic_cost_weight=$SEMANTIC_COST_WEIGHT recorded_logs=$LOG_ROOT"
 wait -n $PIDS

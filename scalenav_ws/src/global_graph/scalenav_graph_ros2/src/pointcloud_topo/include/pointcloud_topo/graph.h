@@ -113,7 +113,7 @@ public:
 
 enum class TopoNodeRole : std::uint8_t {
   Geometric = 0,
-  Speculative = 1,
+  Semantic = 1,
   Odom = 2,
 };
 
@@ -122,7 +122,7 @@ enum class TopoGeometryState : std::uint8_t {
   Unknown = 1,
 };
 
-// A speculative endpoint is a risk anchor only when the semantic evidence is
+// A semantic point is a risk anchor only when the semantic evidence is
 // strong enough to overcome the heatmap/EMA noise floor.  Keep this predicate
 // shared by planning diagnostics and RViz so a tiny residual score is never
 // presented as a block risk.
@@ -138,8 +138,13 @@ inline bool isSemanticRiskAnchor(
 // Subtract a frame background estimate and retain only positive contrast.
 inline float calibrateSemanticScore(float score, float frame_baseline) {
   if (!std::isfinite(score) || !std::isfinite(frame_baseline)) return 0.0F;
-  const float denominator = std::max(1.0e-3F, 1.0F - frame_baseline);
-  return std::clamp((score - frame_baseline) / denominator, 0.0F, 1.0F);
+  // A forest-filled FOV has a high quantile "background" that is actually
+  // trees. Subtracting it zeros every patch (raw≈0.50, baseline≈0.50 → risk 0).
+  // Cap the floor so uniform high heatmaps remain high-risk.
+  constexpr float kMaxBackground = 0.25F;
+  const float background = std::clamp(frame_baseline, 0.0F, kMaxBackground);
+  const float denominator = std::max(1.0e-3F, 1.0F - background);
+  return std::clamp((score - background) / denominator, 0.0F, 1.0F);
 }
 
 // Patch scores are max-pooled, so their median is biased toward the most
@@ -158,6 +163,26 @@ inline float semanticFrameBaseline(std::vector<float> scores,
   auto middle = scores.begin() + static_cast<std::ptrdiff_t>(index);
   std::nth_element(scores.begin(), middle, scores.end());
   return std::clamp(*middle, 0.0F, 1.0F);
+}
+
+// Project an image location with a fixed optical Z depth into FLU, matching
+// the ordinary depth-camera projection.  Off-axis samples are farther than
+// depth_m in Euclidean range, but every sample remains depth_m in front of the
+// camera image plane.
+inline Eigen::Vector3f virtualSemanticPointFlu(
+    float normalized_u, float normalized_v,
+    float horizontal_fov_deg, float vertical_fov_deg,
+    float depth_m, const Eigen::Vector3f &camera_translation) {
+  constexpr float kPi = 3.14159265358979323846F;
+  const float horizontal_tangent = std::tan(
+    std::clamp(horizontal_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
+  const float vertical_tangent = std::tan(
+    std::clamp(vertical_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
+  const Eigen::Vector3f depth_ray(
+    1.0F,
+    -(2.0F * std::clamp(normalized_u, 0.0F, 1.0F) - 1.0F) * horizontal_tangent,
+    -(2.0F * std::clamp(normalized_v, 0.0F, 1.0F) - 1.0F) * vertical_tangent);
+  return camera_translation + std::max(0.0F, depth_m) * depth_ray;
 }
 
 inline bool retainGeometryAfterMiss(
@@ -326,6 +351,16 @@ struct TopoSemanticRecord {
   std::int64_t stamp_ns = 0;
 };
 
+struct TopoGraphSearchStats {
+  size_t semantic_query_nodes = 0;
+  size_t semantic_inactive_virtual_nodes_skipped = 0;
+  size_t expanded_nodes = 0;
+  size_t edge_evaluations = 0;
+  size_t semantic_candidate_checks = 0;
+  size_t candidate_terminals = 0;
+  bool timed_out = false;
+};
+
 // The online graph is optionally represented on one horizontal layer.  All
 // observations (occupied returns and free-ray endpoints) must use the same
 // projection before region selection; filtering by the original camera
@@ -353,16 +388,17 @@ public:
   void insertNode(TopoNode::Ptr &new_node, vector<TopoNode::Ptr> &nbr_nodes, vector<vector<Eigen::Vector3f>> &paths);
   // void getUnreachableLocalNodes(vector<TopoNode::Ptr> &nodes_unreachable);
   void updateSkeleton();
-  // Copy persistent topology, including speculative semantic candidates, into
+  // Copy persistent topology, including virtual-depth semantic points, into
   // a freshly initialized graph before applying the current local Bubble diff.
   // The transient odometry query node is recreated by updateOdomNode().
   void copyPersistentNodesFrom(const TopoGraph &source);
   void updateHistoricalOdoms();
   void updateOdomNode(Eigen::Vector3f &odom_pos, float &yaw);
-  size_t insertSpeculativeNodes(
+  size_t insertSemanticNodes(
       const vector<Eigen::Vector3f> &centers, const vector<float> &semantic_scores,
       float bubble_radius, const Eigen::Vector3f &odom_pos,
-      std::int64_t stamp_ns);
+      std::int64_t stamp_ns,
+      const vector<float> &semantic_confidences = {});
   Eigen::Vector3f min_bd, max_bd, map_bd_min, map_bd_max;
   double min_x_, min_y_, min_z_; // 最小格子尺寸
   double bubble_min_radius_, frt_bubble_radius_;
@@ -390,16 +426,40 @@ public:
   bool graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr &end_node, std::vector<TopoNode::Ptr> &path, double time_out,
                    bool kino = false, std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> last_path = {},
                    float semantic_cost_weight = 0.0F,
-                   float max_search_radius_m = std::numeric_limits<float>::infinity());
+                   float max_search_radius_m = std::numeric_limits<float>::infinity(),
+                   TopoGraphSearchStats *search_stats = nullptr,
+                   std::int64_t active_virtual_semantic_stamp_ns = 0);
   bool goalDirectedSearch(
       const TopoNode::Ptr &start_node, const Eigen::Vector3f &goal,
       std::vector<TopoNode::Ptr> &path, double time_out,
       float path_cost_weight = 0.2f, float previous_path_cost_factor = 0.05f,
       const std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> &last_path = {},
       float semantic_cost_weight = 0.0F,
-      float max_search_radius_m = std::numeric_limits<float>::infinity());
-  float semanticRiskForEdge(const TopoNode::Ptr &from, const TopoNode::Ptr &to) const;
+      float max_search_radius_m = std::numeric_limits<float>::infinity(),
+      const Eigen::Vector3f *progress_origin = nullptr,
+      float preferred_terminal_forward_m = 0.0F,
+      bool prefer_goal_terminal = false,
+      float preferred_terminal_radial_m = std::numeric_limits<float>::infinity(),
+      float minimum_execution_path_m = 0.0F,
+      const Eigen::Vector3f *view_direction = nullptr,
+      float horizontal_fov_deg = 90.0F,
+      float progress_penalty_weight = 0.5F,
+      float direction_penalty_weight = 0.35F,
+      float fov_penalty_weight = 0.2F,
+      float smoothness_penalty_weight = 0.35F,
+      TopoGraphSearchStats *search_stats = nullptr,
+      std::int64_t active_virtual_semantic_stamp_ns = 0);
+  float semanticRiskForEdge(
+      const TopoNode::Ptr &from, const TopoNode::Ptr &to,
+      const std::vector<TopoNode::Ptr> *semantic_nodes = nullptr) const;
   float clearanceCostForEdge(const TopoNode::Ptr &from, const TopoNode::Ptr &to) const;
+  float routeEdgeCost(
+      const TopoNode::Ptr &from, const TopoNode::Ptr &to,
+      float path_cost_weight, float semantic_cost_weight,
+      bool apply_previous_path_discount = false,
+      float previous_path_cost_factor = 1.0F,
+      const std::vector<TopoNode::Ptr> *semantic_nodes = nullptr,
+      size_t *semantic_candidate_checks = nullptr) const;
   void init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, ParallelBubbleAstar::Ptr &parallel_bubble_astar);
   void cauculateMemoryConsumption();
   double getPathLength(const vector<TopoNode::Ptr> &topo_path);
@@ -423,7 +483,8 @@ public:
   vector<BubbleNode::Ptr> getBubbleSnapshot() const;
   const TopoGraphUpdateTiming &getLastUpdateTiming() const { return last_update_timing_; }
   void updateNodeSemantic(const TopoNode::Ptr &node, float observation,
-                          float ema_alpha, std::int64_t stamp_ns);
+                          float ema_alpha, std::int64_t stamp_ns,
+                          float observation_confidence = 1.0F);
   vector<TopoSemanticRecord> semanticMemorySnapshot() const;
   void loadSemanticMemory(const vector<TopoSemanticRecord> &records);
   size_t semanticMemorySize() const;
@@ -441,12 +502,20 @@ public:
   // EPIC edges are undirected; a half-edge is never a valid planning edge.
   size_t normalizeConnectivity();
   void removeNode(TopoNode::Ptr &node);
-  std::vector<TopoNode::Ptr> speculativeNodes() const;
+  std::vector<TopoNode::Ptr> semanticNodes(
+      const Eigen::Vector3f *origin = nullptr,
+      float maximum_distance_m = std::numeric_limits<float>::infinity(),
+      std::int64_t active_virtual_stamp_ns = 0,
+      size_t *inactive_virtual_nodes_skipped = nullptr) const;
+  size_t nodeCountWithinRadius(
+      const Eigen::Vector3f &origin,
+      float maximum_distance_m = std::numeric_limits<float>::infinity()) const;
   float estimateRoughDistance(const Eigen::Vector3f &goal, const int his_idx);
   vector<TopoNode::Ptr> history_odom_nodes_;
   vector<float> his_odom_dis_vec_;
 
 private:
+  class SemanticSpatialIndex;
   TopoGraphUpdateTiming last_update_timing_;
   mutable std::mutex region_map_mutex_;
   mutable std::mutex bubble_snapshot_mutex_;
@@ -459,16 +528,27 @@ private:
   bool use_prior_map_;
   double update_connection_timeout, insert_node_timeout;
   double semantic_node_match_distance_ = 2.5;
-  // Speculative semantic observations influence nearby ordinary edges too;
+  // Virtual-depth semantic points influence nearby ordinary edges too;
   // otherwise A* can pass beside a risk node without ever visiting it.
-  double semantic_speculative_influence_m_ = 5.0;
+  double semantic_point_influence_m_ = 5.0;
   double clearance_cost_weight_ = 2.0;
   double clearance_target_m_ = 1.2;
   mutable std::mutex semantic_memory_mutex_;
   unordered_map<std::uint64_t, TopoSemanticRecord> semantic_memory_;
   std::uint64_t next_semantic_node_id_ = 1;
   bool hasOverlapWithBox(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd);
-  float edgeSemanticRisk(const TopoNode::Ptr &from, const TopoNode::Ptr &to) const;
+  float edgeSemanticRisk(
+      const TopoNode::Ptr &from, const TopoNode::Ptr &to,
+      const std::vector<TopoNode::Ptr> *semantic_nodes = nullptr,
+      size_t *semantic_candidate_checks = nullptr,
+      const SemanticSpatialIndex *semantic_index = nullptr) const;
+  float routeEdgeCostIndexed(
+      const TopoNode::Ptr &from, const TopoNode::Ptr &to,
+      float path_cost_weight, float semantic_cost_weight,
+      bool apply_previous_path_discount, float previous_path_cost_factor,
+      const std::vector<TopoNode::Ptr> *semantic_nodes,
+      size_t *semantic_candidate_checks,
+      const SemanticSpatialIndex *semantic_index) const;
 
   size_t selected_occupied_regions_ = 0;
   size_t selected_free_regions_ = 0;

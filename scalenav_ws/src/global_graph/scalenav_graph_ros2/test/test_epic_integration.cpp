@@ -84,16 +84,16 @@ TEST(EpicIntegration, SemanticUpdateChangesTheNextPlannerDecision)
   auto direct = std::make_shared<TopoNode>();
   auto side = std::make_shared<TopoNode>();
   auto goal = std::make_shared<TopoNode>();
-  auto speculative = std::make_shared<TopoNode>();
+  auto semantic = std::make_shared<TopoNode>();
   start->center_ = p(0.0F, 0.0F);
   direct->center_ = p(5.0F, 0.0F);
   side->center_ = p(5.0F, 8.0F);
   goal->center_ = p(10.0F, 0.0F);
-  speculative->center_ = p(5.0F, 0.5F);
-  speculative->role_ = TopoNodeRole::Speculative;
-  speculative->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->center_ = p(5.0F, 0.5F);
+  semantic->role_ = TopoNodeRole::Geometric;
+  semantic->geometry_state_ = TopoGeometryState::Unknown;
 
-  for (const auto &node : {start, direct, side, goal, speculative}) {
+  for (const auto &node : {start, direct, side, goal, semantic}) {
     region->topo_nodes_.insert(node);
   }
   connect(start, direct);
@@ -104,17 +104,16 @@ TEST(EpicIntegration, SemanticUpdateChangesTheNextPlannerDecision)
   std::vector<TopoNode::Ptr> path;
   ASSERT_TRUE(graph.goalDirectedSearch(
     start, goal->center_, path, 0.2, 0.2F, 1.0F, {}, 4.0F));
-  ASSERT_EQ(path.size(), 3U);
-  EXPECT_EQ(path[1], direct);
-  EXPECT_EQ(path.back(), goal);
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), direct);
 
   // The semantic frame arrives at t=0.5 s. It is the only state change; the
   // next planner tick must select the clear side branch.
-  graph.updateNodeSemantic(speculative, 1.0F, 1.0F, 500000000);
+  graph.updateNodeSemantic(semantic, 1.0F, 1.0F, 500000000);
   path.clear();
   ASSERT_TRUE(graph.goalDirectedSearch(
     start, goal->center_, path, 0.2, 0.2F, 1.0F, {}, 4.0F));
-  ASSERT_GE(path.size(), 2U);
+  ASSERT_EQ(path.size(), 2U);
   // Rolling EPIC planning is allowed to stop at the side branch as its next
   // subgoal rather than forcing the full mission goal into this local graph.
   EXPECT_EQ(path.back(), side);

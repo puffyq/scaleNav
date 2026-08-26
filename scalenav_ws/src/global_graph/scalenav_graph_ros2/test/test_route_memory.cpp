@@ -93,7 +93,8 @@ TEST(RouteMemory, IgnoresSmallSemanticEmaChanges)
 {
   EXPECT_FALSE(scalenav_graph::semanticRiskChangeRequiresReplan(0.20F, 0.30F, 0.15F));
   EXPECT_TRUE(scalenav_graph::semanticRiskChangeRequiresReplan(0.20F, 0.36F, 0.15F));
-  EXPECT_TRUE(scalenav_graph::semanticRiskChangeRequiresReplan(
+  EXPECT_FALSE(scalenav_graph::semanticRiskChangeRequiresReplan(0.40F, 0.20F, 0.15F));
+  EXPECT_FALSE(scalenav_graph::semanticRiskChangeRequiresReplan(
     std::numeric_limits<float>::quiet_NaN(), 0.2F, 0.15F));
 }
 
@@ -103,112 +104,40 @@ TEST(RouteMemory, StaticGeometryDoesNotResetOnSemanticFrameNoiseByDefault)
   EXPECT_TRUE(scalenav_graph::semanticRouteResetRequested(true, 0.10F, 0.90F, 0.15F));
 }
 
-TEST(RaycastShortcut, CollapsesAnOpenPolylineToItsEndpoints)
+TEST(RouteMemory, ContinuityUsesTheNearestPathSegmentInsteadOfTheFirstPoint)
 {
-  const std::vector<Eigen::Vector3f> path = {
-    point(0.0F), point(1.0F, 1.0F), point(2.0F, -1.0F), point(4.0F)};
-  auto open_space = [](const Eigen::Vector3f &) { return 100.0F; };
-  scalenav_graph::RaycastShortcutStats stats;
-
-  const auto shortened = scalenav_graph::farthestVisibleShortcut(
-    path, 0.25F, 0.65F, open_space, &stats);
-
-  ASSERT_EQ(shortened.size(), 2U);
-  EXPECT_TRUE(shortened.front().isApprox(path.front()));
-  EXPECT_TRUE(shortened.back().isApprox(path.back()));
-  EXPECT_GT(stats.clearance_queries, 2U);
-  EXPECT_EQ(stats.accepted_segments, 1U);
+  const std::vector<Eigen::Vector3f> route = {
+    point(0.0F), point(3.0F), point(8.0F), point(14.0F)};
+  EXPECT_TRUE(scalenav_graph::isContinuousForwardRoute(
+    point(6.0F, 0.2F), route, 0.5F));
+  EXPECT_FALSE(scalenav_graph::isContinuousForwardRoute(
+    point(6.0F, 1.0F), route, 0.5F));
 }
 
-TEST(RaycastShortcut, RetainsAWaypointWhenTheDirectSegmentIsBlocked)
+TEST(RouteMemory, CandidateNeedsHysteresisToReplaceAnIncumbent)
 {
-  const std::vector<Eigen::Vector3f> path = {
-    point(0.0F), point(1.0F, 1.0F), point(3.0F, 1.0F), point(4.0F)};
-  const Eigen::Vector3f obstacle = point(2.0F);
-  auto clearance = [&obstacle](const Eigen::Vector3f &query) {
-    return (query - obstacle).norm();
-  };
-
-  const auto shortened = scalenav_graph::farthestVisibleShortcut(
-    path, 0.10F, 0.55F, clearance);
-
-  ASSERT_GT(shortened.size(), 2U);
-  EXPECT_TRUE(shortened.front().isApprox(path.front()));
-  EXPECT_TRUE(shortened.back().isApprox(path.back()));
-  for (std::size_t i = 1; i < shortened.size(); ++i) {
-    EXPECT_TRUE(scalenav_graph::segmentHasClearance(
-      shortened[i - 1], shortened[i], 0.10F, 0.55F, clearance));
-  }
+  EXPECT_FALSE(scalenav_graph::shouldSwitchRoute(
+    false, 0.25F, 0.22F, 0.08F, 10.0F, 9.5F, 0.0F, 3.5F, 0.90F));
+  EXPECT_TRUE(scalenav_graph::shouldSwitchRoute(
+    false, 0.30F, 0.20F, 0.08F, 10.0F, 9.5F, 0.0F, 3.5F, 0.90F));
+  EXPECT_TRUE(scalenav_graph::shouldSwitchRoute(
+    true, 0.25F, 0.24F, 0.08F, 10.0F, 10.0F, 20.0F, 0.1F, 0.99F));
 }
 
-TEST(RaycastShortcut, RejectsClearanceBelowTheSafetyThreshold)
+TEST(RouteMemory, CompatibleCandidateMayExtendTheRollingFrontier)
 {
-  auto insufficient = [](const Eigen::Vector3f &) { return 0.649F; };
-  auto exact = [](const Eigen::Vector3f &) { return 0.65F; };
+  const std::vector<Eigen::Vector3f> accepted = {
+    point(0.0F), point(10.0F), point(20.0F), point(30.0F)};
+  const std::vector<Eigen::Vector3f> extension = {
+    point(0.0F, 0.1F), point(10.0F, 0.1F), point(20.0F, 0.2F),
+    point(30.0F, 0.4F), point(35.0F, 1.0F)};
+  const std::vector<Eigen::Vector3f> lane_switch = {
+    point(0.0F), point(8.0F, 3.3F), point(20.0F, 3.3F), point(35.0F, 3.3F)};
 
-  EXPECT_FALSE(scalenav_graph::segmentHasClearance(
-    point(0.0F), point(1.0F), 0.25F, 0.65F, insufficient));
-  EXPECT_TRUE(scalenav_graph::segmentHasClearance(
-    point(0.0F), point(1.0F), 0.25F, 0.65F, exact));
-}
-
-TEST(RaycastShortcut, RejectsUnknownInteriorButAllowsUnknownWitnessEndpoints)
-{
-  auto unknown_interior = [](const Eigen::Vector3f &query) {
-    return query.x() > 0.24F && query.x() < 0.76F ?
-      std::numeric_limits<float>::quiet_NaN() : 10.0F;
-  };
-  auto unknown_endpoints = [](const Eigen::Vector3f &query) {
-    return (query.x() < 1e-4F || query.x() > 0.9999F) ?
-      std::numeric_limits<float>::quiet_NaN() : 10.0F;
-  };
-
-  EXPECT_FALSE(scalenav_graph::segmentHasClearance(
-    point(0.0F), point(1.0F), 0.25F, 0.65F, unknown_interior));
-  EXPECT_TRUE(scalenav_graph::segmentHasClearance(
-    point(0.0F), point(1.0F), 0.25F, 0.65F, unknown_endpoints));
-}
-
-TEST(RaycastShortcut, LeavesATwoPointPathUnchanged)
-{
-  const std::vector<Eigen::Vector3f> path = {point(0.0F), point(2.0F)};
-  auto blocked = [](const Eigen::Vector3f &) { return 0.0F; };
-
-  const auto shortened = scalenav_graph::farthestVisibleShortcut(
-    path, 0.25F, 0.65F, blocked);
-
-  ASSERT_EQ(shortened.size(), 2U);
-  EXPECT_TRUE(shortened.front().isApprox(path.front()));
-  EXPECT_TRUE(shortened.back().isApprox(path.back()));
-}
-
-TEST(RaycastShortcut, RemovesRepeatedPointsWithoutStalling)
-{
-  const std::vector<Eigen::Vector3f> path = {
-    point(0.0F), point(0.0F), point(1.0F), point(1.0F), point(2.0F)};
-  auto open_space = [](const Eigen::Vector3f &) { return 100.0F; };
-
-  const auto shortened = scalenav_graph::farthestVisibleShortcut(
-    path, 0.25F, 0.65F, open_space);
-
-  ASSERT_EQ(shortened.size(), 2U);
-  EXPECT_TRUE(shortened.front().isApprox(point(0.0F)));
-  EXPECT_TRUE(shortened.back().isApprox(point(2.0F)));
-}
-
-TEST(RaycastShortcut, SamplesBothEndpointsAndTheInterior)
-{
-  auto endpoint_obstacle = [](const Eigen::Vector3f &query) {
-    return query.x() > 0.99F ? 0.1F : 100.0F;
-  };
-  auto narrow_obstacle = [](const Eigen::Vector3f &query) {
-    return std::abs(query.x() - 0.5F) < 1e-4F ? 0.1F : 100.0F;
-  };
-
-  EXPECT_FALSE(scalenav_graph::segmentHasClearance(
-    point(0.0F), point(1.0F), 0.25F, 0.65F, endpoint_obstacle));
-  EXPECT_FALSE(scalenav_graph::segmentHasClearance(
-    point(0.0F), point(1.0F), 0.25F, 0.65F, narrow_obstacle));
+  EXPECT_TRUE(scalenav_graph::candidateExtendsAcceptedRoute(
+    accepted, extension, 1.0F, 1.5F));
+  EXPECT_FALSE(scalenav_graph::candidateExtendsAcceptedRoute(
+    accepted, lane_switch, 1.0F, 1.5F));
 }
 
 }  // namespace

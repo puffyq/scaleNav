@@ -1,6 +1,6 @@
 # scalenav_log
 
-独立的 ROS 2 C++ 运行日志包。节点按消息到达顺序写入一个 session，并在磁盘达到限制时自动创建新 session，随后按时间从旧到新删除 session。
+独立的 ROS 2 C++ 运行日志包。节点按消息到达顺序写入一个 session，每次启动创建一个新的 session；日志不会因容量或数量限制自动滚动，也不会自动删除旧 session。
 
 记录内容：
 
@@ -8,6 +8,7 @@
 - 点云和 free-ray：`pointcloud/*.pcd`，PCD ASCII，支持按 stride 和最大点数抽样。
 - graph、bubbles、path：`graph/*.json`，保留 marker 类型、命名空间、颜色、姿态和点序列。
 - odometry、trajectory control、goal、semantic heatmap：结构化写入 `index.jsonl`。
+- 规划器净空：`/epic/clearance` 自动写为 `clearance` 事件，包含车辆净空、当前路径最小净空和平均净空；数值来自 Bubble A* 使用的同一障碍距离场。
 
 默认话题见 `config/scalenav_log.yaml`，均可通过 ROS 参数覆盖。
 
@@ -24,11 +25,7 @@ ros2 run scalenav_log scalenav_log_node \
 `/mnt/code/lab/yopo/OpenSeek/log_scalenav`；可通过 `SCALENAV_LOG_DIR=/path/to/logs` 覆盖目录。每次启动创建一个
 session，收到消息后立即写入 depth、pointcloud、graph/path 和结构化事件。
 
-主要清理参数：
-
-- `max_total_bytes`：所有 session 的总字节上限。
-- `max_sessions`：最多保留的 session 数量。
-- `max_session_bytes`：单 session 达到上限后滚动到新 session。
+日志目录没有自动清理参数。磁盘空间管理由部署者或外部运维策略负责。
 
 ## 启动回放网页
 

@@ -8,10 +8,18 @@ from .depth_query import ValidationState
 from .sparse_graph import GraphUpdate, SparseDepthGraph
 
 
+ORDINARY_TOPOLOGY_RGBA = (101 / 255, 121 / 255, 133 / 255, 1.0)
+CANDIDATE_TOPOLOGY_RGBA = (181 / 255, 193 / 255, 200 / 255, 1.0)
+SELECTED_PATH_RGBA = (0 / 255, 124 / 255, 131 / 255, 1.0)
+UAV_RGBA = (36 / 255, 52 / 255, 61 / 255, 1.0)
+MISSION_GOAL_RGBA = (49 / 255, 94 / 255, 120 / 255, 1.0)
+LOCAL_GOAL_RGBA = (141 / 255, 96 / 255, 145 / 255, 1.0)
+RISK_RGBA = (209 / 255, 78 / 255, 70 / 255, 1.0)
+
 STATE_RGBA = {
-    ValidationState.CERTIFIED.value: (0.15, 0.65, 0.37, 1.0),
-    ValidationState.UNVALIDATED.value: (0.89, 0.64, 0.10, 1.0),
-    ValidationState.INVALID.value: (0.85, 0.29, 0.29, 1.0),
+    ValidationState.CERTIFIED.value: ORDINARY_TOPOLOGY_RGBA,
+    ValidationState.UNVALIDATED.value: CANDIDATE_TOPOLOGY_RGBA,
+    ValidationState.INVALID.value: RISK_RGBA,
 }
 
 

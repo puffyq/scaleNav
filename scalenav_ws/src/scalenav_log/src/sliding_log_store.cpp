@@ -46,12 +46,8 @@ std::string jsonNumber(const double value)
   return out.str();
 }
 
-SlidingLogStore::SlidingLogStore(fs::path root, const std::uint64_t max_total_bytes,
-                                 const std::size_t max_sessions,
-                                 const std::uint64_t max_session_bytes)
-: root_(std::move(root)), max_total_bytes_(max_total_bytes),
-  max_sessions_(std::max<std::size_t>(max_sessions, 1)),
-  max_session_bytes_(std::max<std::uint64_t>(max_session_bytes, 1024)) {}
+SlidingLogStore::SlidingLogStore(fs::path root)
+: root_(std::move(root)) {}
 
 SlidingLogStore::~SlidingLogStore() { close(); }
 
@@ -73,7 +69,6 @@ void SlidingLogStore::open(const std::string &manifest_json)
   fs::create_directories(root_);
   manifest_json_ = manifest_json;
   openSessionLocked(manifest_json_);
-  pruneLocked();
 }
 
 void SlidingLogStore::openSessionLocked(const std::string &manifest_json)
@@ -94,7 +89,6 @@ void SlidingLogStore::openSessionLocked(const std::string &manifest_json)
   std::ofstream manifest(session_dir_ / "manifest.json", std::ios::out | std::ios::trunc);
   manifest << manifest_json << '\n';
   manifest.close();
-  active_bytes_ = directoryBytes(session_dir_);
   sequence_ = 0;
 }
 
@@ -108,12 +102,6 @@ void SlidingLogStore::close()
   }
 }
 
-void SlidingLogStore::prune()
-{
-  std::lock_guard<std::mutex> lock(mutex_);
-  pruneLocked();
-}
-
 std::string SlidingLogStore::writeAsset(const std::string &relative_name,
                                         const std::vector<std::uint8_t> &bytes)
 {
@@ -124,9 +112,6 @@ std::string SlidingLogStore::writeAsset(const std::string &relative_name,
       [](const fs::path &part) { return part == ".."; })) {
     throw std::invalid_argument("asset path must not escape the active session");
   }
-  if (active_bytes_ > 0 && active_bytes_ + bytes.size() > max_session_bytes_) {
-    openSessionLocked(manifest_json_);
-  }
   const fs::path destination = session_dir_ / relative;
   fs::create_directories(destination.parent_path());
   const fs::path temporary = destination.string() + ".tmp";
@@ -136,7 +121,6 @@ std::string SlidingLogStore::writeAsset(const std::string &relative_name,
     if (!bytes.empty()) stream.write(reinterpret_cast<const char *>(bytes.data()), bytes.size());
   }
   fs::rename(temporary, destination);
-  active_bytes_ += bytes.size();
   return relative.generic_string();
 }
 
@@ -154,65 +138,12 @@ void SlidingLogStore::record(const std::string &kind, const std::int64_t stamp_n
     ",\"data\":" + (extra_json.empty() ? "{}" : extra_json) + "}\n";
   (*index_stream_) << line;
   index_stream_->flush();
-  active_bytes_ += line.size();
-  pruneLocked();
 }
 
 std::filesystem::path SlidingLogStore::activeSession() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
   return session_dir_;
-}
-
-std::uint64_t SlidingLogStore::activeBytes() const
-{
-  std::lock_guard<std::mutex> lock(mutex_);
-  return active_bytes_;
-}
-
-std::uint64_t SlidingLogStore::directoryBytes(const fs::path &path) const
-{
-  std::uint64_t total = 0;
-  std::error_code error;
-  for (const auto &entry : fs::recursive_directory_iterator(path, error)) {
-    if (error) break;
-    if (entry.is_regular_file(error)) total += entry.file_size(error);
-  }
-  return total;
-}
-
-void SlidingLogStore::pruneLocked()
-{
-  std::error_code error;
-  fs::create_directories(root_, error);
-  std::vector<fs::path> sessions;
-  for (const auto &entry : fs::directory_iterator(root_, error)) {
-    if (!error && entry.is_directory(error) && entry.path().filename().string().rfind("session_", 0) == 0)
-      sessions.push_back(entry.path());
-  }
-  std::sort(sessions.begin(), sessions.end(), [](const fs::path &left, const fs::path &right) {
-    return left.filename().string() < right.filename().string();
-  });
-  std::uint64_t total = 0;
-  for (const auto &session : sessions) total += directoryBytes(session);
-  auto remove_oldest = [&]() {
-    for (std::size_t index = 0; index < sessions.size(); ++index) {
-      const auto session = sessions[index];
-      if (session == session_dir_) continue;
-      fs::remove_all(session, error);
-      if (!error) {
-        total = 0;
-        for (const auto &candidate : sessions)
-          if (fs::exists(candidate, error)) total += directoryBytes(candidate);
-        sessions.erase(sessions.begin() + static_cast<std::ptrdiff_t>(index));
-        return true;
-      }
-    }
-    return false;
-  };
-  while ((max_total_bytes_ > 0 && total > max_total_bytes_) || sessions.size() > max_sessions_) {
-    if (!remove_oldest()) break;
-  }
 }
 
 }  // namespace scalenav_log

@@ -18,7 +18,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "output_dir",
             default_value=default_output_dir,
-            description="Root directory for automatically recorded sessions",
+            description="Root directory for append-only recorded sessions",
         ),
         Node(
             package="scalenav_log",

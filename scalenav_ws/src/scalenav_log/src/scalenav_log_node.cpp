@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/vector3_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -167,10 +168,6 @@ public:
   : Node("scalenav_log_node")
   {
     const auto output_dir = expandUser(declare_parameter<std::string>("output_dir", "~/scalenav_logs"));
-    const auto max_total = declare_parameter<std::int64_t>("max_total_bytes", 10LL * 1024 * 1024 * 1024);
-    const auto max_sessions = declare_parameter<int>("max_sessions", 20);
-    const auto max_session = declare_parameter<std::int64_t>("max_session_bytes", 1024LL * 1024 * 1024);
-    prune_period_s_ = declare_parameter<double>("prune_period_s", 10.0);
     pointcloud_max_points_ = static_cast<std::size_t>(std::max<std::int64_t>(1, declare_parameter<std::int64_t>("pointcloud_max_points", 200000)));
     pointcloud_stride_ = static_cast<std::size_t>(std::max<std::int64_t>(1, declare_parameter<std::int64_t>("pointcloud_stride", 1)));
     const int qos_depth = std::max(1, static_cast<int>(declare_parameter<int>("qos_depth", 10)));
@@ -186,11 +183,9 @@ public:
     control_topic_ = declare_parameter<std::string>("control_topic", "/scalenav/trajectory_point");
     semantic_topic_ = declare_parameter<std::string>("semantic_topic", "/scalenav/text_heatmap_raw");
     goal_topic_ = declare_parameter<std::string>("goal_topic", "/goal_pose");
+    clearance_topic_ = declare_parameter<std::string>("clearance_topic", "/epic/clearance");
 
-    store_ = std::make_unique<SlidingLogStore>(fs::path(output_dir),
-      static_cast<std::uint64_t>(std::max<std::int64_t>(0, max_total)),
-      static_cast<std::size_t>(std::max<std::int64_t>(1, max_sessions)),
-      static_cast<std::uint64_t>(std::max<std::int64_t>(1024, max_session)));
+    store_ = std::make_unique<SlidingLogStore>(fs::path(output_dir));
     std::ostringstream manifest;
     manifest << "{\"schema\":\"scalenav_log.v1\",\"created_unix_ns\":"
       << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count()
@@ -201,6 +196,7 @@ public:
       << ",\"bubbles\":" << jsonQuote(bubble_topic_) << ",\"path\":" << jsonQuote(path_topic_)
       << ",\"odom\":" << jsonQuote(odom_topic_) << ",\"control\":" << jsonQuote(control_topic_)
       << ",\"semantic\":" << jsonQuote(semantic_topic_) << ",\"goal\":" << jsonQuote(goal_topic_)
+      << ",\"clearance\":" << jsonQuote(clearance_topic_)
       << "},\"pointcloud_max_points\":" << pointcloud_max_points_
       << ",\"pointcloud_stride\":" << pointcloud_stride_ << "}";
     store_->open(manifest.str());
@@ -228,8 +224,11 @@ public:
       [this](sensor_msgs::msg::Image::ConstSharedPtr message) { captureDepth(*message, "semantic"); });
     goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(goal_topic_, qos_depth,
       [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr message) { captureGoal(*message); });
-    prune_timer_ = create_wall_timer(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::duration<double>(std::max(1.0, prune_period_s_))),
-      [this]() { store_->prune(); });
+    clearance_sub_ = create_subscription<geometry_msgs::msg::Vector3Stamped>(
+      clearance_topic_, qos_depth,
+      [this](geometry_msgs::msg::Vector3Stamped::ConstSharedPtr message) {
+        captureClearance(*message);
+      });
     RCLCPP_INFO(get_logger(), "scalenav log session: %s", store_->activeSession().string().c_str());
   }
 
@@ -370,6 +369,12 @@ private:
       if (i) out << ',';
       out << array3(marker.points[i]);
     }
+    out << "],\"colors\":[";
+    for (std::size_t i = 0; i < marker.colors.size(); ++i) {
+      if (i) out << ',';
+      out << '[' << jsonNumber(marker.colors[i].r) << ',' << jsonNumber(marker.colors[i].g)
+        << ',' << jsonNumber(marker.colors[i].b) << ',' << jsonNumber(marker.colors[i].a) << ']';
+    }
     out << "]}";
     return out.str();
   }
@@ -434,12 +439,22 @@ private:
     store_->record("goal", stampNs(message.header.stamp), "", extra.size(), extra);
   }
 
+  void captureClearance(const geometry_msgs::msg::Vector3Stamped &message)
+  {
+    const auto extra = "{\"frame_id\":" + jsonQuote(message.header.frame_id) +
+      ",\"vehicle_m\":" + jsonNumber(message.vector.x) +
+      ",\"path_min_m\":" + jsonNumber(message.vector.y) +
+      ",\"path_mean_m\":" + jsonNumber(message.vector.z) + "}";
+    store_->record("clearance", stampNs(message.header.stamp), "", extra.size(), extra);
+  }
+
   std::unique_ptr<SlidingLogStore> store_;
-  double prune_period_s_ = 10.0;
   std::size_t pointcloud_max_points_ = 200000;
   std::size_t pointcloud_stride_ = 1;
   std::uint64_t depth_seq_ = 0, rgb_seq_ = 0, pointcloud_seq_ = 0, graph_seq_ = 0, path_seq_ = 0;
-  std::string depth_topic_, rgb_topic_, pointcloud_topic_, free_ray_topic_, graph_topic_, bubble_topic_, path_topic_, odom_topic_, control_topic_, semantic_topic_, goal_topic_;
+  std::string depth_topic_, rgb_topic_, pointcloud_topic_, free_ray_topic_, graph_topic_,
+    bubble_topic_, path_topic_, odom_topic_, control_topic_, semantic_topic_, goal_topic_,
+    clearance_topic_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_, rgb_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_, free_ray_sub_;
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr graph_sub_, bubble_sub_;
@@ -448,7 +463,7 @@ private:
   rclcpp::Subscription<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>::SharedPtr control_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr semantic_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
-  rclcpp::TimerBase::SharedPtr prune_timer_;
+  rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr clearance_sub_;
 };
 
 }  // namespace
