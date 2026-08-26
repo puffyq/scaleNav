@@ -155,6 +155,7 @@ def build_witness_corridor(
     robot_radius_m: float,
     safety_margin_m: float,
     max_step_m: float = 0.25,
+    obstacle_tree: cKDTree | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     obstacles = np.asarray(obstacle_points_world, dtype=np.float32)
     if obstacles.ndim != 2 or obstacles.shape[1] != 3 or len(obstacles) == 0:
@@ -162,7 +163,8 @@ def build_witness_corridor(
     if not np.isfinite(obstacles).all():
         raise ValueError("obstacle points contain non-finite values")
     dense_points, _ = resample_polyline(path_points_world, max_step_m=max_step_m)
-    clearance, _ = cKDTree(obstacles).query(dense_points, k=1, workers=-1)
+    tree = cKDTree(obstacles) if obstacle_tree is None else obstacle_tree
+    clearance, _ = tree.query(dense_points, k=1, workers=-1)
     clearance = np.asarray(clearance, dtype=np.float32)
     radius = clearance - float(robot_radius_m) - float(safety_margin_m)
     return dense_points, clearance, radius.astype(np.float32)

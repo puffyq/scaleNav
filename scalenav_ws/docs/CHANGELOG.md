@@ -2,6 +2,66 @@
 
 本文件按修改批次记录，不按日期聚合。每次代码更新新增一个独立变更编号；后续补充验证结果时更新对应记录，不把不同修改合并到同一天的章节中。
 
+<a id="chg-0016"></a>
+## CHG-0016 路线延伸保持走廊并按 witness 净空排序
+
+- 记录时间：2026-08-26
+- 状态：代码、Release 编译和包级自动化测试完成；真实仿真复测待执行
+- 测试记录：[TEST_REPORT_2026-08-26 / CHG-0016](TEST_REPORT_2026-08-26.md#chg-0016)
+
+问题与根因：
+
+- CHG-0015 后最新会话仍出现路线变化。日志中 `route_blocked=0`、`incumbent=RECOVERED` 时也会接受新候选，原因是 `route_has_execution_horizon=false` 被列为 `hard_switch`：前方执行储备不足 10 m 会绕过路线 loss 和兼容延伸检查，直接替换当前走廊。
+- 原 clearance loss 只取边两端 TopoNode 的 Bubble 半径。端点半径均不小于 `1.2 m` 时惩罚固定为零，即使 edge witness 中间贴障；因此规划器无法优先选择实际更宽松的路线。
+
+修改内容：
+
+- 执行储备不足仍触发候选搜索，但不再构成硬切换。当前走廊只有在 blocked、没有可用 accepted route、incumbent 无法从当前拓扑恢复或进入最终目标窗口时才硬切；其他候选必须通过既有 risk/cost 滞回或 `candidateExtendsAcceptedRoute()`。
+- TopoNode 边新增 `edge_clearance_` 缓存。edge witness 建立、修复及 odom 连接时计算一次最小障碍净空；相邻稀疏样本之间使用距离场 1-Lipschitz 性质计算保守下界，覆盖两个安全 Bubble 之间的窄颈。
+- `edgeClearancePenalty()` 使用端点 Bubble 与缓存 witness 净空的较小值，并按实际 witness 长度计权。A* 展开只读取缓存，不向点云 KD-tree 发起额外查询。
+- update 日志新增 `switch_reason`，取值包括 `BLOCKED`、`GOAL_WINDOW`、`NO_ACCEPTED_ROUTE`、`INCUMBENT_LOST`、`LOWER_LOSS` 和 `COMPATIBLE_EXTENSION`。
+
+验证结果：
+
+- `scalenav_graph_ros2` Release 编译通过。
+- `colcon test --packages-select scalenav_graph_ros2` 通过；汇总 `76 tests, 0 errors, 0 failures, 0 skipped`。
+- 未修改 `FUNCTION_TEST_CASES.md` 或现有测试源码。
+
+待真实验证：
+
+- 复跑左右廊场景，确认 `route_blocked=0` 且仅执行储备不足时不会改变当前走廊；兼容延伸允许 terminal 前移，但 local goal 前缀应连续。
+- 检查胜出路线的 clearance loss 不再长期为 `0.00`，并用结构化 `path_min_m` 对照宽松路线是否真正被优先选择。
+
+<a id="chg-0015"></a>
+## CHG-0015 只按前向 witness 判定阻塞并保持局部目标顺序
+
+- 记录时间：2026-08-26
+- 状态：代码、Release 编译和包级自动化测试完成；真实仿真复测待执行
+- 测试记录：[TEST_REPORT_2026-08-26 / CHG-0015](TEST_REPORT_2026-08-26.md#chg-0015)
+
+问题与根因：
+
+- 最新两个会话中，`route_blocked=1` 时旧逻辑清空路线记忆并把候选切换视为硬切换，绕过了原有路线 loss 滞回，导致 terminal 在左右走廊之间反复改变。
+- blocked 探测扫描完整 `last_witness_path_`，包含车辆已经通过的旧前缀；旧前缀被地图更新判为不安全时，会错误地使车辆前方仍可执行的路线失效。
+- 发布阶段对已经按拓扑顺序展开的 witness 再次从整条折线寻找全局最近线段。回弯或平行走廊靠近车辆时，可能跳回旧段，令 `local_goal` 指向车辆后方或错误走廊。
+
+修改内容：
+
+- blocked 探测先使用 `forwardRouteFromPosition()` 截取车辆前方 witness 后缀，只对剩余执行路线调用碰撞检查；日志新增 `route_probe_points`，区分实际探测点数。
+- 删除发布阶段对已排序 witness 的第二次全局最近线段投影，local goal 直接沿当前 witness 顺序做弧长前视。
+- 未改变语义节点持久化、BubbleUnionSet 聚类、A* 路线 loss 权重或已有硬约束；语义节点仍保持独立风险证据。
+
+验证结果：
+
+- `scalenav_graph_ros2` Release 编译通过。
+- `colcon test --packages-select scalenav_graph_ros2` 通过；汇总 `76 tests, 0 errors, 0 failures, 0 skipped`。
+- 未修改 `FUNCTION_TEST_CASES.md` 或现有测试源码。
+
+待真实验证：
+
+- 复跑左右廊场景，确认已通过的旧前缀不再触发 `route_blocked=1`，且 `route_probe_points` 随车辆前进缩短。
+- 确认 `local_goal` 不再回到车辆后方，并统计候选接受率和左右 terminal 切换次数。
+
 <a id="chg-0014"></a>
 ## CHG-0014 拒绝局部无进展的持久化 witness
 

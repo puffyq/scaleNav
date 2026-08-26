@@ -7,8 +7,8 @@ control, TensorRT export, and evaluation nodes are intentionally excluded.
 ## Implemented Pipeline
 
 ```text
-AirSim RGB-D + tree.ply (world_enu/body_flu)
-  + production EPIC accepted frontier/witness/topology path
+YOPO-style ground-truth blocks/forest OR AirSim RGB-D
+  + ground-truth A* route OR production EPIC accepted route
   -> RouteQualityGate + continuous clearance audit
   -> Scene_N/routes.npz
   -> fixed K witness bubbles for model conditioning
@@ -33,6 +33,8 @@ data/snapshot_dataset.py
 data/route_contract.py  routes.npz, quality gate, corridor sampling
 data/epic_route_labeler.py
                         accepted EPIC output to routes.npz
+data/ground_truth_dataset.py
+                        Map2-style blocks/forest, A*, depth, routes and audit
 data/synthetic_dataset.py
                         deterministic end-to-end smoke data
 loss/route_loss.py      corridor, progress, and tangent loss
@@ -43,9 +45,11 @@ train_yopo.py           training CLI
 ```
 
 `reference/yopo_simple_generator/` preserves the original YOPO-Simple CUDA
-data generator. `route_generation/topology_core/` records the exact production
-TopoGraph/Bubble A* source boundary. The Python labeler consumes accepted EPIC
-witness output and never implements a second A*.
+data generator. The ground-truth generator is an offline simulator labeler: it
+uses the exact generated occupancy to produce safe A* guidance and does not run
+at deployment. For real captured data, `route_generation/topology_core/`
+records the production source boundary and the Python labeler only consumes
+accepted EPIC witness output.
 
 ## Data Contract
 
@@ -91,6 +95,26 @@ Generate deterministic smoke data:
 python -m data.synthetic_dataset \
   --output /tmp/scalenav_route_smoke --scenes 2 --frames 4 --overwrite
 ```
+
+Generate the batch-001 pilot directly from scene truth. Scene 0 uses Map2-style
+large blocks and Scene 1 mixes large blocks with YOPO-style forest obstacles.
+At least one route per frame must be a real obstacle detour. The command also
+writes 100 top-down route previews and `generation_report.json`:
+
+```bash
+python -m data.ground_truth_dataset \
+  --output dataset --scenes 2 --frames 500 --routes-per-frame 3 \
+  --scene-style alternating --obstacles 40 --preview-routes 100 --seed 0 \
+  --overwrite
+
+python -m data.validate_snapshot_dataset dataset --require-routes
+```
+
+Available scene distributions are `blocks`, `mixed`, `forest`, and
+`alternating`. `blocks` uses 2.5-6.5 m wide, full-height rotated boxes. Route
+search runs on the obstacle grid inflated by robot radius, safety margin, and
+an additional smoothing margin. Every accepted route is then independently
+checked against the continuous point-cloud clearance and curvature gates.
 
 Collect an AirSim scene with obstacle-safe pose rejection:
 
@@ -145,4 +169,6 @@ python -m pytest -q tests
 The suite covers coordinate conversion, safe pose sampling, route NPZ
 round-trips, quality rejection, conservative bubble sampling, route loss
 gradients/dropout, scene-level splitting, path-conditioned output changes, and
-a complete ESDF-backed optimizer update with checkpoint serialization.
+a complete ESDF-backed optimizer update with checkpoint serialization. It also
+covers large-block A* detours, analytic ground-truth depth rendering, and a
+generated-scene contract round trip.

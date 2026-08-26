@@ -1494,6 +1494,7 @@ class EpicGraphNode final : public rclcpp::Node {
     bool reused_terminal = false;
     bool candidate_found = false;
     bool candidate_accepted = false;
+    const char *route_switch_reason = "NONE";
     bool found = false;
     TopoGraphSearchStats incumbent_search_stats;
     TopoGraphSearchStats candidate_search_stats;
@@ -1513,8 +1514,17 @@ class EpicGraphNode final : public rclcpp::Node {
     const std::int64_t active_virtual_semantic_stamp_ns =
       activeVirtualSemanticStampNs();
     bool current_route_blocked = false;
+    std::size_t route_probe_points = 0;
     if (last_witness_path_.size() >= 2 && active_topo->parallel_bubble_astar_) {
       std::vector<Eigen::Vector3f> probe = last_witness_path_;
+      // The consumed prefix is no longer an execution constraint. Checking it
+      // again after the vehicle has moved lets stale map changes behind the
+      // vehicle invalidate an otherwise usable forward corridor and forces a
+      // needless left/right route switch.
+      const auto forward_probe = scalenav_graph::forwardRouteFromPosition(
+        last_witness_path_, position_);
+      if (forward_probe.size() >= 2) probe = forward_probe;
+      route_probe_points = probe.size();
       current_route_blocked =
         !active_topo->parallel_bubble_astar_->collisionCheck_shortenPath(probe);
     }
@@ -1538,9 +1548,6 @@ class EpicGraphNode final : public rclcpp::Node {
     const bool accepted_witness_usable = have_route_terminal_ && route_aligned &&
       !goal_in_window && !current_route_blocked &&
       active_topo->odom_node_ && !active_topo->odom_node_->neighbors_.empty();
-    const bool route_has_execution_horizon = scalenav_graph::canReuseForwardRoute(
-      position_, last_witness_path_, effective_lookahead_m,
-      static_cast<float>(route_reuse_lateral_distance_m_));
     bool incumbent_recovered = false;
     const char *incumbent_result = accepted_witness_usable ?
       "REMAP_FAILED" : "NOT_ELIGIBLE";
@@ -1653,9 +1660,17 @@ class EpicGraphNode final : public rclcpp::Node {
       reused_terminal = true;
     }
     if (candidate_found) {
+      // A short execution reserve requests an extension search, but it does
+      // not make the current corridor invalid. Let a compatible extension or
+      // the normal risk/cost hysteresis decide; otherwise the vehicle changes
+      // corridors every time the rolling lookahead approaches its terminal.
       const bool hard_switch = current_route_blocked || goal_in_window ||
-        !accepted_witness_usable || !route_has_execution_horizon;
+        !accepted_witness_usable || !incumbent_recovered;
       bool switch_route = hard_switch;
+      if (current_route_blocked) route_switch_reason = "BLOCKED";
+      else if (goal_in_window) route_switch_reason = "GOAL_WINDOW";
+      else if (!accepted_witness_usable) route_switch_reason = "NO_ACCEPTED_ROUTE";
+      else if (!incumbent_recovered) route_switch_reason = "INCUMBENT_LOST";
       if (!switch_route && incumbent_recovered) {
         const RouteMetrics incumbent_metrics = metrics_for(incumbent_nodes);
         const RouteMetrics candidate_metrics = metrics_for(candidate_nodes);
@@ -1666,6 +1681,7 @@ class EpicGraphNode final : public rclcpp::Node {
           candidate_metrics.progress - incumbent_metrics.progress,
           static_cast<float>(frontier_goal_margin_m_),
           static_cast<float>(semantic_route_switch_cost_ratio_));
+        if (switch_route) route_switch_reason = "LOWER_LOSS";
       }
       if (!switch_route && accepted_witness_usable && frontier_horizon_expired) {
         const auto accepted_forward = scalenav_graph::forwardRouteFromPosition(
@@ -1673,6 +1689,7 @@ class EpicGraphNode final : public rclcpp::Node {
         switch_route = scalenav_graph::candidateExtendsAcceptedRoute(
           accepted_forward, route_points(candidate_nodes), 0.25F,
           static_cast<float>(route_reuse_lateral_distance_m_));
+        if (switch_route) route_switch_reason = "COMPATIBLE_EXTENSION";
       }
       if (!switch_route && using_accepted_witness && semantic_request_for_plan) {
         const RouteMetrics candidate_metrics = metrics_for(candidate_nodes);
@@ -1828,11 +1845,11 @@ class EpicGraphNode final : public rclcpp::Node {
       "astar_candidate_terminals=%zu astar_timed_out=%d "
       "geometry_source=%s "
       "remembered_edges=%zu/%zu geometric_edges=%zu route_mode=%s "
-      "semantic_request=%d incumbent=%s terminal_id=%llu candidate_found=%d candidate_accepted=%d "
+      "semantic_request=%d incumbent=%s terminal_id=%llu candidate_found=%d candidate_accepted=%d switch_reason=%s "
       "semantic_nodes=%zu virtual_semantic_nodes=%zu semantic_path_nodes=%zu semantic_max=%.3f "
       "path_cost=%.2f geometry=%.2f semantic=%.2f clearance=%.2f "
       "local_graph_radius=%.1f m "
-      "route_aligned=%d horizon_ready=%d route_blocked=%d route_risk=%.3f "
+      "route_aligned=%d horizon_ready=%d route_blocked=%d route_probe_points=%zu route_risk=%.3f "
       "terminal=(%.2f,%.2f,%.2f) "
       "terminal_goal_distance=%.2f m "
       "vehicle_to_terminal=%.2f m "
@@ -1862,6 +1879,7 @@ class EpicGraphNode final : public rclcpp::Node {
       static_cast<unsigned long long>(route_terminal_persistent_id_),
       static_cast<int>(candidate_found),
       static_cast<int>(candidate_accepted),
+      route_switch_reason,
       stats.semantic_nodes, stats.virtual_semantic_nodes,
       stats.semantic_path_nodes, stats.semantic_max,
       static_cast<double>(stats.path_geometry_cost + stats.path_semantic_cost +
@@ -1871,6 +1889,7 @@ class EpicGraphNode final : public rclcpp::Node {
       local_graph_radius_m_,
       static_cast<int>(route_aligned), static_cast<int>(route_has_planning_horizon),
       static_cast<int>(current_route_blocked),
+      route_probe_points,
       static_cast<double>(current_route_risk),
       route_terminal_.x(), route_terminal_.y(), route_terminal_.z(),
       (route_terminal_ - layer_goal).norm(),
@@ -2580,11 +2599,10 @@ class EpicGraphNode final : public rclcpp::Node {
     const bool witness_is_continuous = scalenav_graph::isContinuousForwardRoute(
       position_, selected_witness_path, static_cast<float>(std::max(
         odom_reconnect_distance_m_, route_reuse_lateral_distance_m_)));
-    if (witness_is_continuous && selected_witness_path.size() >= 2) {
-      const auto forward_witness = scalenav_graph::forwardRouteFromPosition(
-        selected_witness_path, position_);
-      if (forward_witness.size() >= 2) selected_witness_path = forward_witness;
-    }
+    // selected_witness_path is already ordered from the current odom node (or
+    // from the forward suffix of the remembered route). Re-projecting it onto
+    // the globally nearest segment here can jump back into a nearby loop or
+    // parallel corridor and send local_goal behind the vehicle.
     const bool computed_has_next_goal = witness_is_continuous && selectNextGoal(
       selected_witness_path, found, effective_lookahead_m, computed_next_goal);
     if (found && !selected_witness_path.empty() && !witness_is_continuous) {

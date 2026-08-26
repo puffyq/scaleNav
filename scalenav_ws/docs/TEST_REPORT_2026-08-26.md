@@ -9,7 +9,26 @@
 - 完整往返 ROS 日志：`/home/puffy/.ros/log/epic_graph_node_939730_1787740833415.log`
 - 覆盖时间：2026-08-26 18:40:33–19:24:30
 
-<a id="chg-0014"></a>
+<a id="chg-0016"></a>
+### CHG-0016 路线延伸稳定性与 witness 净空代价
+
+- 修复后日志复核：最新 `/home/puffy/.ros/log/epic_graph_node_1028017_1787747454078.log` 中，CHG-0015 已使多数样本保持 `route_blocked=0` 并恢复 incumbent；但末段仍在 `route_blocked=0 / incumbent=RECOVERED / horizon_ready=0` 时接受新路线，terminal 从 `(7.75,63.85)` 改为 `(4.45,86.95)`。直接代码原因是执行储备不足仍属于 `hard_switch`。
+- 路线宽松度复核：同一会话多条胜出路线的日志 `clearance=0.00`，而该字段只由边端点 Bubble 半径计算，不能表示 witness 中间净空；因此不能据此认为规划器已比较并选择更宽松路线。
+- 实现：执行储备不足只触发搜索，候选仍须通过正常 loss 滞回或兼容延伸检查。仅 blocked、accepted route 缺失、incumbent 恢复失败和最终目标窗口保留硬切换语义。
+- 实现：边建立/修复时缓存 edge witness 的保守最小净空，A* clearance loss 读取该缓存并按 witness 实际长度计权；没有在 A* 热循环中增加点云查询。update 日志新增 `switch_reason` 以记录实际接受原因。
+- 自动化验证：Release 编译通过；`colcon test --packages-select scalenav_graph_ros2` 通过，`colcon test-result --verbose` 汇总 `76 tests, 0 errors, 0 failures, 0 skipped`。
+- 测试范围：未修改 `FUNCTION_TEST_CASES.md` 或现有测试源码。真实左右廊的切换率、clearance loss 与结构化 `path_min_m` 对齐仍待下一次仿真日志验收。
+
+<a id="chg-0015"></a>
+### CHG-0015 前向 witness 阻塞检查与局部目标顺序修复
+
+- 代码修改：`current_route_blocked` 不再检查完整 `last_witness_path_`，而是先截取车辆当前位置之后的 forward witness 后缀；update 日志新增 `route_probe_points`。
+- 代码修改：删除发布阶段对已按拓扑顺序展开 witness 的第二次全局最近线段投影，避免回弯或平行走廊使 local goal 跳回旧段。local goal 仍沿 witness 弧长前视，未改变 A* 代价和语义风险规则。
+- 预期行为：已通过的旧前缀发生地图变化时，不应再使前方可执行路线整体 `route_blocked`；局部目标应保持当前 witness 的前向顺序。
+- Release 编译：通过。
+- 自动化回归：`colcon test --packages-select scalenav_graph_ros2` 通过；`colcon test-result --verbose` 汇总 `76 tests, 0 errors, 0 failures, 0 skipped`。
+- 测试范围：未修改 `FUNCTION_TEST_CASES.md` 或现有测试源码；本次尚未执行真实仿真复测，因此左右廊切换次数、`route_probe_points` 收缩和 local goal 后向指向仍待日志验收。
+
 ### CHG-0014 路径本身无进展的 witness 拒绝
 
 - 根因复核：`19:45:00` 会话的 `RHC_DISPLAY / incumbent=RECOVERED / horizon_ready=1` 组合只证明旧 witness 几何上可复用；`path_99` 起点附近的回环/回退没有被现有连续性检查识别，导致 local goal 在约 `y=14..16 m` 局部区域反复更新。更直接的漏洞是旧代码在 `accepted_witness_usable && route_has_execution_horizon` 时可直接 `found=1`，本帧 `path_nodes` 为空或 odom 无连通边也会继续发布 `last_witness_path_`。

@@ -218,6 +218,9 @@ public:
   unordered_map<TopoNode::Ptr, uint8_t> unreachable_nbrs_;
   unordered_map<TopoNode::Ptr, vector<Eigen::Vector3f>> paths_;
   unordered_map<TopoNode::Ptr, float> weight_;
+  // Minimum obstacle clearance along the edge witness, computed when the
+  // witness is built so route search does not query the live KD-tree.
+  unordered_map<TopoNode::Ptr, float> edge_clearance_;
 };
 
 inline bool semanticNodeActiveForPlanning(
@@ -572,4 +575,5 @@ private:
   float edgeClearancePenalty(const TopoNode::Ptr &from,
                              const TopoNode::Ptr &to,
                              float edge_length) const;
+  float witnessMinimumClearance(const vector<Eigen::Vector3f> &path) const;
 };

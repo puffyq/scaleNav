@@ -418,16 +418,17 @@ The factor $L_{ij}$ makes exposure accumulate with travel distance.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{pics/semantic_risk_field_paper.pdf}
-\caption{Image-space semantic evidence and geometry-first route selection.
-(a) The PEARL heatmap is max-pooled into a $5\!\times\!3$ patch grid and each
-patch is projected along its camera ray onto a fixed optical-$Z$ plane at
-$30\,\mathrm{m}$ without querying measured depth; association and merging make
-the projected evidence persistent. (b) Collision raycasting and Bubble A*
-reject invalid graph connections and provide executable witnesses. Rolling A*
-ranks the valid witnesses, the route gate selects the
-\texttt{frontier\_goal}, and the \texttt{local\_goal} is interpolated on the
-accepted witness. Semantics changes route preference, never collision
-validity.}
+\caption{YOPO-style 2-D-to-3-D visualization from one synchronized Map2 frame.
+(a) The actual RGB frame and PEARL response form the deployed $5\!\times\!3$
+image grid. Orange rays reproduce max pooling and the fixed optical-$Z=30\,\mathrm{m}$
+projection for the seven active cells whose measured depth is clipped at
+$20\,\mathrm{m}$. (b) In the same vehicle frame, graph nodes retain their
+persistent semantic state and raycast-valid witnesses are colored by semantic
+exposure; the selected witness connects the vehicle through
+\texttt{local\_goal} to \texttt{frontier\_goal}, with the true
+\texttt{mission\_goal} direction indicated. All streams agree within
+$11.5\,\mathrm{ms}$. Semantics ranks geometrically valid witnesses and never
+changes collision validity.}
 \label{fig:risk_field}
 \end{figure*}
 

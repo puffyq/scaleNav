@@ -4,7 +4,7 @@
 |---|---|
 | 批次号 | `001` |
 | 主题 | Route-Conditioned YOPO |
-| 状态 | 训练闭环已实现；真实场景 pilot 数据待采集与人工验收 |
+| 状态 | 训练闭环及真值 pilot 生成器已实现；生产日志数据可选补充 |
 
 ## 0. 实施状态（2026-08-26）
 
@@ -19,11 +19,14 @@
 - `L_path_corridor + L_path_progress + L_path_tangent`，并纳入 detached score label。
 - 场景级 train/validation 切分、selected/oracle/regret/top-1 指标和版本化 checkpoint。
 - 合成双场景的 ESDF、前向、反向传播和 checkpoint 端到端 smoke 训练。
+- YOPO 风格随机场景真值生成器：Map2 大方块、森林混合、解析深度和点云真值。
+- 真值膨胀栅格 A*、安全平滑、连续 clearance Bubble 和每帧强制绕障样本。
+- 100 条路线预览、detour/clearance/ESDF 内存统计及一条命令生成 2 x 500 pilot。
 
-生产路径搜索仍由现有 EPIC 唯一负责；训练目录中的 labeler 消费其 accepted witness
-JSONL，不实现第二套 A*。尚未完成的是两真实场景各 500 帧 pilot 采集、至少 100 条路线
-人工可视化验收、实际场景 ESDF 内存测量，以及随测量结果决定是否启用 tile。这些是
-真实数据实验门槛，不影响当前代码闭环和合成数据训练测试。
+生产部署路径搜索仍由现有 EPIC 唯一负责；真实日志 labeler 只消费 accepted witness
+JSONL。离线随机场景允许直接使用完整场景真值 A* 生成 guidance route，因为它是训练
+标签生成器而不是另一套部署规划器。生成报告会输出每场景 ESDF 内存估算，并生成前
+100 条路线图片供人工验收；是否通过人工验收仍需由实验人员签字确认。
 
 ## 1. 目标
 
@@ -90,10 +93,12 @@ safe_radius = max(0, distance_to_obstacle - robot_radius - safety_margin)
 - 有序 `[center, safe_radius]` 同时保留路线方向、转弯位置和允许偏离宽度。
 - 路径上的 TopoNode 代表 Bubble 仍应保存，用于验证 corridor bubbles 与拓扑路线一致。
 
-### 3.2 不重新实现另一套 A*
+### 3.2 区分真值训练搜索和生产路线搜索
 
-离线路线标注器必须复用当前 EPIC 的 TopoGraph、Bubble A* 和 witness 拼接逻辑。
-训练标签和在线部署若使用两套搜索逻辑，会产生不可控的路径分布偏差。
+真实日志路线标注器必须复用当前 EPIC 的 accepted witness，不能重新实现另一套近似
+EPIC。YOPO 风格随机场景没有在线 EPIC 状态，允许直接在完整真值占据栅格上运行 A*，
+其用途是提供明确的左右绕和大障碍物绕行条件。两类来源都必须经过相同的
+`RouteQualityGate` 并落成相同的 `routes.npz`，训练模型不区分其存储契约。
 
 ### 3.3 Witness 同时进入模型输入和 loss
 

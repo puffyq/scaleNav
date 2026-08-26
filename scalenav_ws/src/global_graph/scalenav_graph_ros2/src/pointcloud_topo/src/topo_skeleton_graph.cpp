@@ -206,6 +206,11 @@ void TopoGraph::copyPersistentNodesFrom(const TopoGraph &source) {
         std::reverse(reverse_path.begin(), reverse_path.end());
         to->paths_[from] = reverse_path;
       }
+      const auto clearance_it = source_node->edge_clearance_.find(source_neighbor);
+      if (clearance_it != source_node->edge_clearance_.end()) {
+        from->edge_clearance_[to] = clearance_it->second;
+        to->edge_clearance_[from] = clearance_it->second;
+      }
       const auto weight_it = source_node->weight_.find(source_neighbor);
       if (weight_it != source_node->weight_.end()) {
         from->weight_[to] = weight_it->second;
@@ -227,18 +232,56 @@ float TopoGraph::edgeClearancePenalty(const TopoNode::Ptr &from,
       clearance_target_m_ <= 0.0) {
     return 0.0F;
   }
-  // Vertex Bubble radii are the free-space clearance at the endpoints and
-  // are already maintained by skeleton updates. Live KD-tree queries here
-  // contend with map ingestion and can stall A* for hundreds of milliseconds.
-  const float minimum_clearance = std::min(from->bubble_radius_, to->bubble_radius_);
-  if (!std::isfinite(minimum_clearance) || minimum_clearance <= 1e-3F ||
-      minimum_clearance >= clearance_target_m_) {
+  float minimum_clearance = std::numeric_limits<float>::infinity();
+  if (std::isfinite(from->bubble_radius_) && from->bubble_radius_ > 1e-3F)
+    minimum_clearance = std::min(minimum_clearance, from->bubble_radius_);
+  if (std::isfinite(to->bubble_radius_) && to->bubble_radius_ > 1e-3F)
+    minimum_clearance = std::min(minimum_clearance, to->bubble_radius_);
+  const auto clearance_it = from->edge_clearance_.find(to);
+  if (clearance_it != from->edge_clearance_.end() &&
+      std::isfinite(clearance_it->second) && clearance_it->second >= 0.0F) {
+    minimum_clearance = std::min(minimum_clearance, clearance_it->second);
+  }
+  if (!std::isfinite(minimum_clearance) || minimum_clearance >= clearance_target_m_) {
     return 0.0F;
   }
+  const auto weight_it = from->weight_.find(to);
+  if (weight_it != from->weight_.end() && std::isfinite(weight_it->second))
+    edge_length = std::max(0.0F, weight_it->second);
   const float deficit = static_cast<float>(
     (clearance_target_m_ - minimum_clearance) / clearance_target_m_);
   return static_cast<float>(clearance_cost_weight_) * edge_length *
     deficit * deficit;
+}
+
+float TopoGraph::witnessMinimumClearance(
+    const vector<Eigen::Vector3f> &path) const {
+  if (path.empty() || !parallel_bubble_astar_)
+    return std::numeric_limits<float>::infinity();
+  vector<float> clearances;
+  clearances.reserve(path.size());
+  float minimum = std::numeric_limits<float>::infinity();
+  for (const auto &point : path) {
+    const float clearance = point.allFinite() ?
+      static_cast<float>(parallel_bubble_astar_->graphClearance(point)) :
+      std::numeric_limits<float>::infinity();
+    clearances.push_back(clearance);
+    if (std::isfinite(clearance)) minimum = std::min(minimum, clearance);
+  }
+  // Distance-to-obstacle is 1-Lipschitz. This is a conservative lower bound
+  // for the clearance between sparse witness samples, including the neck
+  // where two safe endpoint bubbles only just overlap.
+  for (std::size_t i = 1; i < path.size(); ++i) {
+    const float left = clearances[i - 1];
+    const float right = clearances[i];
+    const float length = (path[i] - path[i - 1]).norm();
+    if (!std::isfinite(left) || !std::isfinite(right) || !std::isfinite(length))
+      continue;
+    const float segment_clearance = std::abs(left - right) >= length ?
+      std::min(left, right) : 0.5F * (left + right - length);
+    minimum = std::min(minimum, std::max(0.0F, segment_clearance));
+  }
+  return minimum;
 }
 
 std::vector<TopoNode::Ptr> TopoGraph::semanticNodes(
@@ -1274,12 +1317,14 @@ void TopoGraph::removeNodes(vector<TopoNode::Ptr> &nodes) {
       nbr->neighbors_.erase(node);
       nbr->paths_.erase(node);
       nbr->weight_.erase(node);
+      nbr->edge_clearance_.erase(node);
       nbr->unreachable_nbrs_.erase(node);
     }
     node->unreachable_nbrs_.clear();
     node->neighbors_.clear();
     node->weight_.clear();
     node->paths_.clear();
+    node->edge_clearance_.clear();
   }
 }
 
@@ -1487,9 +1532,12 @@ void TopoGraph::updateRemainedConnections(vector<TopoNode::Ptr> &nodes) {
           elem.existing && already_neighbours && !elem.soft_retry &&
           (node1->paths_.count(node2) == 0 || node1->paths_[node2] != elem.path);
 
+      const float edge_clearance = witnessMinimumClearance(elem.path);
       node1->paths_[node2] = elem.path;
       std::reverse(elem.path.begin(), elem.path.end());
       node2->paths_[node1] = elem.path;
+      node1->edge_clearance_[node2] = edge_clearance;
+      node2->edge_clearance_[node1] = edge_clearance;
       double cost;
       parallel_bubble_astar_->calculatePathCost(elem.path, cost);
       if (elem.soft_retry) {
@@ -1514,6 +1562,8 @@ void TopoGraph::updateRemainedConnections(vector<TopoNode::Ptr> &nodes) {
         node2->weight_.erase(node1);
         node1->paths_.erase(node2);
         node2->paths_.erase(node1);
+        node1->edge_clearance_.erase(node2);
+        node2->edge_clearance_.erase(node1);
         ++existing_removed;
       }
       clearEdgeState(node1, node2);
@@ -1709,9 +1759,12 @@ void TopoGraph::insertNodes(vector<TopoNode::Ptr> &nodes, bool only_raycast) {
     node1->neighbors_.insert(node2);
     node2->neighbors_.insert(node1);
     path_vec[i].pop_back();
+    const float edge_clearance = witnessMinimumClearance(path_vec[i]);
     node1->paths_[node2] = path_vec[i];
     std::reverse(path_vec[i].begin(), path_vec[i].end());
     node2->paths_[node1] = path_vec[i];
+    node1->edge_clearance_[node2] = edge_clearance;
+    node2->edge_clearance_[node1] = edge_clearance;
     double cost;
     parallel_bubble_astar_->calculatePathCost(path_vec[i], cost);
     node1->weight_[node2] = cost;
@@ -2267,11 +2320,13 @@ void TopoGraph::updateOdomNode(Eigen::Vector3f &odom_pos, float &yaw) {
     nei->neighbors_.erase(odom_node_);
     nei->weight_.erase(odom_node_);
     nei->paths_.erase(odom_node_);
+    nei->edge_clearance_.erase(odom_node_);
     nei->unreachable_nbrs_.erase(odom_node_);
   }
   odom_node_->neighbors_.clear();
   odom_node_->weight_.clear();
   odom_node_->paths_.clear();
+  odom_node_->edge_clearance_.clear();
   odom_node_->unreachable_nbrs_.clear();
   Eigen::Vector3i idx;
   getIndex(odom_pos, idx);
@@ -2329,6 +2384,8 @@ void TopoGraph::updateOdomNode(Eigen::Vector3f &odom_pos, float &yaw) {
   for (auto &edge : edge2insert) {
     odom_node_->neighbors_.insert(edge.first.second);
     odom_node_->paths_.insert({edge.first.second, edge.second});
+    const float edge_clearance = witnessMinimumClearance(edge.second);
+    odom_node_->edge_clearance_[edge.first.second] = edge_clearance;
     double cost;
     // parallel_bubble_astar_->calculatePathCost(edge.second, cost);
     // odom_node_->weight_[edge.first.second] = cost;
@@ -2337,6 +2394,7 @@ void TopoGraph::updateOdomNode(Eigen::Vector3f &odom_pos, float &yaw) {
     auto reverse_path = edge.second;
     std::reverse(reverse_path.begin(), reverse_path.end());
     edge.first.second->paths_[odom_node_] = reverse_path;
+    edge.first.second->edge_clearance_[odom_node_] = edge_clearance;
     edge.first.second->weight_[odom_node_] = 0;
     // auto nbr = edge.first.second;
     // nbr->neighbors_.insert(odom_node_);
@@ -2434,9 +2492,11 @@ size_t TopoGraph::deduplicateNearbyNodes(float tolerance_m) {
         if (!neighbor || duplicate_set.count(neighbor)) continue;
         const auto path_it = duplicate->paths_.find(neighbor);
         const auto weight_it = duplicate->weight_.find(neighbor);
+        const auto clearance_it = duplicate->edge_clearance_.find(neighbor);
         neighbor->neighbors_.erase(duplicate);
         neighbor->paths_.erase(duplicate);
         neighbor->weight_.erase(duplicate);
+        neighbor->edge_clearance_.erase(duplicate);
         canonical->neighbors_.insert(neighbor);
         neighbor->neighbors_.insert(canonical);
         if (canonical->paths_.find(neighbor) == canonical->paths_.end() &&
@@ -2445,6 +2505,11 @@ size_t TopoGraph::deduplicateNearbyNodes(float tolerance_m) {
           auto reverse_path = path_it->second;
           std::reverse(reverse_path.begin(), reverse_path.end());
           neighbor->paths_[canonical] = reverse_path;
+        }
+        if (canonical->edge_clearance_.find(neighbor) == canonical->edge_clearance_.end() &&
+            clearance_it != duplicate->edge_clearance_.end()) {
+          canonical->edge_clearance_[neighbor] = clearance_it->second;
+          neighbor->edge_clearance_[canonical] = clearance_it->second;
         }
         if (canonical->weight_.find(neighbor) == canonical->weight_.end() &&
             weight_it != duplicate->weight_.end()) {
@@ -2461,6 +2526,7 @@ size_t TopoGraph::deduplicateNearbyNodes(float tolerance_m) {
       duplicate->neighbors_.clear();
       duplicate->paths_.clear();
       duplicate->weight_.clear();
+      duplicate->edge_clearance_.clear();
       duplicate->unreachable_nbrs_.clear();
       ++merged;
     }
@@ -2494,11 +2560,13 @@ size_t TopoGraph::normalizeConnectivity() {
       node->neighbors_.erase(neighbor);
       node->paths_.erase(neighbor);
       node->weight_.erase(neighbor);
+      node->edge_clearance_.erase(neighbor);
       node->unreachable_nbrs_.erase(neighbor);
       if (neighbor) {
         neighbor->neighbors_.erase(node);
         neighbor->paths_.erase(node);
         neighbor->weight_.erase(node);
+        neighbor->edge_clearance_.erase(node);
         neighbor->unreachable_nbrs_.erase(node);
       }
       ++removed;
@@ -2522,12 +2590,14 @@ void TopoGraph::removeNode(TopoNode::Ptr &node) {
     nbr->neighbors_.erase(node);
     nbr->paths_.erase(node);
     nbr->weight_.erase(node);
+    nbr->edge_clearance_.erase(node);
     nbr->unreachable_nbrs_.erase(node);
   }
   node->unreachable_nbrs_.clear();
   node->neighbors_.clear();
   node->weight_.clear();
   node->paths_.clear();
+  node->edge_clearance_.clear();
 }
 
 void TopoGraph::insertNode(TopoNode::Ptr &new_node, vector<TopoNode::Ptr> &nbr_nodes, vector<vector<Eigen::Vector3f>> &paths) {
@@ -2542,9 +2612,12 @@ void TopoGraph::insertNode(TopoNode::Ptr &new_node, vector<TopoNode::Ptr> &nbr_n
     new_node->neighbors_.insert(nbr_nodes[i]);
     nbr_nodes[i]->neighbors_.insert(new_node);
     auto path = paths[i];
+    const float edge_clearance = witnessMinimumClearance(path);
     new_node->paths_.insert({nbr_nodes[i], path});
     std::reverse(path.begin(), path.end());
     nbr_nodes[i]->paths_.insert({new_node, path});
+    new_node->edge_clearance_[nbr_nodes[i]] = edge_clearance;
+    nbr_nodes[i]->edge_clearance_[new_node] = edge_clearance;
     double cost;
     parallel_bubble_astar_->calculatePathCost(path, cost);
     new_node->weight_[nbr_nodes[i]] = cost;
