@@ -1,79 +1,148 @@
 # ScaleNav Route-Conditioned YOPO Training
 
-This directory is the isolated workspace for batch `001` in
-`scalenav_ws/docs/TODO_001.md`. It contains offline data generation and model
-training code only. Online ROS nodes, deployment inference, TensorRT export,
-and evaluation entry points are intentionally excluded.
+This directory contains the offline data and training implementation for batch
+`001` in `scalenav_ws/docs/TODO_001.md`. Deployment inference, online ROS
+control, TensorRT export, and evaluation nodes are intentionally excluded.
+
+## Implemented Pipeline
+
+```text
+AirSim RGB-D + tree.ply (world_enu/body_flu)
+  + production EPIC accepted frontier/witness/topology path
+  -> RouteQualityGate + continuous clearance audit
+  -> Scene_N/routes.npz
+  -> fixed K witness bubbles for model conditioning
+  + dense witness route for differentiable loss
+  -> route-conditioned YOPO
+  -> safety + smoothness + acceleration + frontier
+     + corridor + progress + tangent costs
+  -> detached total cost as primitive score label
+```
+
+The trainer does not regress the witness polyline as a time-parameterized
+expert trajectory. Witness geometry constrains the trajectory through route
+costs and also conditions primitive scoring.
 
 ## Layout
 
 ```text
-train_scalenav/
-  config/                 YOPO trajectory and training configuration
-  data/                   ScaleNav AirSim RGB-D snapshot generation/validation
-  dataset/                local generated datasets (contents are ignored by Git)
-  loss/                   differentiable trajectory costs
-  policy/                 Dataset, primitive transforms, network, and trainer
-  route_generation/       topology sources needed by the offline route labeler
-  reference/              upstream YOPO-Simple data-generator source snapshot
-  tests/                  tests owned by this training workspace
-  train_yopo.py           baseline training entry point
+config/                 trajectory, route, and loss configuration
+data/coordinates.py     NED/FRD to ENU/FLU conversion
+data/snapshot_dataset.py
+                        safe AirSim RGB-D collection
+data/route_contract.py  routes.npz, quality gate, corridor sampling
+data/epic_route_labeler.py
+                        accepted EPIC output to routes.npz
+data/synthetic_dataset.py
+                        deterministic end-to-end smoke data
+loss/route_loss.py      corridor, progress, and tangent loss
+policy/yopo_dataset.py  route-conditioned Dataset
+policy/yopo_network.py  primitive-frame route conditioning
+policy/yopo_trainer.py  training, metrics, checkpointing
+train_yopo.py           training CLI
 ```
 
-## Source Boundaries
+`reference/yopo_simple_generator/` preserves the original YOPO-Simple CUDA
+data generator. `route_generation/topology_core/` records the exact production
+TopoGraph/Bubble A* source boundary. The Python labeler consumes accepted EPIC
+witness output and never implements a second A*.
 
-The active Python baseline was copied from:
+## Data Contract
+
+Each scene contains:
 
 ```text
-scalenav_ws/src/scalenav/{config,data,loss,policy}
-scalenav_ws/src/scalenav/train_yopo.py
+Scene_0000/
+  data.toml
+  tree.ply
+  routes.npz
+  Textures/
+    depth_000000.exr
+    rgb_000000.png
 ```
 
-The original YOPO-Simple CUDA data generator is retained only as a reference:
+`data.toml`, `tree.ply`, frontier goals, witness points, and topology centers
+all use `world_enu`; body-relative model inputs use `body_flu`. The source
+AirSim NED/FRD pose is retained in each frame record for auditing.
 
-```text
-/mnt/code/lab/yopo/YOPO-Simple/Simulator/src
+Production EPIC accepted routes are passed to the labeler as JSONL. Each line
+has this shape:
+
+```json
+{"frame_index":0,"mission_goal_world":[0,20,1.6],"frontier_goal_world":[0,10,1.6],"path_points_world":[[0,0,1.6],[0,10,1.6]],"topo_centers_world":[],"topo_bubble_radius_m":[],"topo_persistent_id":[],"found":true,"blocked":false,"committed":true,"route_seed":0}
 ```
 
-The route-generation snapshot contains only TopoGraph, Bubble A*, and iKD-tree
-sources from:
-
-```text
-scalenav_ws/src/global_graph/scalenav_graph_ros2
-```
-
-It does not contain `epic_graph_node.cpp`. Before implementing the labeler,
-the production package must expose these sources as the shared
-`scalenav_topology` CMake target described in `TODO_001.md`; the labeler must
-link that target rather than evolve an independent A* implementation here.
-
-## Current Status
-
-This is a source consolidation baseline, not yet the route-conditioned model.
-In particular, `policy/yopo_dataset.py` still reads the legacy YOPO image and
-`pose-N.csv` format and samples a random goal. It does not yet read
-`Scene_N/data.toml + routes.npz`, frontier goals, dense witness paths, or
-witness corridor bubbles. The route losses are also not implemented yet.
-
-The implementation order remains:
-
-1. Coordinate and `routes.npz` contracts.
-2. Safe AirSim pose sampling and route labeling.
-3. Pilot data validation and visualization.
-4. Route-conditioned Dataset and network.
-5. Corridor, progress, tangent, and frontier losses.
-6. Staged training.
+The path must be the production EPIC accepted edge-witness polyline. Failed
+searches should also be emitted with `found=false` or `blocked=true`; they are
+stored with stable quality flags but excluded from training.
 
 ## Commands
 
-Run commands from this directory so the existing top-level imports resolve:
+Install dependencies and run from this directory:
 
 ```bash
 cd /mnt/code/lab/yopo/OpenSeek/train_scalenav
-python -m data.snapshot_dataset --help
-python -m data.validate_snapshot_dataset --help
-python train_yopo.py --help
+python -m pip install -r requirements.txt
 ```
 
-Training data is configured at `dataset/`, and checkpoints/TensorBoard logs are
-written under `saved/`.
+Generate deterministic smoke data:
+
+```bash
+python -m data.synthetic_dataset \
+  --output /tmp/scalenav_route_smoke --scenes 2 --frames 4 --overwrite
+```
+
+Collect an AirSim scene with obstacle-safe pose rejection:
+
+```bash
+python -m data.snapshot_dataset \
+  --output dataset \
+  --airsim-root /path/to/Colosseum/PythonClient \
+  --obstacle-ply /path/to/tree_ned.ply \
+  --scene-id 0000 --count 500 --seed 0 --safe-dist 0.6
+```
+
+Convert accepted EPIC output and validate the scene:
+
+```bash
+python -m data.epic_route_labeler \
+  --scene dataset/Scene_0000 \
+  --epic-jsonl /path/to/accepted_routes.jsonl
+
+python -m data.validate_snapshot_dataset dataset --require-routes
+```
+
+Run one end-to-end smoke update:
+
+```bash
+python train_yopo.py \
+  --data /tmp/scalenav_route_smoke \
+  --output /tmp/scalenav_train_runs \
+  --epochs 1 --batch-size 1 --workers 0 \
+  --max-train-batches 1 --max-val-batches 1
+```
+
+Run normal training:
+
+```bash
+python train_yopo.py \
+  --data dataset --output saved \
+  --epochs 50 --batch-size 16 --workers 4 \
+  --freeze-backbone-epochs 3 --save-interval 5
+```
+
+Checkpoints contain the model and optimizer states, route dataset version,
+bubble count, anchor distances, and all loss weights. Selection uses validation
+`selected_total_cost`; TensorBoard also records oracle cost, regret, top-1, and
+every individual trajectory cost.
+
+## Verification
+
+```bash
+python -m pytest -q tests
+```
+
+The suite covers coordinate conversion, safe pose sampling, route NPZ
+round-trips, quality rejection, conservative bubble sampling, route loss
+gradients/dropout, scene-level splitting, path-conditioned output changes, and
+a complete ESDF-backed optimizer update with checkpoint serialization.

@@ -44,10 +44,11 @@ for Vision-Based Aerial Navigation
   of this graph slice. The persistent graph is shown in a $\pm2$~m
   navigation-height slice. The
   graph/path state is within $90$~ms of $t^*$.
-  $mission\_goal$, $frontier\_goal$, and $subgoal$ denote the task,
+  $mission\_goal$, $frontier\_goal$, and $local\_goal$ denote the task,
   route, and execution layers. Semantics changes route preference but never
   geometric validity.}
   \end{center}%
+  \setcounter{figure}{1}%
 }
 
 \begin{document}
@@ -167,10 +168,15 @@ Section~\ref{sec:extensions} defines both interfaces.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.98\textwidth]{pics/system_architecture_paper.pdf}
-\caption{ScaleNav architecture as implemented. RGB semantics affects only the
-slow graph layer. The local policy receives no semantic or corridor image.
-The geometry and semantic streams meet in graph cost, not in collision
-validity.}
+\caption{ScaleNav system architecture. Depth builds Bubble topology and
+collision-checked edge witnesses. RGB and the text query produce patch scores
+that are projected at fixed optical depth into persistent graph-node semantic
+state; later Bubble overlap promotes an \texttt{Unknown} semantic node to
+\texttt{Verified}. Continuous witness risk enters rolling A* and the route
+gate, which maintain \texttt{frontier\_goal} and the accepted witness. A
+10-m lookahead on that witness produces \texttt{local\_goal}, published on
+\texttt{/epic/local\_goal} for the unchanged YOPO. Semantics changes route
+cost but cannot create or validate an edge.}
 \label{fig:architecture}
 \end{figure*}
 
@@ -409,14 +415,21 @@ The semantic edge penalty is the barrier
 It is nearly linear at low risk and grows sharply near unit risk.
 The factor $L_{ij}$ makes exposure accumulate with travel distance.
 
-\begin{figure}[t]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{pics/semantic_risk_field_paper.pdf}
-\caption{A far-field semantic node creates a smooth risk field on nearby
-edge witnesses. It can penalize the upper branch before the route reaches
-the node. The node is not inserted into collision geometry as an obstacle.}
+\includegraphics[width=\textwidth]{pics/semantic_risk_field_paper.pdf}
+\caption{Image-space semantic evidence and geometry-first route selection.
+(a) The PEARL heatmap is max-pooled into a $5\!\times\!3$ patch grid and each
+patch is projected along its camera ray onto a fixed optical-$Z$ plane at
+$30\,\mathrm{m}$ without querying measured depth; association and merging make
+the projected evidence persistent. (b) Collision raycasting and Bubble A*
+reject invalid graph connections and provide executable witnesses. Rolling A*
+ranks the valid witnesses, the route gate selects the
+\texttt{frontier\_goal}, and the \texttt{local\_goal} is interpolated on the
+accepted witness. Semantics changes route preference, never collision
+validity.}
 \label{fig:risk_field}
-\end{figure}
+\end{figure*}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{RISK-AWARE ROLLING SEARCH}

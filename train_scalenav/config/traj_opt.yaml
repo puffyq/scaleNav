@@ -11,6 +11,9 @@ wg: 0.15   # guidance     (approaching the goal)
 ws: 10.0   # smoothness   (smaller jerk)
 wa: 1.0    # acceleration (smaller acceleration)
 wc: 1.0    # collision    (distance to obstacle)
+wp: 2.0    # witness corridor violation
+wprogress: 0.8
+wtangent: 0.25
 
 # dataset: set image_size = primitive_num × downsampling_factor (×32 for ResNet-18) in each axis
 dataset_path: "dataset"
@@ -18,6 +21,23 @@ dataset_path: "dataset"
 # vertical_num=3 rows and horizon_num=5 columns of trajectory primitives.
 image_height: 96
 image_width: 160
+
+# route-conditioned input and dense route supervision
+route_dataset_version: 1
+route_bubble_count: 12
+route_anchor_distances_m: [1, 2, 3, 4, 5, 6, 8, 10, 14, 18, 24, 30]
+route_clearance_clip_m: 3.0
+route_corridor_width_cap_m: 2.0
+dense_route_points: 128
+dense_route_step_m: 0.25
+route_dropout_probability: 0.1
+robot_radius_m: 0.3
+safety_margin_m: 0.2
+route_start_tolerance_m: 1.0
+route_terminal_tolerance_m: 1.5
+route_min_execution_length_m: 2.0
+route_max_curvature_rad_m: 1.6
+route_max_heading_deg: 51.0
 
 # trajectory and primitive param (Note: traj_time = 2 * radio / vel_max) (can be visualized in rviz)
 horizon_num: 5

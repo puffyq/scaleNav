@@ -2,6 +2,69 @@
 
 本文件按修改批次记录，不按日期聚合。每次代码更新新增一个独立变更编号；后续补充验证结果时更新对应记录，不把不同修改合并到同一天的章节中。
 
+<a id="chg-0014"></a>
+## CHG-0014 拒绝局部无进展的持久化 witness
+
+- 记录时间：2026-08-26
+- 状态：代码、Release 编译和包级自动化测试完成；真实仿真复测待执行
+- 测试记录：[TEST_REPORT_2026-08-26 / CHG-0014](TEST_REPORT_2026-08-26.md#chg-0014)
+
+问题与根因：
+
+- 最新 `19:45:00` 会话的 `path_99` 在起点附近包含回环/回退段。`canReuseForwardRoute()` 只检查车辆到路径的横向距离和剩余弧长，因此几何连续的坏 witness 被反复恢复。
+- `horizon_ready=1` 只表示路径还有弧长，不表示前视点在任务方向上有有效进展；这会让 RHC 持续复用局部回环，而不触发候选路线重搜。
+- 更直接的契约漏洞是：`accepted_witness_usable && route_has_execution_horizon` 时，旧代码允许 `found=1`，即使本帧 `path_nodes` 为空或 odom 拓扑节点没有连通边。此时 `publish()` 仍可用 `last_witness_path_` 独立驱动 local goal，形成“无节点绑定的几何折线”。
+
+修改内容：
+
+- 删除“仅凭 remembered witness 置 `found=1`”的分支；现在必须由当前图搜索恢复至少两个拓扑节点，且 odom 节点存在连通边，才允许 `found=1`。A* 返回空/单节点结果也会被拒绝并记录。
+- 在发布前增加同一契约的统一最终检查，防止 candidate 分支或后续状态组合绕过节点数/odom 连通性要求。
+
+设计边界：
+
+- 本批次不新增路径形状、单行/多行、FOV 或语义风险阈值；几何 witness 仍由当前图搜索和既有碰撞检查负责。
+
+验证结果：
+
+- `scalenav_graph_ros2` Release 编译通过。
+- `colcon test --packages-select scalenav_graph_ros2` 通过：`6/6` CTest，`76 tests, 0 errors, 0 failures, 0 skipped`（重建崩溃测试按条件跳过）。
+- 未修改 `FUNCTION_TEST_CASES.md` 或现有测试源码。
+
+<a id="chg-0013"></a>
+## CHG-0013 虚拟语义按当前帧代际参与规划
+
+- 记录时间：2026-08-26
+- 状态：代码、自动化测试和单次真实长航线复测完成；完整往返因 AirSim 深度 RPC 断流未完成
+- 测试记录：[TEST_REPORT_2026-08-26 / CHG-0013](TEST_REPORT_2026-08-26.md#chg-0013)
+
+问题与根因：
+
+- 固定 30 m 虚拟语义点会持久化在 graph/memory 中，但旧实现把当前帧和历史虚拟点混入同一局部规划池。18:57 会话一帧只有 `15` 个新点，A* 却加载 `435` 个局部语义点；旧右侧高风险可通过 max-risk 持续压制右路。
+- 没有新增 `semantic_virtual_planning_max_age_ms=1500` 一类独立滑动时间阈值。该设计会使路线选择受语义频率、调度延迟和机器负载影响，同一语义序列可能得到不同工作集。
+
+修改内容：
+
+- 未验证的 `Unknown` 虚拟语义点仅在其 `semantic_stamp_ns` 等于“当前成功应用语义帧”的 stamp 时参与 A*、incumbent 恢复、路线风险、候选比较和发布路径语义统计；新帧应用后，上一代虚拟点立即退出计算。
+- 历史虚拟点仍保留在持久化 graph/memory 中，不做删除；真实几何确认后的 `Verified` 语义节点不受代际过滤，可继续作为长期证据参与规划。
+- 原有 `semantic_max_age_ms` 仍只负责拒绝输入陈旧帧，并在语义流整体超龄时禁用全部未验证虚拟点；它不是历史虚拟点逐点保留 `1500 ms` 的规划窗口。
+- 日志新增 `local_inactive_virtual_semantic_nodes` 和 `astar_inactive_virtual_semantic_nodes`，与 `persistent_semantic_records`、全局/局部节点数共同区分持久化存储和实际规划工作集。
+
+验证结果：
+
+- `scalenav_graph_ros2` Release 编译通过；未修改仓库测试源码。
+- 临时 smoke test 覆盖当前代虚拟点保留、上一代退出、`Verified` 历史点保留、语义断流时虚拟点退出和默认 API 兼容，`5/5` 条件通过。
+- 最终工作树状态下全包 CTest `6/6` 通过；限定本包结果汇总为 `68 tests, 0 errors, 0 failures, 0 skipped`；`epic_online_simulation` 为 `4/4`。
+- 19:23 会话成功到达 `(0,140)`，去程在 `y≈30 m` 后主要选择右侧 `x≈7.75..14.35 m`。在同一静态图和同一代价快照下，反向右侧路线应作为回程的优先候选；但回程没有直接复用或比较它，首要原因是 `onGoal()` 在任务目标翻转时主动清空 `last_witness_path_`、`last_path_nodes_`、route terminal 和 corridor hint。设计上新 mission goal 会启动一条新路线，虽然 graph/edges/semantic memory 复用。于是回程第一轮只能在复用的全局拓扑上重新搜索，先得到左侧 terminal；左廊在 `y≈94 m` 被判 blocked 后，规划器才改选右侧 terminal `(11.05,67.15)`，不再持续锁定左侧 terminal。
+- 这不能简单解释为“左侧节点代价确实更低”：当前日志只输出胜出路线，且实际代价是有向 edge witness 几何、当前语义帧风险、净空和 progress/direction/FOV/smoothness terminal loss 的组合，不是单个节点静态代价。需要把去程路线反向作为候选重新计算，并同时打印其各项 loss 与新搜索候选，才能区分“旧路线未进入比较”与“当前动态代价真的让左路更优”。
+- 末段持久化记录为 `1105`、全局虚拟语义节点为 `1058`，局部旧虚拟点跳过 `459`，A* 旧虚拟点跳过 `498`，实际 A* 语义池仅 `34` 个。末段右切 witness 为 `22` 点，结构化日志的 `path_min=0.723 m`。
+- 该会话没有完成回程：结构化日志的最后一帧 depth/pointcloud stamp 为 `1787743464.870896`。控制器使用 `0.5 s` depth watchdog，约在 `1787743465.371` 起停止控制输出；错误由独立的 `2 s` 状态定时器在 `1787743465.918` 打印，随后 renderer 报 `AirSim render RPC failed: timed out`。飞机停在 `(-4.63,93.82)` 是传感器失联触发的控制停机，不是右切路线搜索失败。
+
+后续：
+
+- 19:23 会话在断流前出现一次 `1261 ms` update，以及一次 `2292 ms` 后台更新（其中 `region_select=1884 ms`、`skeleton=304 ms`）。这些长尾与 RPC 断流时间接近，但日志只能证明相关性，不能证明其导致 AirSim RPC 超时；应分别增加系统负载和 renderer RPC 时延诊断。
+- 修复或隔离 AirSim RGB-D RPC 断流后，重新执行不中断的 `(0,0) -> (0,140) -> (0,0)`，并确认当前左侧高风险时仍稳定选择右侧路线。
+- witness 内部净空尚未纳入 terminal clearance loss，仍作为独立问题处理。
+
 <a id="chg-0012"></a>
 ## CHG-0012 local goal 严格沿 witness 弧长前视
 

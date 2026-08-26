@@ -4,7 +4,26 @@
 |---|---|
 | 批次号 | `001` |
 | 主题 | Route-Conditioned YOPO |
-| 状态 | 正式设计已采纳，待实施 |
+| 状态 | 训练闭环已实现；真实场景 pilot 数据待采集与人工验收 |
+
+## 0. 实施状态（2026-08-26）
+
+训练侧实现位于 `/mnt/code/lab/yopo/OpenSeek/train_scalenav`，目前已经具备：
+
+- AirSim NED/FRD 到训练契约 `world_enu + body_flu` 的位置、姿态和点云转换。
+- 基于 `tree.ply` KD-tree clearance 的安全位姿拒绝采样和采样统计。
+- 无 pickle 的版本化 `routes.npz` 读写、校验及失败路线 reason flags。
+- 对生产 EPIC accepted edge-witness 输出的连续 clearance 审计和 corridor Bubble 生成。
+- 固定 K 个保守 witness Bubble 模型输入，以及独立的稠密 witness loss 输入。
+- Route-Conditioned YOPO、primitive-frame route transform 和 route dropout。
+- `L_path_corridor + L_path_progress + L_path_tangent`，并纳入 detached score label。
+- 场景级 train/validation 切分、selected/oracle/regret/top-1 指标和版本化 checkpoint。
+- 合成双场景的 ESDF、前向、反向传播和 checkpoint 端到端 smoke 训练。
+
+生产路径搜索仍由现有 EPIC 唯一负责；训练目录中的 labeler 消费其 accepted witness
+JSONL，不实现第二套 A*。尚未完成的是两真实场景各 500 帧 pilot 采集、至少 100 条路线
+人工可视化验收、实际场景 ESDF 内存测量，以及随测量结果决定是否启用 tile。这些是
+真实数据实验门槛，不影响当前代码闭环和合成数据训练测试。
 
 ## 1. 目标
 

@@ -15,8 +15,17 @@ def main() -> None:
         action="store_true",
         help="require one finite semantic_pearl_*.npy heatmap for every frame",
     )
+    parser.add_argument(
+        "--require-routes",
+        action="store_true",
+        help="require and validate routes.npz for every scene",
+    )
     args = parser.parse_args()
-    report = validate_dataset(args.data, require_semantic=args.require_semantic)
+    report = validate_dataset(
+        args.data,
+        require_semantic=args.require_semantic,
+        require_routes=args.require_routes,
+    )
     print(json.dumps(report, indent=2, sort_keys=True))
 
 

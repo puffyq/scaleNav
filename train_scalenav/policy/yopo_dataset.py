@@ -1,238 +1,241 @@
-import os, sys
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Sequence
+
 import cv2
-import time
-import torch
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
-from scipy.spatial.transform import Rotation as R
-from sklearn.model_selection import train_test_split
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+import torch
+from scipy.spatial.transform import Rotation
+from torch.utils.data import Dataset
+
 from config.config import cfg
+from data.coordinates import world_to_body_flu
+from data.route_contract import (
+    RouteQualityFlag,
+    RouteTable,
+    dense_route_arrays,
+    load_route_table,
+    sample_route_bubbles,
+)
+
+
+os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+
+
+@dataclass(frozen=True)
+class SceneData:
+    path: Path
+    frames: dict[int, dict[str, Any]]
+    routes: RouteTable
+    map_id: int
+
+
+def _load_toml(path: Path) -> dict[str, Any]:
+    try:
+        import rtoml
+    except ImportError as error:
+        raise RuntimeError("rtoml is required to read ScaleNav scenes") from error
+    return dict(rtoml.load(path))
+
+
+def _rotation_wxyz(quaternion: Sequence[float]) -> np.ndarray:
+    values = np.asarray(quaternion, dtype=np.float32)
+    if values.shape != (4,) or not np.isfinite(values).all():
+        raise ValueError("orientationWxyz must contain four finite values")
+    w, x, y, z = values
+    return Rotation.from_quat([x, y, z, w]).as_matrix().astype(np.float32)
 
 
 class YOPODataset(Dataset):
-    def __init__(self, mode='train', val_ratio=0.1):
-        super(YOPODataset, self).__init__()
-        # image params
+    """Route-conditioned ScaleNav dataset with separate model/loss routes."""
+
+    def __init__(
+        self,
+        mode: str = "train",
+        *,
+        data_root: str | Path | None = None,
+        validation_ratio: float = 0.1,
+        route_dropout_probability: float | None = None,
+        seed: int = 0,
+    ) -> None:
+        super().__init__()
+        if mode not in {"train", "valid", "all"}:
+            raise ValueError("mode must be 'train', 'valid', or 'all'")
+        if not 0.0 <= validation_ratio < 1.0:
+            raise ValueError("validation_ratio must be in [0, 1)")
+        base_dir = Path(__file__).resolve().parent.parent
+        self.data_root = Path(data_root) if data_root is not None else base_dir / cfg["dataset_path"]
         self.height = int(cfg["image_height"])
         self.width = int(cfg["image_width"])
-        # ramdom state: x-direction: log-normal distribution, yz-direction: normal distribution
-        self.vel_max = cfg["vel_max_train"]
-        self.acc_max = cfg["acc_max_train"]
-        self.vx_lognorm_mean = np.log(1 - cfg["vx_mean_unit"])
-        self.vx_logmorm_sigma = np.log(cfg["vx_std_unit"])
-        self.v_mean = np.array([cfg["vx_mean_unit"], cfg["vy_mean_unit"], cfg["vz_mean_unit"]])
-        self.v_std = np.array([cfg["vx_std_unit"], cfg["vy_std_unit"], cfg["vz_std_unit"]])
-        self.a_mean = np.array([cfg["ax_mean_unit"], cfg["ay_mean_unit"], cfg["az_mean_unit"]])
-        self.a_std = np.array([cfg["ax_std_unit"], cfg["ay_std_unit"], cfg["az_std_unit"]])
-        self.goal_length = cfg['goal_length']
-        self.goal_pitch_std = cfg["goal_pitch_std"]
-        self.goal_yaw_std = cfg["goal_yaw_std"]
-        if mode == 'train': self.print_data()
+        self.vel_max = float(cfg["vel_max_train"])
+        self.acc_max = float(cfg["acc_max_train"])
+        self.vx_lognorm_mean = float(np.log(1.0 - cfg["vx_mean_unit"]))
+        self.vx_lognorm_sigma = float(np.log(cfg["vx_std_unit"]))
+        self.v_mean = np.asarray(
+            [cfg["vx_mean_unit"], cfg["vy_mean_unit"], cfg["vz_mean_unit"]], dtype=np.float32
+        )
+        self.v_std = np.asarray(
+            [cfg["vx_std_unit"], cfg["vy_std_unit"], cfg["vz_std_unit"]], dtype=np.float32
+        )
+        self.a_mean = np.asarray(
+            [cfg["ax_mean_unit"], cfg["ay_mean_unit"], cfg["az_mean_unit"]], dtype=np.float32
+        )
+        self.a_std = np.asarray(
+            [cfg["ax_std_unit"], cfg["ay_std_unit"], cfg["az_std_unit"]], dtype=np.float32
+        )
+        self.anchors = np.asarray(cfg["route_anchor_distances_m"], dtype=np.float32)
+        if len(self.anchors) != int(cfg["route_bubble_count"]):
+            raise ValueError("route_anchor_distances_m must match route_bubble_count")
+        self.clearance_clip_m = float(cfg["route_clearance_clip_m"])
+        self.dense_count = int(cfg["dense_route_points"])
+        self.dense_step_m = float(cfg["dense_route_step_m"])
+        self.route_dropout_probability = float(
+            cfg["route_dropout_probability"]
+            if route_dropout_probability is None
+            else route_dropout_probability
+        )
+        if not 0.0 <= self.route_dropout_probability <= 1.0:
+            raise ValueError("route_dropout_probability must be in [0, 1]")
+        self.mode = mode
+        self.seed = int(seed)
+        self.scenes = self._load_scenes()
+        self.obstacle_paths = [scene.path / "tree.ply" for scene in self.scenes]
+        all_samples = self._valid_samples()
+        self.samples = self._split_samples(all_samples, mode, validation_ratio)
+        if not self.samples:
+            raise ValueError(f"no {mode} route samples under {self.data_root}")
 
-        # dataset
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        data_dir = os.path.join(base_dir, "../", cfg["dataset_path"])
-        self.img_list, self.map_idx, self.positions, self.quaternions = [], [], np.empty((0, 3), dtype=np.float32), np.empty((0, 4), dtype=np.float32)
+    def _load_scenes(self) -> list[SceneData]:
+        scene_paths = sorted(path for path in self.data_root.glob("Scene_*") if path.is_dir())
+        if not scene_paths:
+            raise FileNotFoundError(f"no Scene_* directories under {self.data_root}")
+        scenes: list[SceneData] = []
+        for map_id, scene_path in enumerate(scene_paths):
+            document = _load_toml(scene_path / "data.toml")
+            if document.get("worldFrame") != "world_enu" or document.get("bodyFrame") != "body_flu":
+                raise ValueError(f"{scene_path} is not world_enu/body_flu")
+            records = document.get("dataArray", [])
+            frames = {int(record["frameIndex"]): record for record in records}
+            if len(frames) != len(records):
+                raise ValueError(f"duplicate frameIndex in {scene_path / 'data.toml'}")
+            routes = load_route_table(scene_path / "routes.npz", frame_count=len(records))
+            scenes.append(SceneData(scene_path, frames, routes, map_id))
+        return scenes
 
-        datafolders = [f.path for f in os.scandir(data_dir) if f.is_dir()]
-        datafolders.sort(key=lambda x: int(os.path.basename(x)))
-        if mode == 'train':
-            print("Datafolders:")
-            for folder in datafolders:
-                print("    ", folder)
+    def _valid_samples(self) -> list[tuple[int, int]]:
+        samples: list[tuple[int, int]] = []
+        for scene_index, scene in enumerate(self.scenes):
+            valid = scene.routes.arrays["route_valid"].astype(bool)
+            flags = scene.routes.arrays["route_quality_flags"]
+            for route_index in np.flatnonzero(valid & (flags == int(RouteQualityFlag.NONE))):
+                samples.append((scene_index, int(route_index)))
+        return samples
 
-        print("Loading", mode, "dataset")
-        for data_idx in range(len(datafolders)):
-            datafolder = datafolders[data_idx]
+    def _split_samples(
+        self,
+        samples: list[tuple[int, int]],
+        mode: str,
+        validation_ratio: float,
+    ) -> list[tuple[int, int]]:
+        if mode == "all" or validation_ratio == 0.0:
+            return samples
+        scene_ids = sorted({scene_index for scene_index, _ in samples})
+        if len(scene_ids) >= 2:
+            validation_count = max(1, int(round(len(scene_ids) * validation_ratio)))
+            validation_scenes = set(scene_ids[-validation_count:])
+            is_valid = lambda sample: sample[0] in validation_scenes
+        else:
+            validation_count = max(1, int(round(len(samples) * validation_ratio)))
+            validation_indices = set(range(len(samples) - validation_count, len(samples)))
+            index_by_sample = {sample: index for index, sample in enumerate(samples)}
+            is_valid = lambda sample: index_by_sample[sample] in validation_indices
+        selected = [sample for sample in samples if is_valid(sample) == (mode == "valid")]
+        return selected or samples
 
-            image_file_names = [datafolder + "/" + filename
-                                for filename in os.listdir(datafolder)
-                                if os.path.splitext(filename)[1] == '.png']
-            image_file_names.sort(key=lambda x: int(os.path.basename(x).split('.')[0].split("_")[1]))  # sort by filename to align with the label
+    def __len__(self) -> int:
+        return len(self.samples)
 
-            states = np.loadtxt(data_dir + f"/pose-{data_idx}.csv", delimiter=',', skiprows=1).astype(np.float32)
-            positions = states[:, 0:3]
-            quaternions = states[:, 3:7]
+    def __getitem__(self, item: int) -> dict[str, torch.Tensor]:
+        scene_index, route_index = self.samples[item]
+        scene = self.scenes[scene_index]
+        arrays = scene.routes.arrays
+        frame_index = int(arrays["frame_index"][route_index])
+        frame = scene.frames[frame_index]
+        depth = self._read_depth(scene.path / "Textures" / str(frame["depthFileName"]), frame)
+        position = np.asarray(frame["posStart"], dtype=np.float32)
+        rotation = _rotation_wxyz(frame["orientationWxyz"])
+        motion = self._random_motion()
+        frontier_world = arrays["frontier_goal_world"][route_index].astype(np.float32, copy=True)
+        frontier_body = world_to_body_flu(frontier_world, position, rotation).astype(np.float32)
 
-            file_names_train, file_names_val, positions_train, positions_val, quaternions_train, quaternions_val = train_test_split(
-                image_file_names, positions, quaternions, test_size=val_ratio, random_state=0)
+        path_world, _, path_radius = scene.routes.path(route_index)
+        centers_world, conservative_radius, route_mask, sample_distances = sample_route_bubbles(
+            path_world, path_radius, self.anchors
+        )
+        centers_body = world_to_body_flu(centers_world, position, rotation)
+        normalized_centers = centers_body / np.maximum(sample_distances[:, None], 1.0)
+        normalized_radius = np.clip(conservative_radius, 0.0, self.clearance_clip_m) / self.clearance_clip_m
+        route_bubbles = np.concatenate(
+            (normalized_centers, normalized_radius[:, None]), axis=1
+        ).astype(np.float32)
+        dense_world, dense_radius, dense_mask = dense_route_arrays(
+            path_world,
+            path_radius,
+            count=self.dense_count,
+            step_m=self.dense_step_m,
+        )
 
-            if mode == 'train':
-                self.img_list.extend(file_names_train)
-                self.positions = np.vstack((self.positions, positions_train.astype(np.float32)))
-                self.quaternions = np.vstack((self.quaternions, quaternions_train.astype(np.float32)))
-                self.map_idx.extend([data_idx] * len(file_names_train))
-            elif mode == 'valid':
-                self.img_list.extend(file_names_val)
-                self.positions = np.vstack((self.positions, positions_val.astype(np.float32)))
-                self.quaternions = np.vstack((self.quaternions, quaternions_val.astype(np.float32)))
-                self.map_idx.extend([data_idx] * len(file_names_val))
-            else:
-                raise ValueError(f"Invalid mode {mode}. Choose from 'train', 'valid'.")
+        dropout = self.mode == "train" and np.random.random() < self.route_dropout_probability
+        if dropout:
+            route_mask = np.zeros_like(route_mask)
+            dense_mask = np.zeros_like(dense_mask)
 
-        print(f"=============== {mode.capitalize()} Data Summary ===============")
-        print(f"{'Images'      :<12} | Count: {len(self.img_list):<3} |  Shape: {self.width},{self.height}")
-        print(f"{'Positions'   :<12} | Count: {self.positions.shape[0]:<3} |  Shape: {self.positions.shape[1]}")
-        print(f"{'Quaternions' :<12} | Count: {self.quaternions.shape[0]:<3} |  Shape: {self.quaternions.shape[1]}")
-        print("==================================================")
+        return {
+            "depth": torch.from_numpy(depth),
+            "position_world": torch.from_numpy(position),
+            "rotation_world_body": torch.from_numpy(rotation),
+            "motion_body": torch.from_numpy(motion),
+            "frontier_body": torch.from_numpy(frontier_body),
+            "frontier_world": torch.from_numpy(frontier_world),
+            "route_bubbles": torch.from_numpy(route_bubbles),
+            "route_mask": torch.from_numpy(route_mask.astype(np.float32)),
+            "dense_route_world": torch.from_numpy(dense_world),
+            "dense_route_radius": torch.from_numpy(dense_radius),
+            "dense_route_mask": torch.from_numpy(dense_mask),
+            "map_id": torch.tensor(scene.map_id, dtype=torch.long),
+            "route_quality_weight": torch.tensor(
+                float(arrays["route_quality_weight"][route_index]), dtype=torch.float32
+            ),
+            "route_dropout": torch.tensor(dropout, dtype=torch.bool),
+        }
 
-    def __len__(self):
-        return len(self.img_list)
+    def _read_depth(self, path: Path, frame: dict[str, Any]) -> np.ndarray:
+        depth = cv2.imread(str(path), cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        if depth is None or depth.ndim != 2:
+            raise ValueError(f"unable to read depth image: {path}")
+        maximum = float(frame.get("depthMaxMeters", 20.0))
+        if maximum <= 0.0 or not np.isfinite(maximum):
+            raise ValueError(f"invalid depthMaxMeters for {path}")
+        depth = cv2.resize(
+            depth.astype(np.float32), (self.width, self.height), interpolation=cv2.INTER_NEAREST
+        )
+        depth = np.nan_to_num(depth, nan=maximum, posinf=maximum, neginf=0.0)
+        return np.expand_dims(np.clip(depth, 0.0, maximum) / maximum, axis=0).astype(np.float32)
 
-    def __getitem__(self, item):
-        # 1. read the image
-        # NOTE: The depth images are normalized from 0–20m to a 0–1 and converted to int16 during data collection.
-        image = cv2.imread(self.img_list[item], -1).astype(np.float32)
-        image = np.expand_dims(cv2.resize(image, (self.width, self.height), interpolation=cv2.INTER_NEAREST) / 65535.0, axis=0)
-
-        # W: world frame; B/b: body frame
-        # w: level with the ground but with the same orientation (yaw) as the body frame
-        q_wxyz = self.quaternions[item, :]  # q: wxyz
-        R_WB = R.from_quat([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
-        euler_angles = R_WB.as_euler('ZYX', degrees=False)  # [yaw(z) pitch(y) roll(x)]
-        R_Bw = R.from_euler('ZYX', [0, euler_angles[1], euler_angles[2]], degrees=False).inv()
-
-        # 2. get random vel, acc in the direction of the quadrotor
-        vel_w, acc_w = self._get_random_state()
-        vel_b, acc_b = R_Bw.apply(vel_w), R_Bw.apply(acc_w)
-
-        # 3. generate random goal in front of the quadrotor
-        goal_w = self._get_random_goal()
-        goal_b = R_Bw.apply(goal_w)
-
-        random_obs = np.hstack((vel_b, acc_b, goal_b)).astype(np.float32)
-        rot_wb = R_WB.as_matrix().astype(np.float32)  # transform to rot_matrix in numpy is faster than using quat in pytorch
-        # vel & acc & goal are in body frame, NWU, and no-normalization
-        return image, self.positions[item], rot_wb, random_obs, self.map_idx[item]
-
-    def _get_random_state(self):
+    def _random_motion(self) -> np.ndarray:
         while True:
-            vel = self.vel_max * (self.v_mean + self.v_std * np.random.randn(3))
-            right_skewed_vx = -1
-            while right_skewed_vx < 0:
-                right_skewed_vx = self.vel_max * np.random.lognormal(mean=self.vx_lognorm_mean, sigma=self.vx_logmorm_sigma, size=None)
-                right_skewed_vx = -right_skewed_vx + 1.2 * self.vel_max  # * 1.2 to ensure v_max can be sampled
-            vel[0] = right_skewed_vx
-            if np.linalg.norm(vel) < 1.2 * self.vel_max:  # avoid outliers
+            velocity = self.vel_max * (self.v_mean + self.v_std * np.random.randn(3))
+            forward = self.vel_max * np.random.lognormal(
+                mean=self.vx_lognorm_mean, sigma=self.vx_lognorm_sigma
+            )
+            velocity[0] = -forward + 1.2 * self.vel_max
+            if np.linalg.norm(velocity) < 1.2 * self.vel_max:
                 break
-
         while True:
-            acc = self.acc_max * (self.a_mean + self.a_std * np.random.randn(3))
-            if np.linalg.norm(acc) < 1.2 * self.acc_max:  # avoid outliers
+            acceleration = self.acc_max * (self.a_mean + self.a_std * np.random.randn(3))
+            if np.linalg.norm(acceleration) < 1.2 * self.acc_max:
                 break
-        return vel, acc
-
-    def _get_random_goal(self):
-        goal_pitch_angle = np.random.normal(0.0, self.goal_pitch_std)
-        goal_yaw_angle = np.random.normal(0.0, self.goal_yaw_std)
-        goal_pitch_angle, goal_yaw_angle = np.radians(goal_pitch_angle), np.radians(goal_yaw_angle)
-        goal_w_dir = np.array([np.cos(goal_yaw_angle) * np.cos(goal_pitch_angle),
-                               np.sin(goal_yaw_angle) * np.cos(goal_pitch_angle), np.sin(goal_pitch_angle)])
-        # 10% probability to generate a nearby goal (× goal_length is actual length)
-        random_near = np.random.rand()
-        if random_near < 0.1:
-            goal_w_dir = random_near * 10 * goal_w_dir
-        return self.goal_length * goal_w_dir
-
-    def print_data(self):
-        import scipy.stats as stats
-        # 计算Vx 5% ~ 95% 区间
-        p5 = self.vel_max * np.exp(stats.norm.ppf(0.05, loc=self.vx_lognorm_mean, scale=self.vx_logmorm_sigma))
-        p95 = self.vel_max * np.exp(stats.norm.ppf(0.95, loc=self.vx_lognorm_mean, scale=self.vx_logmorm_sigma))
-
-        v_lower = self.vel_max * (self.v_mean - 2 * self.v_std)
-        v_upper = self.vel_max * (self.v_mean + 2 * self.v_std)
-        v_lower[0] = max(-p95 + 1.2 * self.vel_max, 0)
-        v_upper[0] = -p5 + 1.2 * self.vel_max
-
-        a_lower = self.acc_max * (self.a_mean - 2 * self.a_std)
-        a_upper = self.acc_max * (self.a_mean + 2 * self.a_std)
-
-        print("----------------- Sampling State --------------------")
-        print("| X-Y-Z | Vel 95% Range(m/s)  | Acc 95% Range(m/s2) |")
-        print("|-------|---------------------|---------------------|")
-        for i in range(3):
-            print(f"|  {i:^4} | {v_lower[i]:^9.1f}~{v_upper[i]:^9.1f} |"
-                  f" {a_lower[i]:^9.1f}~{a_upper[i]:^9.1f} |")
-        print("-----------------------------------------------------")
-        print(f"| Goal Pitch 90% (deg)        | {-self.goal_pitch_std * 2:^9.1f}~{self.goal_pitch_std * 2:^9.1f} |")
-        print(f"| Goal Yaw   90% (deg)        | {-self.goal_yaw_std * 2:^9.1f}~{self.goal_yaw_std * 2:^9.1f} |")
-        print("-----------------------------------------------------")
-
-    def plot_sample_distribution(self):
-        import matplotlib.pyplot as plt
-        # ===== 采样 =====
-        N = 10000
-        goals = np.array([self._get_random_goal() for _ in range(N)])
-        states = np.array([self._get_random_state() for _ in range(N)])
-        vels = np.stack([s[0] for s in states])
-        accs = np.stack([s[1] for s in states])
-
-        x, y, z = goals[:, 0], goals[:, 1], goals[:, 2]
-        yaw = np.degrees(np.arctan2(y, x))  # 水平角 [-180, 180]
-        pitch = np.degrees(np.arctan2(z, np.sqrt(x ** 2 + y ** 2)))  # 垂直角 [-90, 90]
-
-        fig, axs = plt.subplots(3, 3, figsize=(15, 10))
-
-        # Goal方向角分布
-        axs[0, 0].hist(yaw, bins=180)
-        axs[0, 0].set_title("Goal Yaw Distribution")
-        axs[0, 0].set_xlabel("Yaw (deg)")
-        axs[0, 0].set_xlim([-60, 60])
-        axs[0, 0].grid(True)
-
-        axs[0, 1].hist(pitch, bins=90)
-        axs[0, 1].set_title("Goal Pitch Distribution")
-        axs[0, 1].set_xlabel("Pitch (deg)")
-        axs[0, 1].set_xlim([-60, 60])
-        axs[0, 1].grid(True)
-
-        # Goal往图像投影分布(未考虑机体旋转)
-        axs[0, 2].scatter(yaw, pitch, s=2, alpha=0.3)
-        axs[0, 2].set_title("Goal Distribution in Image")
-        axs[0, 2].set_xlabel("Yaw (deg)")
-        axs[0, 2].set_ylabel("Pitch (deg)")
-        axs[0, 2].set_xlim([-45, 45])
-        axs[0, 2].set_ylim([-30, 30])
-        axs[0, 2].grid(True)
-
-        # Velocity分布
-        for i, name in enumerate(['Vx', 'Vy', 'Vz']):
-            axs[1, i].hist(vels[:, i], bins=100)
-            axs[1, i].set_title(f"Velocity {name}")
-            axs[1, i].grid(True)
-
-        # Acceleration分布
-        for i, name in enumerate(['Ax', 'Ay', 'Az']):
-            axs[2, i].hist(accs[:, i], bins=100)
-            axs[2, i].set_title(f"Acceleration {name}")
-            axs[2, i].grid(True)
-
-        plt.tight_layout()
-        plt.show()
-
-
-if __name__ == '__main__':
-    # plot the random sample
-    dataset = YOPODataset()
-    dataset.plot_sample_distribution()
-
-    # select the best num_workers
-    max_workers = os.cpu_count()
-    print(f"\n✅ cpu_count = {max_workers}")
-
-    results = []
-    for nw in range(0, max_workers + 1):
-        data_loader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=nw)
-        start = time.time()
-        for i, _ in enumerate(data_loader):
-            if i > 50:  # 只测前50个batch
-                break
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
-        elapsed = time.time() - start
-        results.append((nw, elapsed))
-        print(f"num_workers={nw}: {elapsed:.3f}s")
-
-    best = min(results, key=lambda x: x[1])
-    print(f"\n✅ 最优 num_workers = {best[0]}, 平均耗时={best[1]:.3f}s")
+        return np.concatenate((velocity, acceleration)).astype(np.float32)

@@ -3,13 +3,45 @@
 ## 1. 测试对象
 
 - 工作区：`/mnt/code/lab/yopo/OpenSeek/scalenav_ws`
-- 最新真实仿真会话：`log_scalenav/session_20260826_185756_628`
-- 最新会话 ROS 日志：`/home/puffy/.ros/log/epic_graph_node_960287_1787741876601.log`
+- 最新真实仿真会话：`log_scalenav/session_20260826_192324_326`
+- 最新会话 ROS 日志：`/home/puffy/.ros/log/epic_graph_node_982042_1787743404275.log`
 - 最新完成往返会话：`log_scalenav/session_20260826_184033_343`
 - 完整往返 ROS 日志：`/home/puffy/.ros/log/epic_graph_node_939730_1787740833415.log`
-- 覆盖时间：2026-08-26 18:40:33–18:59:05
+- 覆盖时间：2026-08-26 18:40:33–19:24:30
+
+<a id="chg-0014"></a>
+### CHG-0014 路径本身无进展的 witness 拒绝
+
+- 根因复核：`19:45:00` 会话的 `RHC_DISPLAY / incumbent=RECOVERED / horizon_ready=1` 组合只证明旧 witness 几何上可复用；`path_99` 起点附近的回环/回退没有被现有连续性检查识别，导致 local goal 在约 `y=14..16 m` 局部区域反复更新。更直接的漏洞是旧代码在 `accepted_witness_usable && route_has_execution_horizon` 时可直接 `found=1`，本帧 `path_nodes` 为空或 odom 无连通边也会继续发布 `last_witness_path_`。
+- 日志口径：该会话可见的 `path_nodes=10..13` 是拓扑节点数；`witness_points=26..58` 是由每条拓扑边的 `paths_` 展开后的几何采样点；`semantic_path_nodes=0/1` 只表示语义节点数。因此“无头路”指的是 remembered witness 可脱离本帧拓扑搜索单独被接受的代码路径，不等于这些具体帧的 `path_nodes` 字段均为零。
+- 实现：删除仅凭 remembered witness 置 `found=1` 的分支；必须由当前图搜索恢复至少两个拓扑节点，且 odom 节点存在连通边。A* 返回空/单节点结果会被拒绝，并在发布前再次执行同一最终检查，避免“无节点绑定的几何折线”继续驱动 RHC。本批次不新增路径形状或任务轴阈值。
+- 自动化验证：Release 编译通过；`colcon test --packages-select scalenav_graph_ros2` 为 `6/6` CTest、`76 tests, 0 errors, 0 failures, 0 skipped`，`test_rebuild_crash` 的 1 项按条件跳过。未修改 `FUNCTION_TEST_CASES.md` 或测试源码。
+- 待真实验证：复跑原 `19:45:00` 场景，确认当前图无法恢复节点路径时不再继续发布旧 witness local goal，并确认正常拓扑路径仍可执行。
 
 ## 2. 最新日志证据
+
+### 19:23:24 CHG-0013 当前语义代际与深度断流复测
+
+- 本次成功到达 `(0,140)` 并切换回程目标。去程从 `y≈30 m` 后主要沿右侧 `x≈7.75..14.35 m` 前进，说明过滤历史虚拟风险后，右侧可行拓扑能够被选中并执行。
+- 回程没有直接沿去程的右侧 witness 返回，首要原因是目标翻转时 `onGoal()` 主动清空 `last_witness_path_`、`last_path_nodes_`、route terminal 和 `corridor_hint_route_`；只复用了全局 graph/edges/semantic memory，没有复用原 witness，也没有先构造其反向路线。在同一静态图和代价快照下，反向右路理论上应先作为候选比较；当前实现让它在回程第一轮 `incumbent=NOT_ELIGIBLE` 时完全缺席，重新搜索先选了左侧 terminal `(-2.15,110.05)`，随后沿左廊到 `(-4.56,94.38)`。
+- 左廊末段 `route_blocked=1` 后，规划器才重新搜索并恢复出右侧 terminal `(11.05,67.15)`，发布 local goal 约为 `(5.34,93.05)`。最终 `/epic/path` 有 `22` 个 witness 点，从车辆附近先向右横切，再沿右侧向任务原点前进；没有继续锁定左侧阻塞 terminal。
+- 新增的工作集日志确认代际过滤生效：末段 `persistent_semantic_records=1105`、`global_virtual_semantic_nodes=1058`，但 `local_inactive_virtual_semantic_nodes=459`、`astar_inactive_virtual_semantic_nodes=498`，实际 `astar_semantic_nodes=34`。持久化存储没有删除，A* 也没有再加载此前约 `435` 个混合历史虚拟点。
+- 语义工作集随当前帧保持在约 `13..47` 个，历史虚拟点跳过量逐步增至约 `459/498`；末段 `astar_semantic_checks=2814`。这验证了“存储规模”和“实际运算窗口”已分开。
+- 飞机停止的直接原因不是规划器没有右路。`1787743463.096920154` 只是每 `2 s` 节流输出的 EPIC cloud timing，并非最后一帧；结构化日志的最后一帧 depth/pointcloud stamp 为 `1787743464.870896333`。在线控制器的 depth watchdog 为 `0.5 s`，50 Hz 控制回调约在 `1787743465.371` 起停止发布；独立的 `2 s` 状态定时器在 `1787743465.917690983` 才打印 `depth stream timed out; control output stopped`。renderer 随后在 `1787743467.000404360` 报 `AirSim render RPC failed: timed out`，并继续出现 RPC waiting/pose timeout。飞机最终停在 `(-4.63,93.82)`。
+- 停止时右切路径仍有效：planner 为 `incumbent=RECOVERED`、`route_blocked=0`、`horizon_ready=1`，路径 `22` 点，结构化 clearance 为 `vehicle_m≈1.795 m`、`path_min_m=0.723 m`。因此不能把停机归因于右切 witness 碰撞或 A* 搜索失败。
+- 性能仍有显著长尾：`1787743461.407` 的 update 为 `1261 ms`；`1787743463.810` 的后台更新为 `2292 ms`，其中 `region_select=1884 ms`、`skeleton=304 ms`。它们与点云停止时间接近，可能造成资源竞争，但当前日志没有 AirSim 服务端耗时或系统负载证据，只能列为 RPC 断流的潜在诱因，不能当作已证实根因。
+- 本次不计完整往返验收。下一次应先保证 RGB-D RPC 连续，再重复同一任务，确认右切可以实际执行并回到 `(0,0)`。
+
+#### 回程规划与耗时分解
+
+- `19:23:24` 目标翻转日志为 `REUSE_EXISTING_GRAPH`，但路线记忆已清空；因此“没走原本的路”发生在搜索入口之前，不是 A* 算出右路后被执行器改成左路。
+- “右路按节点代价应更优”目前不能仅由胜出路线日志证实或证伪：实现比较的是有向 edge witness 几何代价、当前语义帧风险、净空和 progress/direction/FOV/smoothness terminal loss；回程时语义快照和局部拓扑也已变化。必须把去程 witness 反向生成一个经过当前地图/语义重新验证的候选，并打印它与 A* 最优候选的完整 loss，才能确认是否存在代价实现错误。
+- 回程第一次有效 update（`1787743456.412`）重新搜索左侧 terminal：`odom_connect=0.000 ms`、`astar=88.396 ms`、`publish=19.227 ms`、`total=149.287 ms`；A* 展开 `273` 个节点、评估 `1713` 条边、实际语义检查 `10146` 次，`candidate_accepted=0` 是恢复旧候选失败后的新路线提交。
+- 左廊继续前进时 update（`1787743458.466`）为 `odom_connect=12.781 ms`、`astar=15.219 ms`、`publish=17.855 ms`、`total=277.100 ms`；此时 `route_blocked=1`，重新提交左侧 `(-5.45,100.15)` terminal。
+- 到 `y≈102.9` 的下一次 update（`1787743463.487`）为 `odom_connect=6.870 ms`、`astar=14.380 ms`、`publish=14.535 ms`、`total=306.153 ms`；仍是左侧 `(-5.45,73.75)`，随后才在下一次搜索恢复右切路线。
+- 右切路线发布后的 update（`1787743467.518`）为 `odom_connect=0.000 ms`、`astar=39.181 ms`、`publish=23.451 ms`、`total=87.688 ms`；`incumbent=RECOVERED`、`route_blocked=0`、`horizon_ready=1`，说明此时已经正常沿右切 witness 运行。
+- 与在线规划同时发生的后台图更新长尾为 `1787743463.810` 的 `2291.605 ms`，其中 `region_select=1884.077 ms`、`skeleton=304.272 ms`；另有 `1787743461.407` 的 update 总耗时 `1261.051 ms`。这些是计算耗时，不等同于“回程没走原路”的原因；它们可能增加调度压力，但当前日志不足以证明导致 AirSim RPC 超时。
+- 传感器停机是后续独立事件：最后结构化 depth/pointcloud stamp 为 `1787743464.870896333`，控制器 `0.5 s` watchdog 约在 `3465.371` 停止控制，`2 s` 状态定时器到 `3465.918` 才打印错误；之后 renderer 在 `3467.000` 报 RPC timeout。
 
 ### 18:57:56 CHG-0012 修复后左廊复测
 
@@ -73,6 +105,7 @@
 
 ### 当前已通过自动化验证的修改
 
+- CHG-0013：未验证虚拟语义按当前成功应用帧 stamp 组成规划代际；历史点继续持久化，`Verified` 节点继续长期参与。没有新增 `semantic_virtual_planning_max_age_ms` 滑动窗口参数。
 - CHG-0012：local goal 严格按 forward witness 弧长选择，不再按 mission-axis 投影跳过横向或短时后退绕行段。
 - CHG-0011：A* 搜索对局部语义池建立一次空间哈希，每条 witness 边只精确检查语义影响半径内的邻域候选；风险公式和路线排序规则不变。18:40 完整往返已确认在线实际检查量累计减少 `6.01` 倍。
 - CHG-0010：update 日志明确区分持久化、全局发布图、局部规划窗口和 A* 实际搜索工作量，并记录展开、边计算、语义扫描、候选 terminal 与超时状态。
@@ -80,11 +113,14 @@
 - CHG-0006：所有 patch 使用固定 `30 m` optical depth，语义点是普通 `Geometric TopoNode`，`Unknown` 仅表示真实几何尚未验证。
 - CHG-0007：全局 graph 保留不变，A*、路线风险和发布统计只查询当前局部语义节点，重复观测按 `2.5 m` 合并。
 - CHG-0008：terminal 按 persistent id 恢复，规划储备不足与 incumbent 失效分离；可执行的 accepted witness 在临时恢复失败时继续发布。
-- CHG-0006/0007/0008/0009/0010/0011/0012 已完成编译和自动化测试。CHG-0011 已有一次修改后的完整往返性能日志；CHG-0012 已通过真实左廊的 local-goal 顺序复测，但该次回程被 SIGINT 中断，且左右路线 loss 排序仍需修复。`IT-FLT-001` 要求 3 次，且 witness 连续性与路线恢复仍需复核，因此不能声明完整仿真验收完成。
+- CHG-0006/0007/0008/0009/0010/0011/0012/0013 已完成编译和自动化测试。CHG-0013 已确认右侧去程和 blocked 后右切均可生成，但回程因 AirSim 深度 RPC 断流停止。`IT-FLT-001` 要求 3 次，且 witness 连续性、路线恢复和传感器连续性仍需复核，因此不能声明完整仿真验收完成。
 
 ## 3. 自动化测试
 
 ### 3.1 变更批次关联
+
+<a id="chg-0013"></a>
+- [CHG-0013](CHANGELOG.md#chg-0013)：规划入口统一传递当前成功应用语义帧 stamp，`Unknown` 历史虚拟点退出计算、`Verified` 历史点保留；未修改仓库测试源码。临时 smoke test `5/5`、Release 编译、全包 CTest `6/6` 和 `epic_online_simulation 4/4` 通过。19:23 会话确认持久化虚拟点 `1058` 与 A* 实际语义池 `34` 已分离；完整回程因 RGB-D RPC 断流未完成。
 
 <a id="chg-0012"></a>
 - [CHG-0012](CHANGELOG.md#chg-0012)：新增 `routeLookaheadPoint()` 并由 `selectNextGoal()` 统一调用；未修改仓库测试源码，额外临时 smoke test 覆盖横向绕行、短时后退/U 形和直线中段投影。Release 编译、全包 CTest `6/6` 和真实左廊顺序复测通过，对应 `MT-M5-001`、`MT-M5-004`、`TC-M6-006`、`IT-FLT-007`；完整往返和路线最优性仍待验收。
@@ -136,7 +172,7 @@ colcon test-result --verbose
 
 结果：
 
-- `test_route_memory`：原有 12 项通过，包括 compatible frontier extension 和近车横向换道保护；未修改测试源码。另有临时 smoke test `3/3` 通过，覆盖横向/后退 witness 的弧长 local-goal 前视和直线中段投影。
+- `test_route_memory`：原有 12 项通过，包括 compatible frontier extension 和近车横向换道保护；未修改测试源码。CHG-0012 临时 smoke test `3/3` 通过，覆盖横向/后退 witness 的弧长 local-goal 前视和直线中段投影。
 - `test_lidar_map`：9 项通过，包括严格滑动窗口和近点优先容量测试。
 - `scalenav_log/test_log_storage`：1 项通过，确认日志 session 不因容量滚动且旧 session 不被自动删除。
 - `test_topo_semantic`：41 项通过，包括固定 30 m optical-depth 投影、不依赖 measured depth、局部语义查询，以及低于前向储备目标的径向/不完整 frontier 综合代价选择。
@@ -146,13 +182,16 @@ colcon test-result --verbose
 
 总计：`6/6` CTest 通过；限定 `scalenav_graph_ros2/test_results` 的汇总为 `68 tests, 0 errors, 0 failures, 0 skipped`；`epic_online_simulation` 的 `4/4` 检查通过。控制台中的外部日志 rebuild 场景按条件跳过，但其 JUnit 结果和 CTest 目标均正常通过。
 
+CHG-0013 另有位于忽略 build 目录的临时 smoke test，覆盖当前虚拟点保留、上一代虚拟点退出、`Verified` 历史点保留、语义流超龄时虚拟点退出和默认接口兼容，`5/5` 条件通过；没有修改仓库测试用例。
+
 ## 4. 待补测试
 
 - 为 update 增加 topology mutex 等待、语义内存更新、路线 remap/metrics 和发布后风险复核分项计时，解释 P95 `424.42 ms` 的未分项时间。
 - 为 frontier 候选增加 geometry/semantic/clearance/progress/direction/FOV/smoothness loss 分解，语义部分再区分当前帧和历史节点，直接比较同一 tick 的左右候选；当前日志不能精确复算被拒右路。
 - 将 edge witness 内部最小净空纳入 safety loss，避免端点 Bubble 安全但中间折线贴障的路线得到 `clearance=0` 惩罚。
-- 对固定 30 m 虚拟语义点增加计算窗口时效或显式衰减；持久化记录可以保留，但不能让未被当前帧更新的推测端点以原权重永久参与局部 A*。随后在不引入硬约束的前提下校准地面/视角置信度和 `0.2:2.0` 的几何/语义权重。
-- 完成 CHG-0012 修复后不中断的 `(0,0) -> (0,140) -> (0,0)` 往返；18:57:56 仅完成去程和部分回程。
+- 当前代虚拟语义工作集已由 CHG-0013 实现；继续校准地面/视角置信度和 `0.2:2.0` 的几何/语义权重，并用候选 loss 分解验证，而不是增加固定毫秒级历史虚拟点窗口。
+- 诊断并隔离 AirSim renderer RGB-D RPC 超时；记录 AirSim 服务端 RPC 耗时、CPU/GPU/内存压力以及 depth 发布间隔，判断 `2292 ms` 后台图更新与断流是否存在因果关系。
+- 完成不中断的 `(0,0) -> (0,140) -> (0,0)` 往返；19:23 会话已完成右侧去程并在回程生成右切路径，但控制因深度断流停止。
 - 修复终点零长度/退化 witness 的 16 次伪不连续拒绝以及回程途中 1 次 `1.59 m` 不连续拒绝，并重新执行 `IT-FLT-004`。
 - 对齐最低 `vehicle_m=0.150 m`、`path_min_m=0.029 m` 时刻的点云、odom、graph 和 witness，确认是否存在真实安全余量违规。
 - 用修复后的 `map_history_radius_m=40` 重新跑完整 AirSim/Colosseum 长航线。

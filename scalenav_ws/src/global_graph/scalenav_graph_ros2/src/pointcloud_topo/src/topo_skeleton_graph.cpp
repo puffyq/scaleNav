@@ -259,9 +259,7 @@ std::vector<TopoNode::Ptr> TopoGraph::semanticNodes(
           node->semantic_observations_ == 0) continue;
       if (bounded && (node->center_ - *origin).squaredNorm() > maximum_distance_sq)
         continue;
-      if (node->geometry_state_ == TopoGeometryState::Unknown &&
-          active_virtual_stamp_ns != 0 &&
-          node->semantic_stamp_ns_ != active_virtual_stamp_ns) {
+      if (!semanticNodeActiveForPlanning(*node, active_virtual_stamp_ns)) {
         if (inactive_virtual_nodes_skipped) ++*inactive_virtual_nodes_skipped;
         continue;
       }

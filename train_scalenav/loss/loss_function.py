@@ -5,6 +5,7 @@ from config.config import cfg
 from loss.safety_loss import SafetyLoss
 from loss.smoothness_loss import SmoothnessLoss
 from loss.guidance_loss import GuidanceLoss
+from loss.route_loss import RouteLoss
 
 
 class YOPOLoss(nn.Module):
@@ -29,6 +30,7 @@ class YOPOLoss(nn.Module):
         self.smoothness_loss = SmoothnessLoss(self._RJ, self._RA)
         self.safety_loss = SafetyLoss(self._L, obstacle_paths)
         self.goal_loss = GuidanceLoss() if include_goal else None
+        self.route_loss = RouteLoss(self._L)
         print("------ Actual Loss ------")
         print(f"| {'smooth':<12} = {self.smoothness_weight:6.4f} |")
         print(f"| {'safety':<12} = {self.safety_weight:6.4f} |")
@@ -91,8 +93,20 @@ class YOPOLoss(nn.Module):
         self.accele_weight = cfg["wa"] / vel_scale ** 3
         self.safety_weight = cfg["wc"]
         self.goal_weight = cfg["wg"]
+        self.path_weight = cfg["wp"]
+        self.progress_weight = cfg["wprogress"]
+        self.tangent_weight = cfg["wtangent"]
 
-    def forward(self, state, prediction, goal, map_id):
+    def forward(
+        self,
+        state,
+        prediction,
+        goal,
+        map_id,
+        route_points,
+        route_radii,
+        route_mask,
+    ):
         """
         Args:
             prediction: (batch_size, 3, 3) → [px, py, pz; vx, vy, vz; ax, ay, az] in world frame
@@ -116,5 +130,16 @@ class YOPOLoss(nn.Module):
             goal_cost = self.goal_loss(Df, Dp, goal)
         else:
             goal_cost = th.zeros_like(smoothness_cost)
+        corridor_cost, progress_cost, tangent_cost = self.route_loss(
+            Df, Dp, route_points, route_radii, route_mask
+        )
 
-        return self.smoothness_weight * smoothness_cost, self.safety_weight * safety_cost, self.goal_weight * goal_cost, self.accele_weight * acceleration_cost
+        return {
+            "smooth": self.smoothness_weight * smoothness_cost,
+            "safety": self.safety_weight * safety_cost,
+            "frontier": self.goal_weight * goal_cost,
+            "acceleration": self.accele_weight * acceleration_cost,
+            "path_corridor": self.path_weight * corridor_cost,
+            "path_progress": self.progress_weight * progress_cost,
+            "path_tangent": self.tangent_weight * tangent_cost,
+        }

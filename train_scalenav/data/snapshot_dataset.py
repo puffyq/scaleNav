@@ -4,7 +4,6 @@ import argparse
 import json
 import math
 import os
-import shutil
 import sys
 import time
 from dataclasses import dataclass
@@ -12,6 +11,14 @@ from pathlib import Path
 from typing import Any, Iterable, Protocol, Sequence
 
 import numpy as np
+from scipy.spatial import cKDTree
+
+from .coordinates import (
+    ned_frd_pose_to_enu_flu,
+    ned_to_enu,
+    quaternion_wxyz_to_matrix,
+)
+from .route_contract import load_route_table
 
 os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
 import cv2
@@ -37,6 +44,13 @@ class CaptureConfig:
     vertical_fov_deg: float = 60.0
     max_depth_m: float = 20.0
     settle_time_s: float = 0.03
+    camera_translation_body_flu: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    camera_orientation_body_flu_wxyz: tuple[float, float, float, float] = (
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    )
 
     def __post_init__(self) -> None:
         if not self.camera_name:
@@ -51,6 +65,14 @@ class CaptureConfig:
             raise ValueError("vertical_fov_deg must be between 0 and 180")
         if self.settle_time_s < 0.0 or not math.isfinite(self.settle_time_s):
             raise ValueError("settle_time_s must be finite and non-negative")
+        translation = np.asarray(self.camera_translation_body_flu, dtype=np.float64)
+        orientation = np.asarray(self.camera_orientation_body_flu_wxyz, dtype=np.float64)
+        if translation.shape != (3,) or not np.isfinite(translation).all():
+            raise ValueError("camera translation must contain three finite values")
+        if orientation.shape != (4,) or not np.isfinite(orientation).all():
+            raise ValueError("camera orientation must contain four finite values")
+        if np.linalg.norm(orientation) < 1.0e-8:
+            raise ValueError("camera orientation must not be zero")
 
 
 @dataclass(frozen=True)
@@ -87,6 +109,9 @@ class PoseSampler:
         y_range_m: tuple[float, float],
         altitude_m: float = 1.6,
         seed: int = 0,
+        obstacle_points_ned: np.ndarray | None = None,
+        safe_dist_m: float = 0.6,
+        max_attempt_factor: int = 100,
     ) -> None:
         if x_range_m[0] >= x_range_m[1] or y_range_m[0] >= y_range_m[1]:
             raise ValueError("pose sampling ranges must be increasing")
@@ -96,21 +121,61 @@ class PoseSampler:
         self.y_range_m = y_range_m
         self.altitude_m = altitude_m
         self.seed = seed
+        if safe_dist_m <= 0.0 or not math.isfinite(safe_dist_m):
+            raise ValueError("safe_dist_m must be finite and positive")
+        if max_attempt_factor <= 0:
+            raise ValueError("max_attempt_factor must be positive")
+        self.safe_dist_m = float(safe_dist_m)
+        self.max_attempt_factor = int(max_attempt_factor)
+        self._obstacle_tree: cKDTree | None = None
+        if obstacle_points_ned is not None:
+            points = np.asarray(obstacle_points_ned, dtype=np.float32)
+            if points.ndim != 2 or points.shape[1] != 3 or not np.isfinite(points).all():
+                raise ValueError("obstacle_points_ned must be a finite Nx3 array")
+            if len(points) == 0:
+                raise ValueError("obstacle_points_ned must not be empty")
+            self._obstacle_tree = cKDTree(points)
+        self.last_stats = {
+            "attempts": 0,
+            "obstacle_rejections": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+        }
 
     def sample(self, count: int) -> list[PoseSample]:
         if count < 0:
             raise ValueError("count must be non-negative")
         rng = np.random.default_rng(self.seed)
         result: list[PoseSample] = []
-        for _ in range(count):
+        attempts = 0
+        obstacle_rejections = 0
+        maximum_attempts = max(count, count * self.max_attempt_factor)
+        while len(result) < count and attempts < maximum_attempts:
+            attempts += 1
             x = float(rng.uniform(*self.x_range_m))
             y = float(rng.uniform(*self.y_range_m))
+            position = np.array([x, y, -self.altitude_m], dtype=np.float64)
+            if self._obstacle_tree is not None:
+                clearance = float(self._obstacle_tree.query(position, k=1)[0])
+                if not math.isfinite(clearance) or clearance < self.safe_dist_m:
+                    obstacle_rejections += 1
+                    continue
             yaw = float(rng.uniform(-math.pi, math.pi))
             result.append(
                 PoseSample(
-                    (x, y, -self.altitude_m),
+                    tuple(float(value) for value in position),
                     (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)),
                 )
+            )
+        self.last_stats = {
+            "attempts": attempts,
+            "obstacle_rejections": obstacle_rejections,
+            "accepted": len(result),
+            "acceptance_rate": 0.0 if attempts == 0 else len(result) / attempts,
+        }
+        if len(result) != count:
+            raise RuntimeError(
+                f"accepted only {len(result)}/{count} safe poses after {attempts} attempts"
             )
         return result
 
@@ -172,19 +237,7 @@ def _toml_string(value: str) -> str:
 
 def _rotation_from_quaternion_wxyz(quaternion: Sequence[float]) -> np.ndarray:
     """Return the active body-to-world rotation for a WXYZ quaternion."""
-    w, x, y, z = (float(value) for value in quaternion)
-    norm = math.sqrt(w * w + x * x + y * y + z * z)
-    if norm < 1.0e-8:
-        raise ValueError("orientation quaternion must not be zero")
-    w, x, y, z = (value / norm for value in (w, x, y, z))
-    return np.array(
-        [
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
-        ],
-        dtype=np.float32,
-    )
+    return quaternion_wxyz_to_matrix(quaternion).astype(np.float32)
 
 
 def depth_planar_to_world_ned(
@@ -225,7 +278,7 @@ def depth_planar_to_world_ned(
 
 
 class SceneWriter:
-    """Writes the compact scene format consumed by the OpenSeek text dataset."""
+    """Write a ScaleNav RGB-D scene in the world-ENU/body-FLU contract."""
 
     def __init__(
         self,
@@ -234,6 +287,7 @@ class SceneWriter:
         *,
         overwrite: bool = False,
         include_depth_obstacles: bool = False,
+        sampling_seed: int | None = None,
     ) -> None:
         self.scene_dir = Path(scene_dir)
         self.texture_dir = self.scene_dir / "Textures"
@@ -242,6 +296,7 @@ class SceneWriter:
         self.texture_dir.mkdir(parents=True, exist_ok=True)
         self.config = config
         self.include_depth_obstacles = include_depth_obstacles
+        self.sampling_seed = sampling_seed
         self.depth_obstacle_points: list[np.ndarray] = []
         self.records: list[dict[str, Any]] = []
 
@@ -262,6 +317,8 @@ class SceneWriter:
             raise ValueError("depth must be HxW and match RGB dimensions")
         if not np.isfinite(depth_m).all():
             raise ValueError("depth contains non-finite values")
+        if not np.any((depth_m > 0.05) & (depth_m <= self.config.max_depth_m)):
+            raise ValueError("depth contains no valid measurement")
         depth = np.clip(depth_m.astype(np.float32), 0.0, self.config.max_depth_m)
         if self.include_depth_obstacles:
             self.depth_obstacle_points.append(
@@ -279,15 +336,21 @@ class SceneWriter:
             raise IOError(f"failed to write {rgb_name}")
         if not cv2.imwrite(str(self.texture_dir / depth_name), depth):
             raise IOError(f"failed to write {depth_name}")
+        position_enu, orientation_enu_flu, rotation_enu_flu = ned_frd_pose_to_enu_flu(
+            pose.position_ned, pose.orientation_wxyz
+        )
+        yaw_enu = math.degrees(math.atan2(rotation_enu_flu[1, 0], rotation_enu_flu[0, 0]))
         self.records.append(
             {
                 "frameIndex": index,
                 "timestampNs": int(timestamp_ns),
                 "rgbFileName": rgb_name,
                 "depthFileName": depth_name,
-                "posStart": [float(value) for value in pose.position_ned],
-                "orientationWxyz": [float(value) for value in pose.orientation_wxyz],
-                "yawStart": float(pose.yaw_deg),
+                "posStart": [float(value) for value in position_enu],
+                "orientationWxyz": [float(value) for value in orientation_enu_flu],
+                "yawStart": yaw_enu,
+                "sourcePositionNed": [float(value) for value in pose.position_ned],
+                "sourceOrientationWxyz": [float(value) for value in pose.orientation_wxyz],
                 "targetPrompt": target_prompt,
                 "depthMaxMeters": float(self.config.max_depth_m),
             }
@@ -315,14 +378,21 @@ class SceneWriter:
             merge_person_collision_point_cloud(source, person_positions, temporary)
             source = temporary
             temporary_paths.append(temporary)
-        if source.resolve() != destination.resolve():
-            shutil.copyfile(source, destination)
+        points_ned = read_ascii_point_cloud_ply(source)
+        write_point_cloud_ply(destination, ned_to_enu(points_ned))
         for temporary in temporary_paths:
             temporary.unlink(missing_ok=True)
         lines = [
+            "routeDatasetVersion = 1",
+            'worldFrame = "world_enu"',
+            'bodyFrame = "body_flu"',
+            'sourcePoseFrame = "airsim_ned_frd"',
+            f"samplingSeed = {self.sampling_seed if self.sampling_seed is not None else -1}",
             f"depthCameraHorizontalFOV = {self.config.horizontal_fov_deg}",
             f"depthCameraVerticalFOV = {self.config.vertical_fov_deg}",
             f"depthMaxMeters = {self.config.max_depth_m}",
+            f"cameraTranslationBodyFlu = {list(self.config.camera_translation_body_flu)}",
+            f"cameraOrientationBodyFluWxyz = {list(self.config.camera_orientation_body_flu_wxyz)}",
             "",
         ]
         for record in self.records:
@@ -336,6 +406,8 @@ class SceneWriter:
                     f"posStart = {record['posStart']}",
                     f"orientationWxyz = {record['orientationWxyz']}",
                     f"yawStart = {record['yawStart']}",
+                    f"sourcePositionNed = {record['sourcePositionNed']}",
+                    f"sourceOrientationWxyz = {record['sourceOrientationWxyz']}",
                     f"targetPrompt = {_toml_string(record['targetPrompt'])}",
                     f"depthMaxMeters = {record['depthMaxMeters']}",
                     "",
@@ -360,12 +432,14 @@ class AirSimSnapshotCollector:
         target_prompt: str = "person",
         person_positions: Path | None = None,
         overwrite: bool = False,
+        sampling_seed: int | None = None,
     ) -> Path:
         writer = SceneWriter(
             scene_dir,
             self.config,
             overwrite=overwrite,
             include_depth_obstacles=True,
+            sampling_seed=sampling_seed,
         )
         requests = self._image_requests()
         for index, requested_pose in enumerate(poses):
@@ -429,7 +503,9 @@ def _load_toml(path: Path) -> dict[str, Any]:
         raise RuntimeError("rtoml is required to validate collected scenes") from error
 
 
-def validate_scene(scene_dir: Path, *, require_semantic: bool = False) -> int:
+def validate_scene(
+    scene_dir: Path, *, require_semantic: bool = False, require_routes: bool = False
+) -> int:
     scene_dir = Path(scene_dir)
     data_path = scene_dir / "data.toml"
     texture_dir = scene_dir / "Textures"
@@ -437,6 +513,10 @@ def validate_scene(scene_dir: Path, *, require_semantic: bool = False) -> int:
     if not data_path.is_file() or not texture_dir.is_dir() or not obstacle_path.is_file():
         raise SceneValidationError(f"incomplete scene: {scene_dir}")
     document = _load_toml(data_path)
+    if document.get("worldFrame") != "world_enu" or document.get("bodyFrame") != "body_flu":
+        raise SceneValidationError(f"scene coordinate contract is not ENU/FLU: {scene_dir}")
+    if int(document.get("routeDatasetVersion", -1)) != 1:
+        raise SceneValidationError(f"unsupported route dataset version: {scene_dir}")
     records = document.get("dataArray", [])
     if not records:
         raise SceneValidationError(f"scene has no frames: {scene_dir}")
@@ -466,16 +546,28 @@ def validate_scene(scene_dir: Path, *, require_semantic: bool = False) -> int:
                 raise SceneValidationError(f"invalid semantic heatmap at index {index}")
         if len(record.get("posStart", [])) != 3 or len(record.get("orientationWxyz", [])) != 4:
             raise SceneValidationError(f"invalid pose metadata at index {index}")
+    routes_path = scene_dir / "routes.npz"
+    if require_routes and not routes_path.is_file():
+        raise SceneValidationError(f"missing routes.npz: {scene_dir}")
+    if routes_path.is_file():
+        try:
+            load_route_table(routes_path, frame_count=len(records))
+        except (OSError, ValueError) as error:
+            raise SceneValidationError(f"invalid routes.npz in {scene_dir}: {error}") from error
     return len(records)
 
 
-def validate_dataset(data_root: Path, *, require_semantic: bool = False) -> dict[str, int]:
+def validate_dataset(
+    data_root: Path, *, require_semantic: bool = False, require_routes: bool = False
+) -> dict[str, int]:
     data_root = Path(data_root)
     scene_dirs = sorted(data_root.glob("Scene_*"))
     if not scene_dirs:
         raise SceneValidationError(f"no Scene_* directories under {data_root}")
     report = {
-        scene.name: validate_scene(scene, require_semantic=require_semantic)
+        scene.name: validate_scene(
+            scene, require_semantic=require_semantic, require_routes=require_routes
+        )
         for scene in scene_dirs
     }
     return report
@@ -687,7 +779,7 @@ def _load_airsim(root: Path) -> Any:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect YOPO-Simple RGB-D scene snapshots from AirSim.")
+    parser = argparse.ArgumentParser(description="Collect ScaleNav RGB-D training scenes from AirSim.")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--obstacle-ply", type=Path)
     parser.add_argument("--export-static-meshes", action="store_true")
@@ -705,6 +797,7 @@ def main() -> None:
     parser.add_argument("--y-min", type=float, default=-30.0)
     parser.add_argument("--y-max", type=float, default=30.0)
     parser.add_argument("--altitude", type=float, default=1.6)
+    parser.add_argument("--safe-dist", type=float, default=0.6)
     parser.add_argument("--prompt", default="person")
     parser.add_argument("--color-order", choices=("rgb", "bgr"), default="bgr")
     parser.add_argument("--overwrite", action="store_true")
@@ -714,10 +807,6 @@ def main() -> None:
     client = _load_airsim(args.airsim_root)
     client.confirmConnection()
     config = CaptureConfig(color_order=args.color_order)
-    poses = PoseSampler(
-        (args.x_min, args.x_max), (args.y_min, args.y_max), args.altitude, args.seed
-    ).sample(args.count)
-    collector = AirSimSnapshotCollector(client, config)
     output = args.output / f"Scene_{args.scene_id}"
     if output.exists() and any(output.iterdir()) and not args.overwrite:
         raise FileExistsError(f"scene directory is not empty: {output}")
@@ -727,6 +816,25 @@ def main() -> None:
         args.output.mkdir(parents=True, exist_ok=True)
         temporary_obstacle = args.output / f".Scene_{args.scene_id}.static.ply"
         obstacle_ply = export_static_mesh_point_cloud(client, temporary_obstacle)
+    sampling_obstacles = read_ascii_point_cloud_ply(obstacle_ply)
+    if args.person_positions is not None:
+        sampling_obstacles = np.concatenate(
+            (
+                sampling_obstacles,
+                generated_person_collision_points(load_generated_people(args.person_positions)),
+            ),
+            axis=0,
+        )
+    sampler = PoseSampler(
+        (args.x_min, args.x_max),
+        (args.y_min, args.y_max),
+        args.altitude,
+        args.seed,
+        obstacle_points_ned=sampling_obstacles,
+        safe_dist_m=args.safe_dist,
+    )
+    poses = sampler.sample(args.count)
+    collector = AirSimSnapshotCollector(client, config)
     try:
         collector.collect_scene(
             output,
@@ -735,11 +843,13 @@ def main() -> None:
             target_prompt=args.prompt,
             person_positions=args.person_positions,
             overwrite=args.overwrite,
+            sampling_seed=args.seed,
         )
     finally:
         if temporary_obstacle is not None:
             temporary_obstacle.unlink(missing_ok=True)
     print(f"collected {args.count} frames to {output}")
+    print(json.dumps(sampler.last_stats, sort_keys=True))
 
 
 if __name__ == "__main__":

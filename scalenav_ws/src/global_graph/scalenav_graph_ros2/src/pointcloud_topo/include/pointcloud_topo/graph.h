@@ -220,6 +220,13 @@ public:
   unordered_map<TopoNode::Ptr, float> weight_;
 };
 
+inline bool semanticNodeActiveForPlanning(
+    const TopoNode &node, std::int64_t active_virtual_stamp_ns) {
+  return node.geometry_state_ == TopoGeometryState::Verified ||
+         active_virtual_stamp_ns == 0 ||
+         node.semantic_stamp_ns_ == active_virtual_stamp_ns;
+}
+
 struct PairPtrHash {
   std::size_t operator()(const std::pair<TopoNode::Ptr, TopoNode::Ptr> &p) const {
     return std::hash<TopoNode::Ptr>()(p.first) ^ std::hash<TopoNode::Ptr>()(p.second);

@@ -1,193 +1,293 @@
-"""
-Training Strategy
-supervised learning, imitation learning, testing, rollout
-"""
+from __future__ import annotations
+
+import json
 import os
-import time
-import atexit
+from pathlib import Path
+
+import numpy as np
+import torch
 from torch.nn import functional as F
-from rich.progress import Progress
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 
 from config.config import cfg
 from loss.loss_function import YOPOLoss
-from policy.yopo_network import YopoNetwork
+from policy.state_transform import rotate_body2world, state_body2world
 from policy.yopo_dataset import YOPODataset
-from policy.state_transform import *
+from policy.yopo_network import YopoNetwork
 
 
 class YopoTrainer:
     def __init__(
-            self,
-            learning_rate=0.001,
-            batch_size=32,
-            loss_weight=[],
-            tensorboard_path=None,
-            checkpoint_path=None,
-            save_on_exit=False,
-    ):
-        self.batch_size = batch_size
+        self,
+        *,
+        data_root: str | Path | None = None,
+        learning_rate: float = 1.5e-4,
+        batch_size: int = 16,
+        num_workers: int = 4,
+        tensorboard_path: str | Path | None = None,
+        checkpoint_path: str | Path | None = None,
+        device: str | torch.device | None = None,
+        route_dropout_probability: float | None = None,
+    ) -> None:
+        self.batch_size = int(batch_size)
         self.max_grad_norm = 0.1
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.loss_weight = loss_weight
-        if save_on_exit: self._exit_func = atexit.register(self.save_model)
-        # logger
-        self.progress_log = Progress()
-        self.tensorboard_path = self.get_next_log_path(tensorboard_path)
-        self.tensorboard_log = SummaryWriter(log_dir=self.tensorboard_path)
-        # params
-        self.traj_num = cfg['traj_num']
-
-        # network
-        print("Loading network...")
-        self.policy = YopoNetwork()
-        self.policy = self.policy.to(self.device)
-        try:
-            state_dict = torch.load(checkpoint_path, weights_only=True)
-            self.policy.load_state_dict(state_dict)
-            print("Checkpoint ", checkpoint_path, " loaded successfully")
-        except FileNotFoundError:
-            print("Training from scratch")
-
-        # loss
-        self.yopo_loss = YOPOLoss()
-
-        # optimizer
-        self.optimizer = torch.optim.AdamW(self.policy.parameters(), lr=learning_rate, fused=True)
-        print("Network Loaded! Loading Dataset...")
-
-        # dataset (you can adjust num_workers according to your training speed)
-        self.train_dataloader = DataLoader(YOPODataset(mode='train'), batch_size=self.batch_size, shuffle=True,
-                                           num_workers=4, pin_memory=True)
-        self.val_dataloader = DataLoader(YOPODataset(mode='valid'), batch_size=self.batch_size, shuffle=False,
-                                         num_workers=4, pin_memory=True)
-        print("Dataset Loaded!")
-
-    def train(self, epoch, save_interval=None):
-        with self.progress_log:
-            total_progress = self.progress_log.add_task("Training", total=epoch)
-            for self.epoch_i in range(epoch):
-                self.policy.train()
-                self.train_one_epoch(self.epoch_i, total_progress)
-                self.policy.eval()
-                self.eval_one_epoch(self.epoch_i)
-                if save_interval is not None and (self.epoch_i + 1) % save_interval == 0:
-                    self.progress_log.console.log("Saving model...")
-                    policy_path = self.tensorboard_path + "/epoch{}.pth".format(self.epoch_i + 1, 0)
-                    torch.save(self.policy.state_dict(), policy_path)
-            self.progress_log.console.log("Train YOPO Finish!")
-            self.progress_log.remove_task(total_progress)
-
-    def train_one_epoch(self, epoch: int, total_progress):
-        one_epoch_progress = self.progress_log.add_task(f"Epoch: {epoch}", total=len(self.train_dataloader))
-        inspect_interval = max(1, len(self.train_dataloader) // 16)
-        traj_losses, score_losses, smooth_losses, safety_losses, goal_losses, acc_losses, start_time = [], [], [], [], [], [], time.time()
-        for step, (depth, pos, rot, obs_b, map_id) in enumerate(self.train_dataloader):  # obs: body frame
-            if depth.shape[0] != self.batch_size:  continue  # batch size == number of env
-
-            self.optimizer.zero_grad()
-
-            trajectory_loss, score_loss, smooth_cost, safety_cost, goal_cost, acc_cost = self.forward_and_compute_loss(depth, pos, rot, obs_b, map_id)
-
-            loss = self.loss_weight[0] * trajectory_loss + self.loss_weight[1] * score_loss
-
-            # Optimize the policy
-            loss.backward()
-            self.optimizer.step()
-
-            traj_losses.append(self.loss_weight[0] * trajectory_loss.item())
-            score_losses.append(self.loss_weight[1] * score_loss.item())
-            smooth_losses.append(self.loss_weight[0] * smooth_cost.item())
-            safety_losses.append(self.loss_weight[0] * safety_cost.item())
-            goal_losses.append(self.loss_weight[0] * goal_cost.item())
-            acc_losses.append(self.loss_weight[0] * acc_cost.item())
-
-            if step % inspect_interval == inspect_interval - 1:
-                batch_fps = inspect_interval / (time.time() - start_time)
-                self.progress_log.console.log(f"Epoch: {epoch}, Traj Loss: {np.mean(traj_losses):.3g}, "
-                                              f"Score Loss: {np.mean(score_losses):.3g} "
-                                              f"Batch FPS: {batch_fps:.3g}")
-                self.tensorboard_log.add_scalar("Train/TrajLoss", np.mean(traj_losses), epoch * len(self.train_dataloader) + step)
-                self.tensorboard_log.add_scalar("Train/ScoreLoss", np.mean(score_losses), epoch * len(self.train_dataloader) + step)
-                self.tensorboard_log.add_scalar("Detail/SmoothLoss", np.mean(smooth_losses), epoch * len(self.train_dataloader) + step)
-                self.tensorboard_log.add_scalar("Detail/SafetyLoss", np.mean(safety_losses), epoch * len(self.train_dataloader) + step)
-                self.tensorboard_log.add_scalar("Detail/GoalLoss", np.mean(goal_losses), epoch * len(self.train_dataloader) + step)
-                self.tensorboard_log.add_scalar("Detail/AccelLoss", np.mean(acc_losses), epoch * len(self.train_dataloader) + step)
-                traj_losses, score_losses, smooth_losses, safety_losses, goal_losses, acc_losses, start_time = [], [], [], [], [], [], time.time()
-
-            self.progress_log.update(one_epoch_progress, advance=1)
-            self.progress_log.update(total_progress, advance=1 / len(self.train_dataloader))
-
-        self.progress_log.remove_task(one_epoch_progress)
-
-    @torch.inference_mode()
-    def eval_one_epoch(self, epoch: int):
-        one_epoch_progress = self.progress_log.add_task(f"Eval: {epoch}", total=len(self.val_dataloader))
-        traj_losses, score_losses = [], []
-        for step, (depth, pos, rot, obs_b, map_id) in enumerate(self.val_dataloader):  # obs: body frame
-            if depth.shape[0] != self.batch_size:  continue  # batch size == num of env
-
-            trajectory_loss, score_loss, _, _, _, _ = self.forward_and_compute_loss(depth, pos, rot, obs_b, map_id)
-
-            traj_losses.append(self.loss_weight[0] * trajectory_loss.item())
-            score_losses.append(self.loss_weight[1] * score_loss.item())
-            self.progress_log.update(one_epoch_progress, advance=1)
-
-        self.progress_log.console.log(f"Eval: {epoch}, Traj Loss: {np.mean(traj_losses):.3g}, Score Loss: {np.mean(score_losses):.3g} ")
-        self.tensorboard_log.add_scalar("Eval/TrajLoss", np.mean(traj_losses), epoch)
-        self.tensorboard_log.add_scalar("Eval/ScoreLoss", np.mean(score_losses), epoch)
-        self.progress_log.remove_task(one_epoch_progress)
-
-    def forward_and_compute_loss(self, depth, pos, rot, obs_b, map_id):
-        depth, pos, rot, obs_b, map_id = [x.to(self.device) for x in [depth, pos, rot, obs_b, map_id]]
-
-        # 1. pre-process
-        goal_w, start_vel_w, start_acc_w = state_body2world(pos, rot, obs_b[:, 6:9], obs_b[:, 0:3], obs_b[:, 3:6])
-        start_state_w = torch.stack([pos, start_vel_w, start_acc_w], dim=1)
-
-        # 2. forward propagation
-        endstate, score = self.policy.inference(depth, obs_b)
-
-        # 3. post-process [B, V, H, 9] -> [B*V*H, 9]
-        endstate_flat = endstate.permute(0, 2, 3, 1).reshape(self.batch_size * self.traj_num, 9)
-        score_flat = score.reshape(self.batch_size * self.traj_num)
-
-        pos_expanded = pos.repeat_interleave(self.traj_num, dim=0)  # [B*V*H, 3]
-        rot_expanded = rot.repeat_interleave(self.traj_num, dim=0)  # [B*V*H, 3, 3]
-        start_state_w = start_state_w.repeat_interleave(self.traj_num, dim=0)  # [B*V*H, 3, 3]
-        goal_w = goal_w.repeat_interleave(self.traj_num, dim=0)  # [B*V*H, 3]
-
-        # [B*V*H, 3] [B*V*H, 3] [B*V*H, 3]
-        end_pos_w, end_vel_w, end_acc_w = state_body2world(
-            pos_expanded, rot_expanded,
-            endstate_flat[:, 0:3],
-            endstate_flat[:, 3:6],
-            endstate_flat[:, 6:9]
+        self.device = torch.device(
+            device or ("cuda" if torch.cuda.is_available() else "cpu")
         )
-        # [B*V*H, 3, 3]: [px, py, pz; vx, vy, vz; ax, ay, az]
-        end_state_w = torch.stack([end_pos_w, end_vel_w, end_acc_w], dim=1)
+        output_root = Path(tensorboard_path or Path(__file__).resolve().parent.parent / "saved")
+        output_root.mkdir(parents=True, exist_ok=True)
+        self.output_path = self.get_next_log_path(output_root)
+        self.tensorboard_log = SummaryWriter(log_dir=self.output_path)
+        self.traj_num = int(cfg["traj_num"])
 
-        smooth_cost, safety_cost, goal_cost, acc_cost = self.yopo_loss(start_state_w, end_state_w, goal_w, map_id)
-        trajectory_loss = (smooth_cost + safety_cost + goal_cost + acc_cost).mean()
+        self.train_dataset = YOPODataset(
+            mode="train",
+            data_root=data_root,
+            route_dropout_probability=route_dropout_probability,
+        )
+        self.valid_dataset = YOPODataset(
+            mode="valid",
+            data_root=data_root,
+            route_dropout_probability=0.0,
+        )
+        loader_options = {
+            "batch_size": self.batch_size,
+            "num_workers": int(num_workers),
+            "pin_memory": self.device.type == "cuda",
+        }
+        self.train_dataloader = DataLoader(
+            self.train_dataset, shuffle=True, drop_last=False, **loader_options
+        )
+        self.val_dataloader = DataLoader(
+            self.valid_dataset, shuffle=False, drop_last=False, **loader_options
+        )
 
-        score_label = (smooth_cost + safety_cost + goal_cost + acc_cost).clone().detach()
-        score_loss = F.smooth_l1_loss(score_flat, score_label)
-        return trajectory_loss, score_loss, smooth_cost.mean(), safety_cost.mean(), goal_cost.mean(), acc_cost.mean()
+        self.policy = YopoNetwork().to(self.device)
+        self.best_validation_cost = float("inf")
+        self.epoch_i = -1
+        self._checkpoint_optimizer_state = None
+        if checkpoint_path:
+            self.load_checkpoint(Path(checkpoint_path))
+        self.yopo_loss = YOPOLoss(
+            obstacle_paths=self.train_dataset.obstacle_paths,
+            device=self.device,
+        ).to(self.device)
+        optimizer_options = {"lr": float(learning_rate)}
+        if self.device.type == "cuda":
+            optimizer_options["fused"] = True
+        self.optimizer = torch.optim.AdamW(self.policy.parameters(), **optimizer_options)
+        if self._checkpoint_optimizer_state is not None:
+            self.optimizer.load_state_dict(self._checkpoint_optimizer_state)
+        self._write_run_metadata()
 
-    def save_model(self):
-        if hasattr(self, "epoch_i"):
-            self.progress_log.console.log("Saving model...")
-            policy_path = self.tensorboard_path + "/epoch{}.pth".format(self.epoch_i + 1, 0)
-            torch.save(self.policy.state_dict(), policy_path)
-            atexit.unregister(self._exit_func)
+    def train(
+        self,
+        epochs: int,
+        *,
+        freeze_backbone_epochs: int = 0,
+        save_interval: int | None = None,
+        max_train_batches: int | None = None,
+        max_val_batches: int | None = None,
+    ) -> None:
+        for epoch in range(int(epochs)):
+            self.epoch_i = epoch
+            self._set_backbone_trainable(epoch >= freeze_backbone_epochs)
+            train_metrics = self.run_epoch(
+                self.train_dataloader,
+                training=True,
+                max_batches=max_train_batches,
+            )
+            validation_metrics = self.run_epoch(
+                self.val_dataloader,
+                training=False,
+                max_batches=max_val_batches,
+            )
+            self._log_metrics("Train", train_metrics, epoch)
+            self._log_metrics("Validation", validation_metrics, epoch)
+            validation_cost = validation_metrics["selected_total_cost"]
+            if validation_cost < self.best_validation_cost:
+                self.best_validation_cost = validation_cost
+                self.save_checkpoint(self.output_path / "best.pth")
+            if save_interval and (epoch + 1) % save_interval == 0:
+                self.save_checkpoint(self.output_path / f"epoch{epoch + 1}.pth")
+            print(
+                f"epoch={epoch + 1} train={train_metrics['total_loss']:.5f} "
+                f"valid={validation_metrics['total_loss']:.5f} "
+                f"selected={validation_cost:.5f} "
+                f"regret={validation_metrics['selection_regret']:.5f}"
+            )
+        self.save_checkpoint(self.output_path / "last.pth")
+        self.tensorboard_log.flush()
 
-    def get_next_log_path(self, base_path):
-        nums = [int(name.split("_")[1])
-                for name in os.listdir(base_path)
-                if os.path.isdir(os.path.join(base_path, name)) and name.startswith("YOPO_") and name.split("_")[1].isdigit()]
-        next_n = max(nums, default=-1) + 1
-        next_path = os.path.join(base_path, f"YOPO_{next_n}")
-        os.makedirs(next_path, exist_ok=False)
-        print("record tensorboard log to ", next_path)
-        return next_path
+    def run_epoch(
+        self,
+        dataloader: DataLoader,
+        *,
+        training: bool,
+        max_batches: int | None = None,
+    ) -> dict[str, float]:
+        self.policy.train(training)
+        metrics: list[dict[str, float]] = []
+        context = torch.enable_grad() if training else torch.inference_mode()
+        with context:
+            for batch_index, batch in enumerate(dataloader):
+                if max_batches is not None and batch_index >= max_batches:
+                    break
+                batch = {name: value.to(self.device, non_blocking=True) for name, value in batch.items()}
+                if training:
+                    self.optimizer.zero_grad(set_to_none=True)
+                total_loss, batch_metrics = self.forward_and_compute_loss(batch)
+                if training:
+                    total_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                    self.optimizer.step()
+                metrics.append(batch_metrics)
+        if not metrics:
+            raise RuntimeError("epoch did not process any batches")
+        return {
+            name: float(np.mean([entry[name] for entry in metrics]))
+            for name in metrics[0]
+        }
+
+    def forward_and_compute_loss(
+        self, batch: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        endstate, score = self.policy(
+            batch["depth"],
+            batch["motion_body"],
+            batch["frontier_body"],
+            batch["route_bubbles"],
+            batch["route_mask"],
+        )
+        batch_size = batch["depth"].shape[0]
+        position = batch["position_world"]
+        rotation = batch["rotation_world_body"]
+        motion = batch["motion_body"]
+        start_velocity_world = rotate_body2world(rotation, motion[:, :3])
+        start_acceleration_world = rotate_body2world(rotation, motion[:, 3:6])
+        start_state_world = torch.stack(
+            (position, start_velocity_world, start_acceleration_world), dim=1
+        )
+
+        endstate_flat = endstate.permute(0, 2, 3, 1).reshape(batch_size * self.traj_num, 9)
+        score_flat = score.reshape(batch_size * self.traj_num)
+        position_expanded = position.repeat_interleave(self.traj_num, dim=0)
+        rotation_expanded = rotation.repeat_interleave(self.traj_num, dim=0)
+        end_position_world, end_velocity_world, end_acceleration_world = state_body2world(
+            position_expanded,
+            rotation_expanded,
+            endstate_flat[:, :3],
+            endstate_flat[:, 3:6],
+            endstate_flat[:, 6:9],
+        )
+        end_state_world = torch.stack(
+            (end_position_world, end_velocity_world, end_acceleration_world), dim=1
+        )
+        start_state_expanded = start_state_world.repeat_interleave(self.traj_num, dim=0)
+        frontier_expanded = batch["frontier_world"].repeat_interleave(self.traj_num, dim=0)
+        route_points_expanded = batch["dense_route_world"].repeat_interleave(
+            self.traj_num, dim=0
+        )
+        route_radii_expanded = batch["dense_route_radius"].repeat_interleave(
+            self.traj_num, dim=0
+        )
+        route_mask_expanded = batch["dense_route_mask"].repeat_interleave(
+            self.traj_num, dim=0
+        )
+        costs = self.yopo_loss(
+            start_state_expanded,
+            end_state_world,
+            frontier_expanded,
+            batch["map_id"],
+            route_points_expanded,
+            route_radii_expanded,
+            route_mask_expanded,
+        )
+        route_weight = batch["route_quality_weight"].repeat_interleave(self.traj_num)
+        for name in ("path_corridor", "path_progress", "path_tangent"):
+            costs[name] = costs[name] * route_weight
+        total_cost = torch.stack(tuple(costs.values()), dim=0).sum(dim=0)
+        trajectory_loss = total_cost.mean()
+        score_loss = F.smooth_l1_loss(score_flat, total_cost.detach())
+        total_loss = trajectory_loss + score_loss
+
+        total_by_sample = total_cost.view(batch_size, self.traj_num)
+        score_by_sample = score_flat.view(batch_size, self.traj_num)
+        selected_index = score_by_sample.argmin(dim=1)
+        oracle_cost, oracle_index = total_by_sample.min(dim=1)
+        selected_cost = torch.gather(total_by_sample, 1, selected_index[:, None]).squeeze(1)
+        metrics = {
+            "total_loss": float(total_loss.detach()),
+            "trajectory_loss": float(trajectory_loss.detach()),
+            "score_loss": float(score_loss.detach()),
+            "selected_total_cost": float(selected_cost.mean().detach()),
+            "oracle_total_cost": float(oracle_cost.mean().detach()),
+            "selection_regret": float((selected_cost - oracle_cost).mean().detach()),
+            "top1": float((selected_index == oracle_index).float().mean().detach()),
+        }
+        metrics.update({name: float(value.mean().detach()) for name, value in costs.items()})
+        return total_loss, metrics
+
+    def _set_backbone_trainable(self, trainable: bool) -> None:
+        for parameter in self.policy.image_backbone.parameters():
+            parameter.requires_grad_(trainable)
+
+    def load_checkpoint(self, path: Path) -> None:
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+        try:
+            self.policy.load_state_dict(state_dict)
+        except RuntimeError:
+            self.policy.load_yopo_simple_state_dict(state_dict)
+        if isinstance(checkpoint, dict) and "optimizer_state_dict" in checkpoint:
+            self._checkpoint_optimizer_state = checkpoint["optimizer_state_dict"]
+            self.epoch_i = int(checkpoint.get("epoch", -1))
+            self.best_validation_cost = float(
+                checkpoint.get("best_validation_cost", float("inf"))
+            )
+        print(f"loaded checkpoint: {path}")
+
+    def save_checkpoint(self, path: Path) -> None:
+        torch.save(
+            {
+                "model_state_dict": self.policy.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "epoch": self.epoch_i,
+                "best_validation_cost": self.best_validation_cost,
+                "route_dataset_version": int(cfg["route_dataset_version"]),
+                "route_bubble_count": int(cfg["route_bubble_count"]),
+                "route_anchor_distances_m": list(cfg["route_anchor_distances_m"]),
+                "loss_weights": {
+                    name: float(cfg[name])
+                    for name in ("ws", "wc", "wa", "wg", "wp", "wprogress", "wtangent")
+                },
+            },
+            path,
+        )
+
+    def _write_run_metadata(self) -> None:
+        metadata = {
+            "data_root": str(self.train_dataset.data_root),
+            "train_samples": len(self.train_dataset),
+            "validation_samples": len(self.valid_dataset),
+            "device": str(self.device),
+            "route_dataset_version": int(cfg["route_dataset_version"]),
+        }
+        (self.output_path / "run.json").write_text(
+            json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8"
+        )
+
+    def _log_metrics(self, prefix: str, metrics: dict[str, float], epoch: int) -> None:
+        for name, value in metrics.items():
+            self.tensorboard_log.add_scalar(f"{prefix}/{name}", value, epoch)
+
+    @staticmethod
+    def get_next_log_path(base_path: Path) -> Path:
+        numbers = []
+        for path in base_path.glob("YOPO_*"):
+            if path.is_dir() and path.name.removeprefix("YOPO_").isdigit():
+                numbers.append(int(path.name.removeprefix("YOPO_")))
+        output = base_path / f"YOPO_{max(numbers, default=-1) + 1}"
+        output.mkdir(parents=False, exist_ok=False)
+        return output

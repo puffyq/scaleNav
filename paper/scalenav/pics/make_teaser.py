@@ -36,7 +36,7 @@ SELECTED = "#007C83"
 UAV = "#24343D"
 MISSION = "#C43C39"
 FRONTIER = "#E28A17"
-SUBGOAL = "#B64E8A"
+LOCAL_GOAL = "#B64E8A"
 ROUTE = "#3973B7"
 RISK_HIGH = "#D14E46"
 LABEL_BOX = dict(boxstyle="square,pad=0.12", facecolor=BACKGROUND,
@@ -167,12 +167,12 @@ def choose_evidence_frame(
         frontier = marker_pose_position(
             graph_markers, "epic_frontier_goal", "epic_route_terminal"
         )
-        subgoal = marker_pose_position(
+        local_goal = marker_pose_position(
             graph_markers, "epic_local_goal", "epic_yopo_next_goal"
         )
-        if frontier is not None and subgoal is not None:
+        if frontier is not None and local_goal is not None:
             position = interpolated_odom_position(events["odom"], rgb_event["stamp_ns"])
-            layer_separation = float(np.linalg.norm(frontier[:2] - subgoal[:2]))
+            layer_separation = float(np.linalg.norm(frontier[:2] - local_goal[:2]))
             frontier_advance = float(np.linalg.norm(frontier[:2] - position[:2]))
             hierarchy_quality = min(layer_separation / 10.0, 1.0) * min(
                 frontier_advance / 20.0, 1.0
@@ -555,7 +555,7 @@ def draw_map_panel(
     frontier_goal = marker_pose_position(
         evidence_markers, "epic_frontier_goal", "epic_route_terminal"
     )
-    subgoal = marker_pose_position(
+    local_goal = marker_pose_position(
         evidence_markers, "epic_local_goal", "epic_yopo_next_goal"
     )
     graph_height = float(current_position[2])
@@ -698,13 +698,13 @@ def draw_map_panel(
         ax.annotate("frontier_goal", xy=(u[0], v[0]), xytext=(8, 13),
                     textcoords="offset points", fontsize=6.6, color=FRONTIER,
                     fontweight="bold", bbox=LABEL_BOX, zorder=10)
-    if subgoal is not None:
-        u, v = rayfronts_projection(subgoal[None, :])
-        ax.scatter(u, v, marker="o", s=52, facecolor=SUBGOAL,
+    if local_goal is not None:
+        u, v = rayfronts_projection(local_goal[None, :])
+        ax.scatter(u, v, marker="o", s=52, facecolor=LOCAL_GOAL,
                    edgecolor="white", linewidth=0.7, zorder=8.3)
-        ax.annotate("subgoal", xy=(u[0], v[0]), xytext=(-9, -18),
+        ax.annotate("local_goal", xy=(u[0], v[0]), xytext=(-9, -18),
                     textcoords="offset points", ha="right", fontsize=6.6,
-                    color=SUBGOAL, fontweight="bold", bbox=LABEL_BOX, zorder=10)
+                    color=LOCAL_GOAL, fontweight="bold", bbox=LABEL_BOX, zorder=10)
     ax.annotate(
         r"$t^*$", xy=(current_u[0], current_v[0]), xytext=(5, 7),
         textcoords="offset points", fontsize=7.0, color=UAV,
@@ -758,8 +758,8 @@ def draw_map_panel(
         Line2D([], [], color=MISSION, marker="*", markersize=8, lw=0, label="mission_goal"),
         Line2D([], [], color=FRONTIER, marker="D", markersize=5.5, lw=0,
                label="frontier_goal"),
-        Line2D([], [], color=SUBGOAL, marker="o", markersize=5.5, lw=0,
-               label="subgoal"),
+        Line2D([], [], color=LOCAL_GOAL, marker="o", markersize=5.5, lw=0,
+               label="local_goal"),
     ]
     ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.085),
               ncol=5, fontsize=5.9, frameon=False, handlelength=2.0,

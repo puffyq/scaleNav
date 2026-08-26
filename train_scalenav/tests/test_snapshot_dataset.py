@@ -162,6 +162,21 @@ class SnapshotDatasetTests(unittest.TestCase):
             )
             np.testing.assert_allclose(loaded_depth, depth, atol=1e-5)
 
+    def test_scene_writer_rejects_frame_without_valid_depth(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer = SceneWriter(
+                Path(temporary) / "Scene_0001", CaptureConfig(settle_time_s=0)
+            )
+            with self.assertRaises(ValueError):
+                writer.write_frame(
+                    0,
+                    np.zeros((2, 2, 3), dtype=np.uint8),
+                    np.zeros((2, 2), dtype=np.float32),
+                    PoseSample((0, 0, -1.6), (1, 0, 0, 0)),
+                    1,
+                    "route",
+                )
+
     def test_collector_writes_each_requested_pose(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -260,7 +275,22 @@ class SnapshotDatasetTests(unittest.TestCase):
             writer.finalize(obstacle, person_positions=people_path)
             points = read_ascii_point_cloud_ply(scene / "tree.ply")
             self.assertEqual(len(points), 1 + 8 * 5 + 2)
-            np.testing.assert_allclose(points[0], [9, 9, 9])
+            np.testing.assert_allclose(points[0], [9, 9, -9])
+
+    def test_pose_sampler_rejects_points_too_close_to_obstacles(self):
+        obstacles = np.array([[0.0, 0.0, -1.6]], dtype=np.float32)
+        sampler = PoseSampler(
+            (-1.0, 1.0),
+            (-1.0, 1.0),
+            altitude_m=1.6,
+            seed=3,
+            obstacle_points_ned=obstacles,
+            safe_dist_m=0.8,
+        )
+        poses = sampler.sample(20)
+        distances = [np.linalg.norm(np.asarray(pose.position_ned) - obstacles[0]) for pose in poses]
+        self.assertGreaterEqual(min(distances), 0.8)
+        self.assertGreater(sampler.last_stats["obstacle_rejections"], 0)
 
     def test_scene_collision_merge_rejects_binary_ply(self):
         with tempfile.TemporaryDirectory() as temporary:

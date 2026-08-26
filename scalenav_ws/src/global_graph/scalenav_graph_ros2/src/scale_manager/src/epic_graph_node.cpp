@@ -1536,7 +1536,8 @@ class EpicGraphNode final : public rclcpp::Node {
     // accepted route to the current terminal.
     std::vector<TopoNode::Ptr> incumbent_nodes;
     const bool accepted_witness_usable = have_route_terminal_ && route_aligned &&
-      !goal_in_window && !current_route_blocked;
+      !goal_in_window && !current_route_blocked &&
+      active_topo->odom_node_ && !active_topo->odom_node_->neighbors_.empty();
     const bool route_has_execution_horizon = scalenav_graph::canReuseForwardRoute(
       position_, last_witness_path_, effective_lookahead_m,
       static_cast<float>(route_reuse_lateral_distance_m_));
@@ -1554,7 +1555,13 @@ class EpicGraphNode final : public rclcpp::Node {
           static_cast<float>(semantic_cost_weight_),
           static_cast<float>(local_graph_radius_m_), &incumbent_search_stats,
           active_virtual_semantic_stamp_ns);
-        incumbent_result = incumbent_recovered ? "RECOVERED" : "SEARCH_FAILED";
+        if (incumbent_recovered && incumbent_nodes.size() < 2) {
+          incumbent_recovered = false;
+          incumbent_nodes.clear();
+          incumbent_result = "SEARCH_EMPTY";
+        }
+        if (incumbent_recovered) incumbent_result = "RECOVERED";
+        else incumbent_result = incumbent_nodes.empty() ? "SEARCH_EMPTY" : "SEARCH_FAILED";
       }
     }
     const bool frontier_horizon_expired = !route_has_planning_horizon;
@@ -1598,6 +1605,13 @@ class EpicGraphNode final : public rclcpp::Node {
         static_cast<float>(frontier_smoothness_loss_weight_),
         &candidate_search_stats, active_virtual_semantic_stamp_ns);
       candidate_nodes.swap(path_nodes);
+      if (candidate_found && candidate_nodes.size() < 2) {
+        candidate_found = false;
+        candidate_nodes.clear();
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "EPIC rejected topology search result without node path");
+      }
     }
     // Compare the newly searched route with the accepted incumbent. The
     // incumbent wins near ties; only a hard blockage, missing incumbent, or a
@@ -1637,10 +1651,6 @@ class EpicGraphNode final : public rclcpp::Node {
       path_nodes = incumbent_nodes;
       found = true;
       reused_terminal = true;
-    } else if (accepted_witness_usable && route_has_execution_horizon) {
-      found = true;
-      reused_terminal = true;
-      using_accepted_witness = true;
     }
     if (candidate_found) {
       const bool hard_switch = current_route_blocked || goal_in_window ||
@@ -1679,6 +1689,17 @@ class EpicGraphNode final : public rclcpp::Node {
     }
     if (current_route_blocked && !candidate_accepted) {
       // Never keep publishing an incumbent that the collision probe rejected.
+      path_nodes.clear();
+      found = false;
+      reused_terminal = false;
+    }
+    if (found && (path_nodes.size() < 2 || !active_topo->odom_node_ ||
+        active_topo->odom_node_->neighbors_.empty())) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "EPIC rejected route without a connected topology head: path_nodes=%zu odom_degree=%zu",
+        path_nodes.size(), active_topo->odom_node_ ?
+          active_topo->odom_node_->neighbors_.size() : 0U);
       path_nodes.clear();
       found = false;
       reused_terminal = false;
