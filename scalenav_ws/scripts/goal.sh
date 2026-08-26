@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # z="1.6"
 
 x="0.0"
-y="0.0"
+y="140.0"
 z="1.6"
 
 if (($# >= 1)); then x="$1"; fi
