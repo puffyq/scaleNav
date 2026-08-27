@@ -367,7 +367,7 @@ struct TopoGraphSearchStats {
   size_t expanded_nodes = 0;
   size_t edge_evaluations = 0;
   size_t semantic_candidate_checks = 0;
-  size_t candidate_terminals = 0;
+  size_t candidate_frontier_goals = 0;
   bool timed_out = false;
 };
 
@@ -438,7 +438,9 @@ public:
                    float semantic_cost_weight = 0.0F,
                    float max_search_radius_m = std::numeric_limits<float>::infinity(),
                    TopoGraphSearchStats *search_stats = nullptr,
-                   std::int64_t active_virtual_semantic_stamp_ns = 0);
+                   std::int64_t active_virtual_semantic_stamp_ns = 0,
+                   float previous_path_cost_factor = 0.9F,
+                   float path_cost_weight = 1.0F);
   bool goalDirectedSearch(
       const TopoNode::Ptr &start_node, const Eigen::Vector3f &goal,
       std::vector<TopoNode::Ptr> &path, double time_out,
@@ -447,9 +449,9 @@ public:
       float semantic_cost_weight = 0.0F,
       float max_search_radius_m = std::numeric_limits<float>::infinity(),
       const Eigen::Vector3f *progress_origin = nullptr,
-      float preferred_terminal_forward_m = 0.0F,
-      bool prefer_goal_terminal = false,
-      float preferred_terminal_radial_m = std::numeric_limits<float>::infinity(),
+      float preferred_frontier_goal_forward_m = 0.0F,
+      bool prefer_mission_goal = false,
+      float preferred_frontier_goal_radial_m = std::numeric_limits<float>::infinity(),
       float minimum_execution_path_m = 0.0F,
       const Eigen::Vector3f *view_direction = nullptr,
       float horizontal_fov_deg = 90.0F,

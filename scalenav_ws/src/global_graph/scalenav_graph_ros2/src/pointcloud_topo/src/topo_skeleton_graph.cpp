@@ -242,16 +242,21 @@ float TopoGraph::edgeClearancePenalty(const TopoNode::Ptr &from,
       std::isfinite(clearance_it->second) && clearance_it->second >= 0.0F) {
     minimum_clearance = std::min(minimum_clearance, clearance_it->second);
   }
-  if (!std::isfinite(minimum_clearance) || minimum_clearance >= clearance_target_m_) {
+  if (!std::isfinite(minimum_clearance)) {
     return 0.0F;
   }
   const auto weight_it = from->weight_.find(to);
   if (weight_it != from->weight_.end() && std::isfinite(weight_it->second))
     edge_length = std::max(0.0F, weight_it->second);
-  const float deficit = static_cast<float>(
-    (clearance_target_m_ - minimum_clearance) / clearance_target_m_);
-  return static_cast<float>(clearance_cost_weight_) * edge_length *
-    deficit * deficit;
+  // Treat the configured target as a safety-distance scale, not a cutoff.
+  // This keeps the cost continuous and lets A* distinguish two feasible
+  // corridors: larger clearance produces a smaller safety cost.  The square
+  // gives low-clearance edges a stronger preference without exceeding the
+  // former maximum penalty (weight * length).
+  const float safety_ratio = static_cast<float>(
+    clearance_target_m_ / (clearance_target_m_ + std::max(0.0F, minimum_clearance)));
+  const float safety_factor = safety_ratio * safety_ratio;
+  return static_cast<float>(clearance_cost_weight_) * edge_length * safety_factor;
 }
 
 float TopoGraph::witnessMinimumClearance(
@@ -664,7 +669,9 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
                             bool kino, std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> last_path,
                             float semantic_cost_weight, float max_search_radius_m,
                             TopoGraphSearchStats *search_stats,
-                            std::int64_t active_virtual_semantic_stamp_ns) {
+                            std::int64_t active_virtual_semantic_stamp_ns,
+                            float previous_path_cost_factor,
+                            float path_cost_weight) {
   path.clear();
   if (search_stats) *search_stats = {};
   if (start_node == nullptr || end_node == nullptr ||
@@ -697,8 +704,12 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
   float tie_breaker_ = 1.0 + 1.0 / 1000;
   std::priority_queue<std::pair<float, TopoNode::Ptr>, std::vector<std::pair<float, TopoNode::Ptr>>, std::greater<std::pair<float, TopoNode::Ptr>>>
   open_set;
-  auto getHeuristic = [&](const TopoNode::Ptr &n) -> float { return tie_breaker_ * (n->center_ - end_node->center_).norm(); };
+  path_cost_weight = std::max(0.0F, path_cost_weight);
+  auto getHeuristic = [&](const TopoNode::Ptr &n) -> float {
+    return path_cost_weight * tie_breaker_ * (n->center_ - end_node->center_).norm();
+  };
   semantic_cost_weight = std::max(0.0F, semantic_cost_weight);
+  previous_path_cost_factor = std::clamp(previous_path_cost_factor, 0.0F, 1.0F);
   auto backtrack = [&]() {
     TopoNode::Ptr cur_node = end_node;
     path.push_back(cur_node);
@@ -738,6 +749,24 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
       if (search_stats) ++search_stats->edge_evaluations;
 
       const float edge_length = (neighbor->center_ - cur_node->center_).norm();
+      const auto witness_it = cur_node->paths_.find(neighbor);
+      if (witness_it == cur_node->paths_.end() || witness_it->second.size() < 2)
+        continue;
+      const auto edge_clearance_it = cur_node->edge_clearance_.find(neighbor);
+      if (edge_clearance_it != cur_node->edge_clearance_.end() &&
+          std::isfinite(edge_clearance_it->second) && parallel_bubble_astar_ &&
+          edge_clearance_it->second <=
+            static_cast<float>(parallel_bubble_astar_->safe_distance_) + 0.02F) {
+        continue;
+      }
+      if (parallel_bubble_astar_) {
+        const float live_witness_clearance = witnessMinimumClearance(witness_it->second);
+        if (std::isfinite(live_witness_clearance) &&
+            live_witness_clearance <=
+              static_cast<float>(parallel_bubble_astar_->safe_distance_) + 0.02F) {
+          continue;
+        }
+      }
       const float clearance_penalty = edgeClearancePenalty(
         cur_node, neighbor, edge_length);
       float semantic_penalty = 0.0F;
@@ -750,19 +779,12 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
           1e-3F, 1.0F - semantic_risk));
         semantic_penalty = semantic_cost_weight * edge_length * semantic_barrier;
       }
-      float tentative_g_score;
-      if (kino) {
-        if (last_path.find({cur_node, neighbor}) != last_path.end()) {
-          // tentative_g_score = g_score[cur_node] + 1e-3 * cur_node->weight_[neighbor];
-          tentative_g_score = g_score[cur_node] + 0 * cur_node->weight_[neighbor] +
-            semantic_penalty + clearance_penalty;
-        } else
-          tentative_g_score = g_score[cur_node] + cur_node->weight_[neighbor] +
-            semantic_penalty + clearance_penalty;
-      } else {
-        tentative_g_score = g_score[cur_node] + cur_node->weight_[neighbor] +
-          semantic_penalty + clearance_penalty;
+      float geometry_cost = path_cost_weight * cur_node->weight_[neighbor];
+      if (kino && last_path.find({cur_node, neighbor}) != last_path.end()) {
+        geometry_cost *= previous_path_cost_factor;
       }
+      const float tentative_g_score = g_score[cur_node] + geometry_cost +
+        semantic_penalty + clearance_penalty;
       if (open_set_set_.find(neighbor) == open_set_set_.end() || tentative_g_score < g_score[neighbor]) {
         parent_map[neighbor] = cur_node;
         g_score[neighbor] = tentative_g_score;
@@ -782,8 +804,8 @@ bool TopoGraph::goalDirectedSearch(
     float path_cost_weight, float previous_path_cost_factor,
     const std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> &last_path,
     float semantic_cost_weight, float max_search_radius_m,
-    const Eigen::Vector3f *progress_origin, float preferred_terminal_forward_m,
-    bool prefer_goal_terminal, float preferred_terminal_radial_m,
+    const Eigen::Vector3f *progress_origin, float preferred_frontier_goal_forward_m,
+    bool prefer_mission_goal, float preferred_frontier_goal_radial_m,
     float minimum_execution_path_m, const Eigen::Vector3f *view_direction,
     float horizontal_fov_deg, float progress_penalty_weight,
     float direction_penalty_weight, float fov_penalty_weight,
@@ -797,16 +819,16 @@ bool TopoGraph::goalDirectedSearch(
   path_cost_weight = std::max(0.0f, path_cost_weight);
   previous_path_cost_factor = std::clamp(previous_path_cost_factor, 0.0f, 1.0f);
   semantic_cost_weight = std::max(0.0f, semantic_cost_weight);
-  preferred_terminal_forward_m = std::max(0.0f, preferred_terminal_forward_m);
+  preferred_frontier_goal_forward_m = std::max(0.0f, preferred_frontier_goal_forward_m);
   minimum_execution_path_m = std::max(0.0F, minimum_execution_path_m);
   progress_penalty_weight = std::max(0.0F, progress_penalty_weight);
   direction_penalty_weight = std::max(0.0F, direction_penalty_weight);
   fov_penalty_weight = std::max(0.0F, fov_penalty_weight);
   smoothness_penalty_weight = std::max(0.0F, smoothness_penalty_weight);
-  const bool radial_preference_enabled = std::isfinite(preferred_terminal_radial_m) &&
-    preferred_terminal_radial_m >= 0.0F;
+  const bool radial_preference_enabled = std::isfinite(preferred_frontier_goal_radial_m) &&
+    preferred_frontier_goal_radial_m >= 0.0F;
   if (radial_preference_enabled) {
-    preferred_terminal_radial_m = std::max(0.0F, preferred_terminal_radial_m);
+    preferred_frontier_goal_radial_m = std::max(0.0F, preferred_frontier_goal_radial_m);
   }
   const Eigen::Vector3f progress_ref =
     progress_origin != nullptr && progress_origin->allFinite() ?
@@ -872,8 +894,22 @@ bool TopoGraph::goalDirectedSearch(
       (node->center_ - progress_ref).dot(mission_dir) :
       (node->center_ - progress_ref).norm();
   };
-  const auto radialProgress = [&progress_ref](const TopoNode::Ptr &node) {
-    return (node->center_ - progress_ref).norm();
+  (void)preferred_frontier_goal_forward_m;
+  (void)preferred_frontier_goal_radial_m;
+  (void)radial_preference_enabled;
+  (void)view_direction;
+  (void)horizontal_fov_deg;
+  (void)progress_penalty_weight;
+  (void)direction_penalty_weight;
+  (void)fov_penalty_weight;
+  (void)smoothness_penalty_weight;
+
+  constexpr float kGoalNodeToleranceM = 1.5F;
+
+  auto isFrontierEndpoint = [&](const TopoNode::Ptr &node, float route_dist) {
+    return node != nullptr && node != start_node && !node->is_viewpoint_ &&
+           node->geometry_state_ == TopoGeometryState::Verified &&
+           route_dist + 1e-3F >= minimum_execution_path_m;
   };
 
   std::unordered_map<TopoNode::Ptr, float> g_score;
@@ -881,17 +917,31 @@ bool TopoGraph::goalDirectedSearch(
   std::unordered_map<TopoNode::Ptr, float> expanded_g;
   std::unordered_map<TopoNode::Ptr, TopoNode::Ptr> parent_map;
   std::priority_queue<AstarEntry, std::vector<AstarEntry>, AstarEntryGreater> open;
+
+  auto backtrackPath = [&](const TopoNode::Ptr &end) -> bool {
+    path.clear();
+    for (auto current = end; current != nullptr;) {
+      path.push_back(current);
+      if (current == start_node) break;
+      const auto parent_it = parent_map.find(current);
+      if (parent_it == parent_map.end()) {
+        path.clear();
+        return false;
+      }
+      current = parent_it->second;
+    }
+    std::reverse(path.begin(), path.end());
+    return path.size() >= 2 && path.front() == start_node;
+  };
   const float start_h = heuristic(start_node);
   g_score[start_node] = 0.0F;
   route_distance[start_node] = 0.0F;
   open.push({start_h, start_h, 0.0F, start_node});
 
-  struct ReachableCandidate {
-    TopoNode::Ptr node;
-    float g;
-    float h;
-  };
-  std::vector<ReachableCandidate> reachable_candidates;
+  TopoNode::Ptr best_frontier;
+  float best_frontier_h = std::numeric_limits<float>::infinity();
+  float best_frontier_route_distance = -std::numeric_limits<float>::infinity();
+
   const auto search_start = std::chrono::steady_clock::now();
   while (!open.empty()) {
     const AstarEntry entry = open.top();
@@ -904,13 +954,25 @@ bool TopoGraph::goalDirectedSearch(
     if (search_stats) search_stats->expanded_nodes = expanded_g.size();
 
     const auto distance_it = route_distance.find(entry.node);
-    if (entry.node != start_node && !entry.node->is_viewpoint_ &&
-        distance_it != route_distance.end() &&
-        distance_it->second + 1e-3F >= minimum_execution_path_m) {
-      reachable_candidates.push_back(
-        {entry.node, entry.g, entry.h});
-      if (search_stats) search_stats->candidate_terminals = reachable_candidates.size();
+    const float route_dist = distance_it != route_distance.end() ? distance_it->second : 0.0F;
+
+    if (prefer_mission_goal && goalDistance(entry.node) <= kGoalNodeToleranceM &&
+        isFrontierEndpoint(entry.node, route_dist)) {
+      if (search_stats) search_stats->candidate_frontier_goals = 1;
+      return backtrackPath(entry.node);
     }
+
+    if (isFrontierEndpoint(entry.node, route_dist)) {
+      const float h = goalDistance(entry.node);
+      if (best_frontier == nullptr || h < best_frontier_h - 1e-5F ||
+          (std::abs(h - best_frontier_h) <= 1e-5F &&
+           route_dist > best_frontier_route_distance + 1e-3F)) {
+        best_frontier = entry.node;
+        best_frontier_h = h;
+        best_frontier_route_distance = route_dist;
+      }
+    }
+
     if (time_out > 0.0 && std::chrono::duration<double>(
         std::chrono::steady_clock::now() - search_start).count() > time_out) {
       if (search_stats) search_stats->timed_out = true;
@@ -922,6 +984,29 @@ bool TopoGraph::goalDirectedSearch(
       const auto weight_it = entry.node->weight_.find(neighbor);
       if (weight_it == entry.node->weight_.end() || !std::isfinite(weight_it->second))
         continue;
+      const auto witness_it = entry.node->paths_.find(neighbor);
+      if (witness_it == entry.node->paths_.end() || witness_it->second.size() < 2)
+        continue;
+      // Clearance is a feasibility constraint, not only a soft route cost.
+      // Without this gate A* can select an edge whose cached witness is at or
+      // below the vehicle safety distance; the execution probe then rejects
+      // the same route immediately after it was committed.
+      const auto edge_clearance_it = entry.node->edge_clearance_.find(neighbor);
+      if (edge_clearance_it != entry.node->edge_clearance_.end() &&
+          std::isfinite(edge_clearance_it->second) &&
+          parallel_bubble_astar_ &&
+          edge_clearance_it->second <=
+            static_cast<float>(parallel_bubble_astar_->safe_distance_) + 0.02F) {
+        continue;
+      }
+      if (parallel_bubble_astar_) {
+        const float live_witness_clearance = witnessMinimumClearance(witness_it->second);
+        if (std::isfinite(live_witness_clearance) &&
+            live_witness_clearance <=
+              static_cast<float>(parallel_bubble_astar_->safe_distance_) + 0.02F) {
+          continue;
+        }
+      }
       if (search_stats) ++search_stats->edge_evaluations;
       const float edge_cost = routeEdgeCostIndexed(
         entry.node, neighbor, path_cost_weight, semantic_cost_weight,
@@ -934,8 +1019,7 @@ bool TopoGraph::goalDirectedSearch(
       if (neighbor_cost_it == g_score.end() ||
           tentative_cost < neighbor_cost_it->second - 1e-5f) {
         float edge_length = (neighbor->center_ - entry.node->center_).norm();
-        const auto witness_it = entry.node->paths_.find(neighbor);
-        if (witness_it != entry.node->paths_.end() && witness_it->second.size() >= 2) {
+        if (witness_it->second.size() >= 2) {
           edge_length = 0.0F;
           for (std::size_t i = 1; i < witness_it->second.size(); ++i) {
             const float segment =
@@ -944,8 +1028,7 @@ bool TopoGraph::goalDirectedSearch(
           }
         }
         g_score[neighbor] = tentative_cost;
-        route_distance[neighbor] = distance_it != route_distance.end() ?
-          distance_it->second + edge_length : edge_length;
+        route_distance[neighbor] = route_dist + edge_length;
         parent_map[neighbor] = entry.node;
         const float h = heuristic(neighbor);
         open.push({tentative_cost + h, h, tentative_cost, neighbor});
@@ -953,125 +1036,22 @@ bool TopoGraph::goalDirectedSearch(
     }
   }
 
-  if (reachable_candidates.empty()) return false;
-
-  Eigen::Vector3f view_dir = Eigen::Vector3f::Zero();
-  bool have_view_direction = false;
-  if (view_direction != nullptr && view_direction->allFinite()) {
-    view_dir = *view_direction;
-    view_dir.z() = 0.0F;
-    if (view_dir.norm() > 1e-3F) {
-      view_dir.normalize();
-      have_view_direction = true;
+  if (best_frontier == nullptr) {
+    for (const auto &entry : route_distance) {
+      if (!isFrontierEndpoint(entry.first, entry.second)) continue;
+      const float h = goalDistance(entry.first);
+      if (best_frontier == nullptr || h < best_frontier_h - 1e-5F ||
+          (std::abs(h - best_frontier_h) <= 1e-5F &&
+           entry.second > best_frontier_route_distance + 1e-3F)) {
+        best_frontier = entry.first;
+        best_frontier_h = h;
+        best_frontier_route_distance = entry.second;
+      }
     }
   }
-  constexpr float kPi = 3.14159265358979323846F;
-  const float half_fov = 0.5F * std::clamp(horizontal_fov_deg, 1.0F, 179.0F) *
-    kPi / 180.0F;
-  constexpr float kGoalNodeToleranceM = 1.5F;
-
-  const auto smoothnessPenalty = [&](const TopoNode::Ptr &terminal) {
-    std::vector<TopoNode::Ptr> nodes;
-    for (auto current = terminal; current != nullptr;) {
-      nodes.push_back(current);
-      if (current == start_node) break;
-      const auto parent_it = parent_map.find(current);
-      if (parent_it == parent_map.end()) return std::numeric_limits<float>::infinity();
-      current = parent_it->second;
-    }
-    std::reverse(nodes.begin(), nodes.end());
-    Eigen::Vector3f previous_direction = have_view_direction ? view_dir : mission_dir;
-    bool have_previous = previous_direction.norm() > 1e-3F;
-    float penalty = 0.0F;
-    for (std::size_t i = 1; i < nodes.size(); ++i) {
-      Eigen::Vector3f direction = nodes[i]->center_ - nodes[i - 1]->center_;
-      if (direction.norm() <= 1e-3F) continue;
-      direction.normalize();
-      if (have_previous) {
-        penalty += 1.0F - std::clamp(previous_direction.dot(direction), -1.0F, 1.0F);
-      }
-      previous_direction = direction;
-      have_previous = true;
-    }
-    return penalty;
-  };
-
-  TopoNode::Ptr terminal;
-  float best_objective = std::numeric_limits<float>::infinity();
-  float best_g = std::numeric_limits<float>::infinity();
-  float best_h = std::numeric_limits<float>::infinity();
-  const bool have_goal_candidate = prefer_goal_terminal && std::any_of(
-    reachable_candidates.begin(), reachable_candidates.end(),
-    [&](const ReachableCandidate &candidate) {
-      return goalDistance(candidate.node) <= kGoalNodeToleranceM;
-    });
-  for (const auto &candidate : reachable_candidates) {
-    if (have_goal_candidate && goalDistance(candidate.node) > kGoalNodeToleranceM) continue;
-
-    // Connectivity, collision-checked edges and the execution-path reserve are
-    // feasibility constraints. Progress, mission direction, camera FOV and
-    // smoothness are preferences, so every feasible node competes in one loss.
-    float objective = candidate.g + candidate.h;
-    if (!prefer_goal_terminal) {
-      const float forward_shortfall = std::max(
-        0.0F, preferred_terminal_forward_m - forwardProgress(candidate.node));
-      float reach_shortfall = forward_shortfall;
-      if (radial_preference_enabled) {
-        const float radial_shortfall = std::max(
-          0.0F, preferred_terminal_radial_m - radialProgress(candidate.node));
-        reach_shortfall = std::min(forward_shortfall, radial_shortfall);
-      }
-      objective += progress_penalty_weight * reach_shortfall;
-
-      Eigen::Vector3f candidate_direction = candidate.node->center_ - progress_ref;
-      if (candidate_direction.norm() > 1e-3F) {
-        candidate_direction.normalize();
-        if (mission_dir.norm() > 1e-3F) {
-          const float alignment = std::clamp(candidate_direction.dot(mission_dir), -1.0F, 1.0F);
-          objective += direction_penalty_weight * preferred_terminal_forward_m *
-            (1.0F - alignment);
-        }
-        Eigen::Vector3f horizontal_direction = candidate_direction;
-        horizontal_direction.z() = 0.0F;
-        if (have_view_direction && horizontal_direction.norm() > 1e-3F) {
-          horizontal_direction.normalize();
-          const float view_angle = std::acos(std::clamp(
-            horizontal_direction.dot(view_dir), -1.0F, 1.0F));
-          objective += fov_penalty_weight * preferred_terminal_forward_m *
-            std::max(0.0F, view_angle - half_fov);
-        }
-      }
-      objective += smoothness_penalty_weight * smoothnessPenalty(candidate.node);
-    }
-
-    if (objective < best_objective - 1e-5F ||
-        (std::abs(objective - best_objective) <= 1e-5F &&
-         (candidate.g < best_g - 1e-5F ||
-          (std::abs(candidate.g - best_g) <= 1e-5F &&
-           (candidate.h < best_h - 1e-5F ||
-            (std::abs(candidate.h - best_h) <= 1e-5F &&
-             (terminal == nullptr ||
-              candidate.node->persistent_id_ < terminal->persistent_id_))))))) {
-      terminal = candidate.node;
-      best_objective = objective;
-      best_g = candidate.g;
-      best_h = candidate.h;
-    }
-  }
-  if (!terminal) return false;
-  for (auto current = terminal; current != nullptr;) {
-    path.push_back(current);
-    if (current == start_node)
-      break;
-    const auto parent_it = parent_map.find(current);
-    if (parent_it == parent_map.end()) {
-      path.clear();
-      return false;
-    }
-    current = parent_it->second;
-  }
-  std::reverse(path.begin(), path.end());
-  return path.size() >= 2 && path.front() == start_node;
+  if (!best_frontier) return false;
+  if (search_stats) search_stats->candidate_frontier_goals = 1;
+  return backtrackPath(best_frontier);
 }
 
 void TopoGraph::cauculateMemoryConsumption() {
@@ -1872,7 +1852,11 @@ size_t TopoGraph::insertSemanticNodes(
       const int result = parallel_bubble_astar_->search(
         node->center_, neighbor->center_, path, insert_node_timeout,
         false, true);
-      if (result == ParallelBubbleAstar::REACH_END && path.size() >= 2) {
+      // The one-shot raycast validates its own stepping points, but not every
+      // point between two steps. Run the same continuous edge check used by
+      // ordinary geometry edges before attaching a semantic node.
+      if (result == ParallelBubbleAstar::REACH_END && path.size() >= 2 &&
+          parallel_bubble_astar_->collisionCheck_shortenPath(path)) {
         neighbors.push_back(neighbor);
         paths.push_back(std::move(path));
       }
@@ -1948,31 +1932,6 @@ void TopoGraph::getRegionsToUpdate() {
 
   // 保存自由区域数量，供更新统计和后续日志使用。
   selected_free_regions_ = free_region_set.size();
-  // Seed the corridor toward the mission goal so far-ahead free regions are
-  // not discarded just because they are farther from the vehicle than nearby
-  // side returns.
-  if (has_update_goal_) {
-    // 沿当前位置到任务目标的方向预先种入区域，保持前方建图连续。
-    const double seed_step = 0.5 * std::min(init_region_size_x_,
-      std::min(init_region_size_y_, init_region_size_z_));
-    const Eigen::Vector3f goal_pt = graphPoint(update_goal_);
-    Eigen::Vector3f dir = goal_pt - graph_pose;
-    const float len = dir.norm();
-    if (len > 1e-3F && seed_step > 1e-3) {
-      dir /= len;
-      const float horizon = std::min(len, 50.0F);
-      const int steps = static_cast<int>(horizon / seed_step) + 1;
-      for (int i = 0; i < steps; ++i) {
-        const Eigen::Vector3f pos =
-          graph_pose + dir * static_cast<float>(seed_step * i);
-        Eigen::Vector3i region_idx;
-        getIndex(pos, region_idx);
-        const auto region = getRegionNode(region_idx);
-        if (region != nullptr) region_set.insert(region);
-      }
-    }
-  }
-
   // 将无序集合转换为可排序的待更新区域数组。
   for (auto &region : region_set) {
     toponodes_update_region_arr_.push_back(region);

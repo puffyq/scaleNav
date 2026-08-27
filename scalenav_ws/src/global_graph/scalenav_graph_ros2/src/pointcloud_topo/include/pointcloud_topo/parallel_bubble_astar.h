@@ -9,8 +9,10 @@
 #pragma once
 #include <Eigen/Eigen>
 #include <boost/functional/hash.hpp>
+#include <cstddef>
 #include <memory>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <pcl/common/distances.h>
 #include <queue>
@@ -64,9 +66,25 @@ public:
 
   typedef std::shared_ptr<ParallelBubbleAstar> Ptr;
 
+  struct CollisionCheckInfo {
+    enum FailureReason { NONE = 0, INVALID_PATH = 1, CLEARANCE = 2, BUBBLE_OVERLAP = 3 };
+    FailureReason reason = NONE;
+    std::size_t failed_index = std::numeric_limits<std::size_t>::max();
+    Eigen::Vector3f failed_point = Eigen::Vector3f::Zero();
+    double clearance = std::numeric_limits<double>::quiet_NaN();
+    double radius = std::numeric_limits<double>::quiet_NaN();
+    std::size_t predecessor_index = std::numeric_limits<std::size_t>::max();
+    double predecessor_radius = std::numeric_limits<double>::quiet_NaN();
+    double predecessor_distance = std::numeric_limits<double>::quiet_NaN();
+  };
+
   ros::Publisher open_set_pub_;
   // FrontierManager::Ptr frontier_manager_;
-  double resolution_, inv_resolution_, lambda_heu_, safe_distance_, tie_breaker_;
+  double resolution_ = 0.1;
+  double inv_resolution_ = 10.0;
+  double lambda_heu_ = 1.0;
+  double safe_distance_ = 0.0;
+  double tie_breaker_ = 1.0;
   int allocate_num_;
   bool debug_;
   bool planar_search_ = false;
@@ -89,7 +107,8 @@ public:
 
   void init(ros::NodeHandle &nh, const LIOInterface::Ptr &lidar_map);
   void reset();
-  bool collisionCheck_shortenPath(vector<Eigen::Vector3f> &path);
+  bool collisionCheck_shortenPath(
+    vector<Eigen::Vector3f> &path, CollisionCheckInfo *info = nullptr);
   // best_result = true: 启发式函数 = 1.0 * 欧氏距离
   int search(const Eigen::Vector3f &start, const Eigen::Vector3f &goal, vector<Eigen::Vector3f> &path, double timeout, bool best_result = false,
              bool only_raycast = false,

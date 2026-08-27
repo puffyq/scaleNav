@@ -5,6 +5,7 @@ set -Eeo pipefail
 PROMPT="tree, blocks, wall"   # PEARL prompt (higher score = higher risk)
 SEMANTIC=1                    # 1=text heatmap on, 0=geometry only
 SEMANTIC_COST_WEIGHT="2.0"    # A* semantic repulsion; 0=off
+GRAPH_FIXED_LAYER="${GRAPH_FIXED_LAYER:-true}"  # graph topology: true=single layer, false=3D
 DEVICE="cuda"
 RATE="2"                      # heatmap Hz
 SAVE_DEPTH=0
@@ -36,6 +37,7 @@ while (($#)); do
     --capture-depth) SAVE_DEPTH=1; shift ;;
     -h|--help)
       echo "Usage: $0 [--prompt TEXT] [--rate HZ] [--no-semantic] [--capture-depth]"
+      echo "       GRAPH_FIXED_LAYER=true|false $0 ... (default: true)"
       echo "       SCALENAV_LOG_DIR=/path/to/logs $0 ... (default: $WS/../log_scalenav)"
       exit 0
       ;;
@@ -73,6 +75,7 @@ run ros2 launch scalenav_log scalenav_log.launch.py output_dir:="$LOG_ROOT"
 run ros2 launch airsim_renderer controller_airsim.launch.py
 run ros2 launch depth2points_ros2 depth_planar_to_pointcloud.launch.py
 run ros2 launch scalenav_graph_ros2 epic_graph.launch.py \
+  graph_fixed_layer:="$GRAPH_FIXED_LAYER" \
   goal_topic:=/goal_pose next_goal_topic:=/epic/local_goal \
   next_goal_frame:=world_enu visualization_frame:=world_enu \
   odom_twist_frame:=body semantic_heatmap_topic:=/scalenav/text_heatmap_raw \
@@ -101,5 +104,5 @@ else
   start_planner
 fi
 
-echo "started; goal=/goal_pose semantic=$SEMANTIC semantic_cost_weight=$SEMANTIC_COST_WEIGHT recorded_logs=$LOG_ROOT"
+echo "started; goal=/goal_pose semantic=$SEMANTIC semantic_cost_weight=$SEMANTIC_COST_WEIGHT graph_fixed_layer=$GRAPH_FIXED_LAYER recorded_logs=$LOG_ROOT"
 wait -n $PIDS

@@ -12,6 +12,7 @@ from .route_contract import (
     RouteQualityGate,
     RouteRecord,
     build_witness_corridor,
+    local_subgoal_on_witness,
     pack_route_records,
     save_route_table,
 )
@@ -94,6 +95,7 @@ def generate_synthetic_dataset(
                     max_step_m=0.2,
                 )
                 frontier = points[-1].copy()
+                _, local_subgoal_distance = local_subgoal_on_witness(points, 10.0)
                 result = quality_gate.evaluate(
                     path_points_world=points,
                     path_clearance_m=clearance,
@@ -124,6 +126,7 @@ def generate_synthetic_dataset(
                         route_quality_flags=int(result.flags),
                         route_quality_weight=result.weight,
                         route_seed=scene_index * 10000 + frame_index * 10 + route_variant,
+                        local_subgoal_distance_m=local_subgoal_distance,
                     )
                 )
         save_route_table(scene / "routes.npz", pack_route_records(records))

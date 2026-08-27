@@ -4,9 +4,9 @@
 |---|---|
 | 批次号 | `001` |
 | 主题 | Route-Conditioned YOPO |
-| 状态 | 训练闭环及真值 pilot 生成器已实现；生产日志数据可选补充 |
+| 状态 | 训练闭环、30 m 大方块数据、Bubble-Planner loss、正式训练及离线评测已完成 |
 
-## 0. 实施状态（2026-08-26）
+## 0. 实施状态（2026-08-27）
 
 训练侧实现位于 `/mnt/code/lab/yopo/OpenSeek/train_scalenav`，目前已经具备：
 
@@ -19,9 +19,32 @@
 - `L_path_corridor + L_path_progress + L_path_tangent`，并纳入 detached score label。
 - 场景级 train/validation 切分、selected/oracle/regret/top-1 指标和版本化 checkpoint。
 - 合成双场景的 ESDF、前向、反向传播和 checkpoint 端到端 smoke 训练。
-- YOPO 风格随机场景真值生成器：Map2 大方块、森林混合、解析深度和点云真值。
+- YOPO 风格随机场景真值生成器：2.5-30 m 长尾 Map2 大方块、森林混合、解析深度和点云真值。
 - 真值膨胀栅格 A*、安全平滑、连续 clearance Bubble 和每帧强制绕障样本。
 - 100 条路线预览、detour/clearance/ESDF 内存统计及一条命令生成 2 x 500 pilot。
+
+当前已生成 `train_scalenav/dataset/pilot_001`：
+
+- `Scene_0000`：500 帧 Map2 风格大方块，1500 条路线。
+- `Scene_0001`：500 帧大方块与粗树干混合，1500 条路线。
+- 默认地图为 80 x 80 m；方块边长上限 30 m，每个含方块场景强制至少一个 15-30 m 建筑级结构。
+- 3000 条路线中 1606 条为真值障碍阻断后的绕行，比例 53.53%。
+- 连续最小 clearance 为 0.544 m，全部有效路线 quality flags 为零。
+- 每场景 ESDF float32 估算约 34.2 MiB，不启用 tile。
+- 已生成 100 张路线预览；人工检查结论仍须由实验人员确认，代码不能代签。
+- 已生成独立 `dataset/test_001` 离线测试集：2 x 200 帧、1200 条路线、seed
+  900001，和 pilot 的 3000 个 route seed 零交集；其中 52.83% 为真值绕障路线，
+  连续最小 clearance 为 0.549 m。
+- pilot/test 均提供静态 `viewer/index.html`，可查看 RGB、深度、真值点云俯视图、
+  witness、corridor bubbles、topology、路线备选和质量指标，无需启动服务器。
+- `evaluate_yopo.py` 会加载训练 checkpoint，在 `test_001` 上输出模型实际选择的五次
+  多项式轨迹，并生成独立的 `model_eval_001/index.html`；橙色为模型输出，红色为 witness。
+- 正式模型为 `train_scalenav/saved/YOPO_3/best.pth`（安全微调第 15 轮）。固定 validation
+  300 条路线零碰撞，最小 clearance 0.745 m；独立 `test_001` 1200 条路线零碰撞，
+  最小 clearance 0.623 m，平均最大 Bubble 并集越界 0.0090 m，平均路线进度 5.348 m。
+- corridor loss 采用 Bubble Planner 安全集并集：轨迹点在任一 witness safety bubble 内
+  代价为零，在全部 bubble 外按 signed distance 平方惩罚，并额外惩罚整条轨迹的最坏点。
+  ESDF safety loss 同样加入最坏点项，避免短时穿障被时间平均稀释。
 
 生产部署路径搜索仍由现有 EPIC 唯一负责；真实日志 labeler 只消费 accepted witness
 JSONL。离线随机场景允许直接使用完整场景真值 A* 生成 guidance route，因为它是训练

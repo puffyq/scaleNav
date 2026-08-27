@@ -14,6 +14,7 @@ controller/log_ros2/
 runs/
 *.egg-info/
 *.html
+!train_scalenav/tools/dataset_viewer.html
 !tools/*.html
 !scalenav_ws/src/scalenav_log/web/index.html
 *.engine
@@ -65,6 +66,8 @@ paper/**/*.zip
 paper/**/missfont.log
 paper/**/*.fls
 paper/**/*.fdb_latexmk
+paper/**/*.synctex.gz
+paper/**/page-*.png
 
 # Workspace migration backups and generated ROS/colcon outputs.
 bc/

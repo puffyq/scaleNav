@@ -46,6 +46,25 @@ def test_route_loss_penalizes_leaving_corridor_and_backpropagates():
     assert torch.isfinite(decision.grad).all()
 
 
+def test_bubble_field_has_gradient_inside_safe_volume():
+    loss = RouteLoss(_coefficient_map())
+    fixed = torch.zeros((1, 3, 3))
+    decision = torch.tensor(
+        [[[6.0, 4.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
+        requires_grad=True,
+    )
+    x = torch.linspace(0.0, 10.0, 41)
+    route = torch.stack((x, torch.full_like(x, 0.3), torch.zeros_like(x)), dim=1)[None]
+    radius = torch.full((1, 41), 0.75)
+    mask = torch.ones((1, 41))
+    corridor = loss(fixed, decision, route, radius, mask)[0]
+    corridor.backward()
+    assert corridor.item() < 2.0
+    assert decision.grad is not None
+    assert torch.isfinite(decision.grad).all()
+    assert decision.grad[:, 0, 1].abs().item() > 1.0e-6
+
+
 def test_route_dropout_disables_all_route_costs():
     loss = RouteLoss(_coefficient_map())
     fixed = torch.zeros((1, 3, 3))
@@ -54,3 +73,20 @@ def test_route_dropout_disables_all_route_costs():
     costs = loss(fixed, decision, points, radius, torch.zeros_like(mask))
     for cost in costs:
         torch.testing.assert_close(cost, torch.zeros_like(cost))
+
+
+def test_route_progress_floor_rejects_short_endpoint():
+    loss = RouteLoss(_coefficient_map())
+    fixed = torch.zeros((1, 3, 3))
+    short = torch.tensor(
+        [[[4.0, 4.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]]
+    )
+    long = torch.tensor(
+        [[[7.0, 4.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]]
+    )
+    short_cost = loss(fixed, short, *_route(0.0))[3]
+    long_cost = loss(fixed, long, *_route(0.0))[3]
+    # The configured floor is 6.8 m (rather than the historical 6.4 m), so
+    # keep the assertion tied to a positive, substantial penalty.
+    assert short_cost.item() > 7.0
+    assert long_cost.item() < 1.0e-5

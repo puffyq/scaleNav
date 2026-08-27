@@ -13,6 +13,7 @@ from .route_contract import (
     RouteQualityGate,
     RouteRecord,
     build_witness_corridor,
+    local_subgoal_on_witness,
     pack_route_records,
     save_route_table,
 )
@@ -58,6 +59,7 @@ def label_epic_routes(
     output_name: str = "routes.npz",
     quality_config: RouteQualityConfig = RouteQualityConfig(),
     clearance_step_m: float = 0.1,
+    local_subgoal_distance_m: float = 10.0,
 ) -> Path:
     """Convert accepted EPIC output into the route training contract.
 
@@ -117,6 +119,11 @@ def label_epic_routes(
         topo_ids = np.asarray(record.get("topo_persistent_id", []), dtype=np.uint64)
         if topo_radii.shape != (len(topo_centers),) or topo_ids.shape != (len(topo_centers),):
             raise ValueError(f"route {input_index} has inconsistent topology arrays")
+        _, local_subgoal_distance = (
+            local_subgoal_on_witness(dense, local_subgoal_distance_m)
+            if len(dense) >= 2
+            else (start.copy(), 0.0)
+        )
         output.append(
             RouteRecord(
                 frame_index=frame_index,
@@ -132,6 +139,7 @@ def label_epic_routes(
                 route_quality_flags=int(quality.flags),
                 route_quality_weight=quality.weight,
                 route_seed=int(record.get("route_seed", input_index)),
+                local_subgoal_distance_m=local_subgoal_distance,
             )
         )
     if not output:

@@ -480,7 +480,7 @@ def draw_evidence_panel(
     rgb: np.ndarray,
     semantic: np.ndarray,
     depth: np.ndarray,
-) -> plt.Axes:
+) -> tuple[plt.Axes, plt.Axes, plt.Axes]:
     subgrid = slot.subgridspec(3, 1, hspace=0.075)
     ax_rgb = figure.add_subplot(subgrid[0])
     ax_semantic = figure.add_subplot(subgrid[1])
@@ -493,7 +493,7 @@ def draw_evidence_panel(
         bbox=dict(boxstyle="round,pad=0.22", facecolor=UAV,
                   edgecolor="none", alpha=0.88),
     )
-    ax_rgb.set_title(r"(a) Sensor evidence at $t^*$", fontsize=9.7, pad=4)
+    ax_rgb.set_title(r"(a) Sensor evidence at $t^*$", fontsize=10.0, pad=4)
 
     clipped = depth >= DEPTH_CLIP_M
     semantic_map = LinearSegmentedColormap.from_list(
@@ -529,7 +529,7 @@ def draw_evidence_panel(
         for spine in axis.spines.values():
             spine.set_color(TOPOLOGY)
             spine.set_linewidth(0.65)
-    return ax_semantic
+    return ax_rgb, ax_semantic, ax_depth
 
 
 def draw_map_panel(
@@ -582,8 +582,14 @@ def draw_map_panel(
     truth_map = LinearSegmentedColormap.from_list(
         "ue_truth_height", ["#D8E0E3", "#A7B6BC", "#718790", "#3F555E"]
     )
+    # In this shallow aerial projection, surfaces above the navigation plane
+    # are closer to the viewer. Draw them after the ordinary graph so walls
+    # and block tops occlude the mesh instead of the mesh showing through.
+    foreground_truth = scene_cloud[:, 2] > graph_height - 0.25
+    background_truth = ~foreground_truth
     ax.scatter(
-        scene_u, scene_v, c=np.clip(scene_cloud[:, 2], 0.0, 22.0),
+        scene_u[background_truth], scene_v[background_truth],
+        c=np.clip(scene_cloud[background_truth, 2], 0.0, 22.0),
         cmap=truth_map, norm=Normalize(0.0, 18.0), s=0.34, alpha=0.76,
         linewidths=0, zorder=1, rasterized=True,
     )
@@ -649,6 +655,14 @@ def draw_map_panel(
             u, v, color=node_colors, s=8.2,
             alpha=0.94, edgecolors=BACKGROUND, linewidths=0.20,
             zorder=3, rasterized=True,
+        )
+
+    if np.any(foreground_truth):
+        ax.scatter(
+            scene_u[foreground_truth], scene_v[foreground_truth],
+            c=np.clip(scene_cloud[foreground_truth, 2], 0.0, 22.0),
+            cmap=truth_map, norm=Normalize(0.0, 18.0), s=0.42, alpha=0.86,
+            linewidths=0, zorder=3.4, rasterized=True,
         )
 
     if len(anchors):
@@ -776,7 +790,7 @@ def draw_map_panel(
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_title("(b) ScaleNav in Map2",
-                 fontsize=10.2, pad=1)
+                 fontsize=10.0, pad=4)
     ax.set_facecolor(BACKGROUND)
     for spine in ax.spines.values():
         spine.set_visible(False)
@@ -931,14 +945,26 @@ def main() -> None:
     figure = plt.figure(figsize=(9.4, 3.85), facecolor=BACKGROUND)
     grid = figure.add_gridspec(1, 2, width_ratios=[0.42, 1.25], wspace=0.015,
                                left=0.012, right=0.995, top=0.91, bottom=0.16)
-    evidence_ax = draw_evidence_panel(figure, grid[0], rgb, semantic, depth)
+    evidence_axes = draw_evidence_panel(figure, grid[0], rgb, semantic, depth)
     map_ax, evidence_xy = draw_map_panel(
         figure, grid[1], cloud, final_markers, evidence_markers,
         current_path, mission_odom, current_position, goal, clearance,
     )
+
+    # The equal-aspect map occupies a shorter active axes box than its grid
+    # slot. Align the sensor stack to that active top edge so both panel
+    # headings have the same baseline and the same image-title gap.
+    figure.canvas.draw()
+    vertical_shift = map_ax.get_position().y1 - evidence_axes[0].get_position().y1
+    for evidence_axis in evidence_axes:
+        position = evidence_axis.get_position()
+        evidence_axis.set_position([
+            position.x0, position.y0 + vertical_shift,
+            position.width, position.height,
+        ])
     figure.add_artist(ConnectionPatch(
         xyA=evidence_xy, coordsA=map_ax.transData,
-        xyB=(1.0, 0.50), coordsB=evidence_ax.transAxes,
+        xyB=(1.0, 0.50), coordsB=evidence_axes[1].transAxes,
         color=TOPOLOGY, linewidth=0.85, alpha=0.82, zorder=20,
         linestyle=(0, (2, 2)), arrowstyle="-|>", mutation_scale=7,
         clip_on=False,

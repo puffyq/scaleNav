@@ -27,10 +27,17 @@ class YopoTrainer:
         num_workers: int = 4,
         tensorboard_path: str | Path | None = None,
         checkpoint_path: str | Path | None = None,
+        resume_training_state: bool = True,
         device: str | torch.device | None = None,
         route_dropout_probability: float | None = None,
+        random_seed: int | None = None,
+        score_only: bool = False,
     ) -> None:
         self.batch_size = int(batch_size)
+        self.learning_rate = float(learning_rate)
+        self.num_workers = int(num_workers)
+        self.random_seed = None if random_seed is None else int(random_seed)
+        self.score_only = bool(score_only)
         self.max_grad_norm = 0.1
         self.device = torch.device(
             device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -67,13 +74,19 @@ class YopoTrainer:
         self.best_validation_cost = float("inf")
         self.epoch_i = -1
         self._checkpoint_optimizer_state = None
+        self.checkpoint_path = (
+            None if checkpoint_path is None else str(Path(checkpoint_path).resolve())
+        )
+        self.resume_training_state = bool(resume_training_state)
         if checkpoint_path:
-            self.load_checkpoint(Path(checkpoint_path))
+            self.load_checkpoint(
+                Path(checkpoint_path), resume_training_state=resume_training_state
+            )
         self.yopo_loss = YOPOLoss(
             obstacle_paths=self.train_dataset.obstacle_paths,
             device=self.device,
         ).to(self.device)
-        optimizer_options = {"lr": float(learning_rate)}
+        optimizer_options = {"lr": self.learning_rate}
         if self.device.type == "cuda":
             optimizer_options["fused"] = True
         self.optimizer = torch.optim.AdamW(self.policy.parameters(), **optimizer_options)
@@ -90,6 +103,15 @@ class YopoTrainer:
         max_train_batches: int | None = None,
         max_val_batches: int | None = None,
     ) -> None:
+        self._update_run_metadata(
+            {
+                "epochs": int(epochs),
+                "freeze_backbone_epochs": int(freeze_backbone_epochs),
+                "save_interval": save_interval,
+                "max_train_batches": max_train_batches,
+                "max_val_batches": max_val_batches,
+            }
+        )
         for epoch in range(int(epochs)):
             self.epoch_i = epoch
             self._set_backbone_trainable(epoch >= freeze_backbone_epochs)
@@ -204,13 +226,41 @@ class YopoTrainer:
             route_radii_expanded,
             route_mask_expanded,
         )
+        # Fuse the bubble signed-distance field into the original ESDF safety
+        # term. The original YOPO terms remain intact; ordered witness MSE is
+        # the only additional route supervision. Bubble violation is retained
+        # as a diagnostic rather than a separate total-loss component.
         route_weight = batch["route_quality_weight"].repeat_interleave(self.traj_num)
-        for name in ("path_corridor", "path_progress", "path_tangent"):
-            costs[name] = costs[name] * route_weight
-        total_cost = torch.stack(tuple(costs.values()), dim=0).sum(dim=0)
+        costs["path_corridor"] = costs["path_corridor"] * route_weight
+        costs["path_mse"] = costs["path_mse"] * route_weight
+        costs["path_progress"] = costs["path_progress"] * route_weight
+        costs["safety"] = costs["safety"] + costs["path_corridor"]
+        total_names = (
+            "smooth", "safety", "frontier", "acceleration",
+            "path_progress", "path_mse", "path_centerline",
+        )
+        total_cost = torch.stack(tuple(costs[name] for name in total_names), dim=0).sum(dim=0)
         trajectory_loss = total_cost.mean()
         score_loss = F.smooth_l1_loss(score_flat, total_cost.detach())
-        total_loss = trajectory_loss + score_loss
+        score_ranking_loss = self._score_ranking_loss(
+            score_flat.view(batch_size, self.traj_num),
+            total_cost.detach().view(batch_size, self.traj_num),
+        )
+        # Candidate generation remains governed by the original YOPO score
+        # regression.  Keep the old ranking metric for opt-in ablations, but
+        # compute no ranking gradient in the default configuration.
+        if float(cfg["safety_ranking_weight"]) > 0.0:
+            safety_score_loss = self._safety_binary_ranking_loss(
+                score_flat.view(batch_size, self.traj_num),
+                costs["safety"].detach().view(batch_size, self.traj_num),
+            )
+        else:
+            safety_score_loss = torch.zeros((), device=total_cost.device)
+        total_loss = (
+            trajectory_loss + score_loss
+            + float(cfg["score_ranking_weight"]) * score_ranking_loss
+            + float(cfg["safety_ranking_weight"]) * safety_score_loss
+        )
 
         total_by_sample = total_cost.view(batch_size, self.traj_num)
         score_by_sample = score_flat.view(batch_size, self.traj_num)
@@ -221,6 +271,8 @@ class YopoTrainer:
             "total_loss": float(total_loss.detach()),
             "trajectory_loss": float(trajectory_loss.detach()),
             "score_loss": float(score_loss.detach()),
+            "score_ranking_loss": float(score_ranking_loss.detach()),
+            "safety_score_loss": float(safety_score_loss.detach()),
             "selected_total_cost": float(selected_cost.mean().detach()),
             "oracle_total_cost": float(oracle_cost.mean().detach()),
             "selection_regret": float((selected_cost - oracle_cost).mean().detach()),
@@ -229,18 +281,78 @@ class YopoTrainer:
         metrics.update({name: float(value.mean().detach()) for name, value in costs.items()})
         return total_loss, metrics
 
+    @staticmethod
+    def _safety_binary_ranking_loss(predicted: torch.Tensor, barrier: torch.Tensor) -> torch.Tensor:
+        """Rank every collision candidate after every clearly safe candidate.
+
+        Unlike ranking raw barrier magnitudes, this does not make the score
+        head prefer the shortest low-clearance trajectory among safe options.
+        The original detached total-cost regression remains responsible for
+        progress and smoothness ordering.
+        """
+        unsafe = barrier > 1.0e-5
+        margin = float(cfg["score_ranking_margin"])
+        pair_losses: list[torch.Tensor] = []
+        for left in range(predicted.shape[1]):
+            for right in range(predicted.shape[1]):
+                if left == right:
+                    continue
+                valid = unsafe[:, left] & ~unsafe[:, right]
+                if torch.any(valid):
+                    # score[unsafe] >= score[safe] + margin
+                    pair_losses.append(
+                        torch.relu(
+                            margin - (predicted[valid, left] - predicted[valid, right])
+                        )
+                    )
+        if not pair_losses:
+            return predicted.new_zeros(())
+        return torch.cat(pair_losses).mean()
+
+    @staticmethod
+    def _score_ranking_loss(predicted: torch.Tensor, target: torch.Tensor, *, target_margin: float | None = None) -> torch.Tensor:
+        """Require candidate score ordering to agree with differentiable costs."""
+        margin = float(cfg["score_ranking_margin"])
+        target_margin = float(cfg["score_ranking_target_margin"]) if target_margin is None else float(target_margin)
+        pair_losses: list[torch.Tensor] = []
+        for left in range(predicted.shape[1]):
+            for right in range(left + 1, predicted.shape[1]):
+                delta = target[:, right] - target[:, left]
+                valid = delta.abs() > target_margin
+                if not torch.any(valid):
+                    continue
+                direction = torch.sign(delta[valid])
+                predicted_delta = predicted[:, right] - predicted[:, left]
+                pair_losses.append(torch.relu(margin - direction * predicted_delta[valid]))
+        if not pair_losses:
+            return predicted.new_zeros(())
+        return torch.cat(pair_losses).mean()
+
     def _set_backbone_trainable(self, trainable: bool) -> None:
+        if self.score_only:
+            for parameter in self.policy.parameters():
+                parameter.requires_grad_(False)
+            final = self.policy.yopo_head.model[-1]
+            final.weight.requires_grad_(True)
+            final.bias.requires_grad_(True)
+            return
         for parameter in self.policy.image_backbone.parameters():
             parameter.requires_grad_(trainable)
 
-    def load_checkpoint(self, path: Path) -> None:
+    def load_checkpoint(
+        self, path: Path, *, resume_training_state: bool = True
+    ) -> None:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
         try:
             self.policy.load_state_dict(state_dict)
         except RuntimeError:
             self.policy.load_yopo_simple_state_dict(state_dict)
-        if isinstance(checkpoint, dict) and "optimizer_state_dict" in checkpoint:
+        if (
+            resume_training_state
+            and isinstance(checkpoint, dict)
+            and "optimizer_state_dict" in checkpoint
+        ):
             self._checkpoint_optimizer_state = checkpoint["optimizer_state_dict"]
             self.epoch_i = int(checkpoint.get("epoch", -1))
             self.best_validation_cost = float(
@@ -258,10 +370,28 @@ class YopoTrainer:
                 "route_dataset_version": int(cfg["route_dataset_version"]),
                 "route_bubble_count": int(cfg["route_bubble_count"]),
                 "route_anchor_distances_m": list(cfg["route_anchor_distances_m"]),
+                "local_subgoal_distance_m": float(cfg["local_subgoal_distance_m"]),
                 "loss_weights": {
                     name: float(cfg[name])
-                    for name in ("ws", "wc", "wa", "wg", "wp", "wprogress", "wtangent")
+                    for name in (
+                        "ws", "wc", "wa", "wg", "wp", "wprogress",
+                        "wprogress_floor", "wtangent", "wcenterline", "score_ranking_weight",
+                        "score_ranking_margin", "score_ranking_target_margin",
+                        "safety_ranking_weight", "safety_ranking_target_margin",
+                        "route_progress_error_scale_m", "route_corridor_scale_m",
+                    )
                 },
+                "peak_weights": {
+                    "safety": float(cfg["safety_peak_weight"]),
+                    "path_corridor": float(cfg["route_corridor_peak_weight"]),
+                },
+                "safety_collision_margin_weight": float(cfg["safety_collision_margin_weight"]),
+                "safety_eval_points": int(cfg["safety_eval_points"]),
+                "active_loss_terms": [
+                    "smooth", "safety", "frontier", "acceleration",
+                    "path_progress", "score_regression", "path_mse",
+                ],
+                "score_only": self.score_only,
             },
             path,
         )
@@ -269,14 +399,50 @@ class YopoTrainer:
     def _write_run_metadata(self) -> None:
         metadata = {
             "data_root": str(self.train_dataset.data_root),
+            "split_strategy": self.train_dataset.split_strategy,
             "train_samples": len(self.train_dataset),
             "validation_samples": len(self.valid_dataset),
             "device": str(self.device),
+            "batch_size": self.batch_size,
+            "learning_rate": self.learning_rate,
+            "num_workers": self.num_workers,
+            "random_seed": self.random_seed,
+            "route_dropout_probability": self.train_dataset.route_dropout_probability,
             "route_dataset_version": int(cfg["route_dataset_version"]),
+            "local_subgoal_distance_m": float(cfg["local_subgoal_distance_m"]),
+            "loss_weights": {
+                name: float(cfg[name])
+                for name in (
+                    "ws", "wc", "wa", "wg", "wp", "wprogress",
+                    "wprogress_floor", "wtangent", "wcenterline", "score_ranking_weight",
+                    "score_ranking_margin", "score_ranking_target_margin",
+                    "safety_ranking_weight", "safety_ranking_target_margin",
+                    "route_progress_error_scale_m", "route_corridor_scale_m",
+                )
+            },
+            "checkpoint": self.checkpoint_path,
+            "resume_training_state": self.resume_training_state,
+            "peak_weights": {
+                "safety": float(cfg["safety_peak_weight"]),
+                "path_corridor": float(cfg["route_corridor_peak_weight"]),
+            },
+            "safety_collision_margin_weight": float(cfg["safety_collision_margin_weight"]),
+            "safety_eval_points": int(cfg["safety_eval_points"]),
+            "active_loss_terms": [
+                "smooth", "safety", "frontier", "acceleration",
+                "path_progress", "score_regression", "path_mse",
+            ],
+            "score_only": self.score_only,
         }
         (self.output_path / "run.json").write_text(
             json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8"
         )
+
+    def _update_run_metadata(self, values: dict[str, object]) -> None:
+        path = self.output_path / "run.json"
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        metadata.update(values)
+        path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
 
     def _log_metrics(self, prefix: str, metrics: dict[str, float], epoch: int) -> None:
         for name, value in metrics.items():

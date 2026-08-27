@@ -7,7 +7,8 @@
 | 适用软件 | `scalenav_graph_ros2` |
 | 设计层级 | 系统设计、模块详细设计、函数设计 |
 | 测试规格 | [FUNCTION_TEST_CASES.md](FUNCTION_TEST_CASES.md) |
-| 实测记录 | [TEST_REPORT_2026-08-26.md](TEST_REPORT_2026-08-26.md) |
+| 训练与在线集成 | [YOPO_TRAINING_INTEGRATION_DESIGN.md](YOPO_TRAINING_INTEGRATION_DESIGN.md) |
+| 实测记录 | [TEST_REPORT_2026-08-26.md](test_reports/TEST_REPORT_2026-08-26.md) |
 
 ## 1. 文档说明
 
@@ -44,6 +45,11 @@ ROS2 兼容封装、RViz 绘制辅助函数、日志格式化函数及第三方 
 ### 2.1 系统边界
 
 EPIC 位于深度/语义感知与 YOPO 局部轨迹规划之间。输入为深度几何、语义风险、无人机状态和任务终点；输出为已验证路线、短前视控制目标和诊断数据。动力学轨迹生成、飞控执行及图像语义网络推理不在本软件内完成。
+
+Route-Conditioned YOPO 的离线数据制作、训练、模型评测和在线原子接口见
+[YOPO_TRAINING_INTEGRATION_DESIGN.md](YOPO_TRAINING_INTEGRATION_DESIGN.md)。生产路线仍只由
+EPIC accepted witness 定义；训练侧真值搜索仅生成合成标签，YOPO 只在已提交路线的局部
+安全走廊内选择动力学轨迹，不重新决定全局绕行方向。
 
 ```mermaid
 flowchart LR
@@ -92,7 +98,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    CB1[onOdom / onCloud / onFreeRays] --> Map[(40 m occupied map)]
+    CB1[onOdom / onCloud] --> Map[(Current-frame occupied view)]
     CB2[onSemanticHeatmap] --> SemanticFrame[(SemanticFrame)]
     Goal[onGoal] --> State[(Mission and route state)]
 
@@ -150,7 +156,7 @@ sequenceDiagram
 | `frontier_goal` | 路线级，前向储备不足或路线失效时更新 | 局部图远端的路线承诺 |
 | `local_goal` | 控制级，每个成功规划 tick 更新 | accepted witness 上的短前视执行点 |
 
-局部图半径为 `35 m`，`3.5 m` 是 frontier 规划储备对应的 loss 参考距离，不是 terminal 的硬资格门槛。`local_goal` 从 accepted witness 上按 `10 m` 前视距离插值产生。
+局部图半径为 `35 m`，`3.5 m` 是 frontier 规划储备对应的 loss 参考距离，不是 frontier_goal 的硬资格门槛。`local_goal` 从 accepted witness 上按 `10 m` 前视距离插值产生。
 
 ```mermaid
 flowchart LR
@@ -184,20 +190,20 @@ classDiagram
       SemanticRecord[] semantic_memory
     }
     class AcceptedRoute {
-      uint64 terminal_id
-      Vector3f terminal
+      uint64 frontier_goal_id
+      Vector3f frontier_goal
       Vector3f[] witness_path
       float risk
       float objective
     }
     TopoGraph "1" o-- "many" TopoNode
     TopoNode "many" -- "many" TopoNode : bidirectional edge + witness
-    AcceptedRoute --> TopoNode : terminal_id
+    AcceptedRoute --> TopoNode : frontier_goal_id
 ```
 
 | 数据项 | 保存范围 | 更新位置 | 一致性要求 |
 |---|---|---|---|
-| 障碍点云 | M1 无人机中心 40 m 跨帧缓存，非拓扑持久化 | `updateCloudMapOdometry()` | 帧间累积；窗外点删除；容量不足时近点优先；不复制为 persistent TopoNode |
+| 障碍点云 | M1 当前深度帧的几何观测，非拓扑持久化 | `updateCloudMapOdometry()` | 生产默认每帧替换；体素去重；不复制为 persistent TopoNode；正值历史半径仅作兼容模式 |
 | TopoNode/edge | M2 跨 rebuild 持久图 | `updateSkeleton()` | persistent id 稳定；边双向；边带 witness |
 | 语义属性 | TopoNode 及语义记忆 | `updateTopoSemanticMemory()` | 分数 `[0,1]`；重复观测合并 |
 | accepted witness | 规划器状态 | `update()` | 仅在候选提交时替换 |
@@ -239,7 +245,7 @@ stateDiagram-v2
 | 故障 | 处理 |
 |---|---|
 | 当前 witness 碰撞 | 硬失效；禁止继续发布对应 local goal，允许强制切换到安全候选 |
-| terminal 暂时无法重映射 | 若 accepted witness 连续、无碰撞且执行储备足够，则继续执行旧路线 |
+| frontier_goal 暂时无法重映射 | 若 accepted witness 连续、无碰撞且执行储备足够，则继续执行旧路线 |
 | A* 超时或无路 | 保留安全 incumbent；不得用空候选覆盖路线记忆 |
 | 语义帧过期或姿态无法对齐 | 丢弃该语义帧，不改变当前路线 |
 | 候选仅有轻微收益 | 由风险/代价滞回拒绝，保留 incumbent |
@@ -252,9 +258,9 @@ stateDiagram-v2
 | 项目 | 设计内容 |
 |---|---|
 | 输入 | `/sim/odom`、`/depth/points`、`/depth/free_rays` |
-| 处理 | 时间对齐、坐标变换、非法点过滤、体素去重、滑动窗口裁剪、KD-tree 更新 |
+| 处理 | 时间对齐、坐标变换、非法点过滤、当前帧体素去重、KD-tree 替换 |
 | 输出 | 局部占据点集、最近障碍距离、KNN 结果、AABB 查询结果 |
-| 状态性质 | 运行期有限状态；有界 odom 历史、无人机位姿、体素点集和 KD-tree 可跨传感器帧缓存，但不复制为 TopoGraph persistent node，进程退出后不恢复 |
+| 状态性质 | 生产默认为当前帧几何视图；路线记忆由 TopoGraph/Bubble/edge witness 持久化，进程退出后不恢复 |
 | 异常处理 | 无匹配姿态或点坐标非有限时丢弃输入；空地图查询返回安全的空结果 |
 
 ```mermaid
@@ -265,13 +271,12 @@ flowchart TD
     P -->|匹配失败| Drop[丢弃该帧]
     P -->|匹配成功| TF[变换到世界坐标]
     TF --> Filter[有限值与地图边界过滤]
-    Filter --> Voxel[体素去重]
-    Voxel --> Window[以无人机为中心裁剪40 m]
-    Window --> Capacity[按无人机距离保留最近点]
-    Capacity --> KD[(KD-tree)]
+    Filter --> Voxel[当前帧体素去重]
+    Voxel --> Replace[替换上一帧原始障碍]
+    Replace --> KD[(KD-tree)]
 ```
 
-同一体素保留距离体素中心最近的点。点数超过 `map_max_points` 时按无人机距离升序保留。占据点在 M1 中跨传感器帧缓存，窗口外障碍从点云和 KD-tree 中删除，不进入后续安全空间查询；需要跨窗口保留的路线信息只由 M2 的 TopoGraph 和 accepted witness 保存。M1 地图对象可供多次 graph rebuild 使用，但不把占据点直接持久化为 TopoNode，进程重启后也不恢复。
+同一体素保留距离体素中心最近的点。`map_history_radius_m=0` 时，每次成功深度回调都用新帧替换障碍点集和 KD-tree，上一帧 hit 不再参与 clearance、Bubble 或边碰撞计算。只有显式配置正值时才启用旧的有界滑窗兼容模式。需要跨帧保留的路线信息由 M2 的 TopoGraph、Bubble 和 accepted witness 保存，M1 不把原始占据点持久化为 TopoNode。
 
 ### 3.2 M2 Bubble 与拓扑图构建
 
@@ -302,7 +307,7 @@ flowchart TD
 
 Bubble 中心必须位于自由空间，半径不得超过最近障碍安全空间。相交 Bubble 通过并查集形成连通分量，每个连通分量生成一个拓扑节点。几何重复合并容差缺省为 `0.05 m`；该容差不得扩大到地图体素尺寸，以免合并有效分支。
 
-M1 的局部点云快照是 M2 的输入，不等同于 M2 的持久图：M1 窗口移动会删除窗口外点；M2 通过 persistent id、边和 witness 在 graph rebuild 间恢复拓扑结构。
+M1 的当前帧点云快照是 M2 的局部观测输入，不等同于 M2 的持久图。M2 通过 persistent id、边和 witness 在 graph rebuild 间保留拓扑结构；Bubble 差分只由当前深度实际触发的 region 更新，不沿 mission goal 预先种入未观测 region。
 
 ### 3.3 M3 远场语义风险
 
@@ -339,7 +344,7 @@ flowchart LR
 | 项目 | 设计内容 |
 |---|---|
 | 输入 | TopoGraph、起终点、局部点云、搜索半径、超时及代价权重 |
-| 处理 | 栅格安全判定、Bubble A*、折线短化、拓扑 A*、terminal 评分 |
+| 处理 | 栅格安全判定、Bubble A*、折线短化、拓扑 A*、frontier_goal 评分 |
 | 输出 | 搜索状态码、碰撞安全 witness、节点路径、统一路径代价 |
 | 异常处理 | 起点/终点不安全分别返回 `START_FAIL`/`END_FAIL`；预算耗尽返回 `TIME_OUT`；无连通路返回 `NO_PATH` |
 
@@ -349,13 +354,13 @@ flowchart LR
 L_e = weight(u,v)，无显式权重时取 ||v-u||
 G_e = w_path * L_e * d_prev
 S_e = w_semantic * L_e * [-log(max(0.001, 1-R_e))]
-D_e = w_clearance * ||v-u|| * ((d_target-d_min)/d_target)^2，0<d_min<d_target
+D_e = w_clearance * ||v-u|| * (d_target/(d_target+d_min))^2，d_min>=0
 C_e = G_e + S_e + D_e
 ```
 
-`d_prev` 仅在该边属于上一条 accepted route 时取 `[0,1]` 内的连续性因子，否则为 `1`。`R_e` 使用边 witness 折线计算，不使用节点中心弦线。`graphSearch()` 搜索指定 terminal；`goalDirectedSearch()` 在 `35 m` 局部窗口内联合评价前向进度与总代价。
+`d_prev` 仅在该边属于上一条 accepted route 时取 `[0,1]` 内的连续性因子，否则为 `1`。`R_e` 使用边 witness 折线计算，不使用节点中心弦线。`d_target` 是安全距离衰减尺度，不是零代价阈值；因此安全空间越大的可行边仍具有更小的安全代价。`graphSearch()` 搜索指定 frontier_goal；`goalDirectedSearch()` 在 `35 m` 局部窗口内联合评价前向进度与总代价。
 
-对候选 terminal `q`，额外计算 frontier loss：
+对候选 frontier_goal `q`，额外计算 frontier loss：
 
 ```text
 L_frontier(q) =
@@ -375,9 +380,9 @@ L_frontier(q) =
 | 项目 | 设计内容 |
 |---|---|
 | 输入 | incumbent/candidate topology path、各边 witness、无人机位置、mission goal、风险与代价 |
-| 处理 | witness 拼接、无人机投影、前向裁剪、terminal 恢复、候选滞回比较、frontier 延伸、local goal 插值 |
+| 处理 | witness 拼接、无人机投影、前向裁剪、frontier_goal 恢复、候选滞回比较、frontier 延伸、local goal 插值 |
 | 输出 | accepted witness、frontier goal、local goal、路线模式及切换原因 |
-| 持久状态 | terminal persistent id、accepted witness、已评估风险、上一 local goal 及发布时间 |
+| 持久状态 | frontier_goal persistent id、accepted witness、已评估风险、上一 local goal 及发布时间 |
 | 异常处理 | incumbent 碰撞时硬失效；单次 remap/A* 失败时继续验证并保留可执行 witness；hold 超时后停止复用 local goal |
 
 ```mermaid
@@ -397,11 +402,11 @@ flowchart TD
     Keep --> Local
 ```
 
-拓扑节点路径仅用于图搜索与 terminal 标识，控制输出必须来自边 witness 拼接结果。候选提交统一比较 incumbent 与 candidate 的完整 loss，并应用滞回：当前路线硬失效时允许强制切换；否则只有总 loss 改善超过 `risk_margin`/`cost_ratio` 对应的滞回条件才提交。任务方向、FOV、前向储备和候选长度均不得单独构成提交资格；其他情况保留 incumbent。
+拓扑节点路径仅用于图搜索与 frontier_goal 标识，控制输出必须来自边 witness 拼接结果。候选提交统一比较 incumbent 与 candidate 的完整 loss，并应用滞回：当前路线硬失效时允许强制切换；否则只有总 loss 改善超过 `risk_margin`/`cost_ratio` 对应的滞回条件才提交。任务方向、FOV、前向储备和候选长度均不得单独构成提交资格；其他情况保留 incumbent。
 
-frontier terminal 先剔除物理不可行候选，再对所有剩余候选计算统一 loss。`mission_goal - vehicle` 方向投影、规划储备参考距离、FOV 位置和路线平滑度都作为连续 loss 项，不构成 terminal 的 hard qualification。任务终点不在局部窗口时，前向进度通过 loss 鼓励长期向目标推进；任务终点进入局部窗口后，goal proximity loss 自然使搜索收敛到 mission goal。fallback 也必须使用同一套 loss，不能改用“离目标最近”单项排序。
+frontier_goal 先剔除物理不可行候选，再对所有剩余候选计算统一 loss。`mission_goal - vehicle` 方向投影、规划储备参考距离、FOV 位置和路线平滑度都作为连续 loss 项，不构成 frontier_goal 的 hard qualification。任务终点不在局部窗口时，前向进度通过 loss 鼓励长期向目标推进；任务终点进入局部窗口后，goal proximity loss 自然使搜索收敛到 mission goal。fallback 也必须使用同一套 loss，不能改用“离目标最近”单项排序。
 
-语义风险属于合格 frontier 之间的软代价。增加表达同一风险场的重复语义节点不得改变 frontier 的任务方向或使终点选择偏向节点更密集的区域。存在碰撞安全且持续前进的路线时，规划器不得连续选择无任务进度的 terminal；正常延伸过程中，accepted frontier 的任务方向累计进度应单调增加。硬阻塞重路由允许短时横向绕行，但必须记录阻塞或重路由原因。
+语义风险属于合格 frontier 之间的软代价。增加表达同一风险场的重复语义节点不得改变 frontier 的任务方向或使终点选择偏向节点更密集的区域。存在碰撞安全且持续前进的路线时，规划器不得连续选择无任务进度的 frontier_goal；正常延伸过程中，accepted frontier 的任务方向累计进度应单调增加。硬阻塞重路由允许短时横向绕行，但必须记录阻塞或重路由原因。
 
 ### 3.6 M6 在线调度、发布与诊断
 
@@ -429,7 +434,7 @@ frontier terminal 先剔除物理不可行候选，再对所有剩余候选计�
 | `LIOInterface::getDisToOcc`（3 重载） | 点坐标 | 最近占据距离 | 空地图和类型转换结果一致 | A*/安全空间热点 |
 | `LIOInterface::KNN` | 查询点、`k` | 邻点及平方距离 | 结果数量不超过 `k` | Bubble 生成 |
 | `LIOInterface::boxSearch` | AABB 上下界 | 盒内点集 | 不返回盒外点 | 区域更新 |
-| `LIOInterface::updateCloudMapOdometry` | 点云、odom | 更新非持久化滑动点云/KD-tree | 体素去重、40 m 裁剪、近点优先；窗外点删除 | 深度帧，约 10 Hz |
+| `LIOInterface::updateCloudMapOdometry` | 点云、odom | 更新非持久化障碍点云/KD-tree | 默认当前帧替换与体素去重；正半径启用滑窗兼容模式 | 深度帧，约 10 Hz |
 | `EpicGraphNode::onOdom` | odom 消息 | 当前状态及姿态历史 | 四元数归一化，历史有界 | odom 频率 |
 | `EpicGraphNode::poseForCloud` | 时间戳、容差 | 匹配姿态与成功标志 | 超出容差返回 false | 每点云/语义帧 |
 | `EpicGraphNode::onCloud` | 世界/机体系点云 | 更新 LIO 地图并触发重建条件 | 使用匹配姿态，过滤非法点 | 约 10 Hz |
@@ -503,12 +508,12 @@ frontier terminal 先剔除物理不可行候选，再对所有剩余候选计�
 | `TopoGraph::clearanceCostForEdge` | 两节点 | 边安全空间代价 | 低于目标安全空间才惩罚 | A* 每边 |
 | `TopoGraph::routeEdgeCost` | 边、各权重、上一线路标志 | 统一边代价 | 搜索与候选比较公式相同 | A* 每边 |
 | `TopoGraph::graphSearch` | 起点、终点、超时、半径、代价参数 | 成功标志与节点路径 | 终点超出局部窗时失败 | 每 incumbent 恢复 |
-| `TopoGraph::goalDirectedSearch` | 起点、mission goal、局部约束及代价参数 | 成功标志与局部 terminal 路径 | 所有物理可行 terminal 使用统一 loss 排序；31.5 m、任务方向和 FOV 为软项；重复语义节点不改变等价风险排序 | 候选重规划 |
-| `frontierCandidateLoss` | terminal、mission goal、vehicle、FOV、semantic、clearance、smoothness 和各权重 | 总 loss 与分项 loss | 31.5 m、任务方向和 FOV 为软项；仅物理不可行状态 hard reject | 每候选 terminal |
-| `goalDirectedSearchSoftPreferences` | frontier 候选集、统一 loss 权重 | 可预测的 terminal 排序 | 27 m 安全候选可胜过 32 m 高风险候选；交换权重后排序按预期变化 | 候选重规划 |
+| `TopoGraph::goalDirectedSearch` | 起点、mission goal、局部约束及代价参数 | 成功标志与局部 frontier_goal 路径 | 所有物理可行 frontier_goal 使用统一 loss 排序；31.5 m、任务方向和 FOV 为软项；重复语义节点不改变等价风险排序 | 候选重规划 |
+| `frontierCandidateLoss` | frontier_goal、mission goal、vehicle、FOV、semantic、clearance、smoothness 和各权重 | 总 loss 与分项 loss | 31.5 m、任务方向和 FOV 为软项；仅物理不可行状态 hard reject | 每候选 frontier_goal |
+| `goalDirectedSearchSoftPreferences` | frontier 候选集、统一 loss 权重 | 可预测的 frontier_goal 排序 | 27 m 安全候选可胜过 32 m 高风险候选；交换权重后排序按预期变化 | 候选重规划 |
 | `goalDirectedSearchPhysicalConstraints` | 候选 witness、碰撞/安全空间/连通/local goal 状态 | hard reject 结果 | 只拒绝物理不可行 candidate；后向、FOV 外、单行语义不能单独拒绝 | 候选重规划 |
 | `TopoGraph::getPathLength` | 节点路径 | witness 总长度 | 优先累计边 witness | 路线评估 |
-| `EpicGraphNode::connectTerminalToGoal` | 图、terminal | 是否成功及 extension witness | 仅窗口/连接距离内尝试，必须碰撞通过 | goal 接近局部图时 |
+| `EpicGraphNode::connectFrontierGoalToMissionGoal` | 图、frontier_goal | 是否成功及 extension witness | 仅窗口/连接距离内尝试，必须碰撞通过 | goal 接近局部图时 |
 
 ### 4.5 M5 路线记忆函数
 
@@ -517,13 +522,13 @@ frontier terminal 先剔除物理不可行候选，再对所有剩余候选计�
 | `pointSegmentDistance` | 点、线段端点 | 最短距离 | 退化线段返回点距 | 路线计算热点 |
 | `pointPathDistance` | 点、折线 | 最短距离 | 空路径返回 infinity | 路线计算热点 |
 | `forwardRouteWindow` | 路线、无人机位置、horizon | 投影点起始的限长前向路线 | 去除身后部分并按长度截断 | 规划周期 |
-| `forwardRouteFromPosition` | 路线、无人机位置 | 投影点起始的全部剩余路线 | terminal 保持不变 | 规划周期 |
+| `forwardRouteFromPosition` | 路线、无人机位置 | 投影点起始的全部剩余路线 | frontier_goal 保持不变 | 规划周期 |
 | `isContinuousForwardRoute` | 无人机、路线、横向容差 | 连续性布尔值 | 使用整条路径距离 | 规划周期 |
 | `shouldSwitchRoute` | 硬切换、风险/代价/进度和滞回参数 | 是否提交候选 | 硬条件优先，平局保留 incumbent | 候选产生时 |
 | `edgeFollowsRoute` | 边端点、路线、容差 | 是否属于旧路线 | 起点、终点、中点均需接近 | A* 每相关边 |
 | `routeLength` | 折线 | 有限段长度总和 | 忽略非有限段 | 路线评估 |
 | `candidateExtendsAcceptedRoute` | accepted、candidate、增益与容差 | 是否兼容延伸 | 更长且保护前缀，不允许近车换道 | 候选产生时 |
-| `shouldReuseTerminal` | 无人机、terminal、释放距离 | 是否继续复用 | 到达释放距离后为 false | 规划周期 |
+| `shouldReuseFrontierGoal` | 无人机、frontier_goal、释放距离 | 是否继续复用 | 到达释放距离后为 false | 规划周期 |
 | `canReuseForwardRoute` | 无人机、路线、释放距离、横向容差 | 是否可复用有向路线 | 离线、越过末端或余量不足为 false | 规划周期 |
 | `semanticRiskIncreaseRequiresReplan` | 更新前后风险、最小增量 | 是否请求重评估 | 只响应足够大的上升 | 每语义更新 |
 | `semanticRiskChangeRequiresReplan` | 同上 | 同上 | 与上升判定保持兼容 | 每语义更新 |
@@ -548,12 +553,12 @@ frontier terminal 先剔除物理不可行候选，再对所有剩余候选计�
 
 1. 所有可执行 TopoGraph 边都是双向的，且至少有一条 collision-checked witness。
 2. `accepted_witness_path` 只能在候选正式提交时替换。
-3. `route_blocked` 为硬条件；单次 terminal remap/A* 失败不是硬条件。
+3. `route_blocked` 为硬条件；单次 frontier_goal remap/A* 失败不是硬条件。
 4. `local_goal` 必须位于 accepted witness 的无人机前方，并满足固定图层约束。
 5. 语义点只改变风险代价，不能绕过几何碰撞检查。
-6. 滑动点云窗口外的历史障碍不参与当前 clearance；persistent graph 仍可保留路线和语义记忆。
+6. 上一帧原始障碍不参与当前 clearance；persistent graph 仍保留路线、Bubble、边 witness 和语义记忆。
 7. graph swap 后 persistent id、双向连接、witness 和语义属性保持一致。
-8. 非硬阻塞状态下，frontier 的任务方向累计进度不得长期停滞或倒退；语义节点密度不得成为 terminal 排序因素。
+8. 非硬阻塞状态下，frontier 的任务方向累计进度不得长期停滞或倒退；语义节点密度不得成为 frontier_goal 排序因素。
 
 ## 6. 配置与性能指标
 
@@ -561,7 +566,7 @@ frontier terminal 先剔除物理不可行候选，再对所有剩余候选计�
 |---|---:|---|
 | `update_period_ms` | `100 ms` | 规划周期 |
 | `skeleton_rebuild_period_ms` | `100 ms` | skeleton 重建请求周期 |
-| `map_history_radius_m` | `40 m` | 局部障碍窗口 |
+| `map_history_radius_m` | `0 m` | `0` 为当前帧几何；正值为滑窗兼容模式 |
 | `local_graph_radius_m` | `35 m` | 拓扑搜索窗口 |
 | `frontier_goal_margin_m` | `3.5 m` | frontier 滚动滞后 |
 | `local_goal_lookahead_m` | `10 m` | YOPO 前视 |
@@ -574,10 +579,10 @@ frontier terminal 先剔除物理不可行候选，再对所有剩余候选计�
 
 ## 7. 验收准则
 
-- 墙面进入 `40 m` 窗口后，不超过两个点云/规划周期反映到路线安全空间或阻塞状态。
+- 真实墙面进入当前水平 FOV 和执行前缀后，不超过两个点云/规划周期反映到路线安全空间或阻塞状态。
 - 无人机仍在 accepted witness 走廊内时，不因越过首点而丢失路线或 local goal。
 - 稳态高风险只锁存一次候选重评估；候选无明显改善时不得左右切换。
 - 每个有效语义帧生成固定 optical Z=`30 m` 的风险点；不能因 measured depth 较短而清空。
 - 未通过碰撞检查的语义节点连接不得成为 accepted witness。
-- 任务完成前必须持续存在碰撞安全、可执行的 `local_goal`；`frontier_goal` 可因统一 loss 在侧向或短期后向，不能仅因不在前向带而拒绝。无硬阻塞时，滑动窗口内的 mission-direction 累计进度必须为正并最终收敛到 `mission_goal`；进入终点连接窗口后应选择可连接的 goal terminal。
+- 任务完成前必须持续存在碰撞安全、可执行的 `local_goal`；`frontier_goal` 可因统一 loss 在侧向或短期后向，不能仅因不在前向带而拒绝。无硬阻塞时，滑动窗口内的 mission-direction 累计进度必须为正并最终收敛到 `mission_goal`；进入终点连接窗口后应选择可连接的 goal frontier_goal。
 - 自动化与场景测试的覆盖项、输入输出和重复次数以 [FUNCTION_TEST_CASES.md](FUNCTION_TEST_CASES.md) 为准。

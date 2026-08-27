@@ -17,10 +17,13 @@ class SafetyLoss(nn.Module):
         self.map_expand_max = np.array(cfg['map_expand_max'])
         self.d0 = cfg["d0"]
         self.r = cfg["r"]
+        self.peak_weight = float(cfg["safety_peak_weight"])
+        self.collision_margin_weight = float(cfg["safety_collision_margin_weight"])
+        self.required_clearance = float(cfg["robot_radius_m"] + cfg["safety_margin_m"])
 
         self._L = L
         self.sgm_time = cfg["sgm_time"]
-        self.eval_points = 30
+        self.eval_points = int(cfg["safety_eval_points"])
         self.device = self._L.device
         self.time_integral = True
 
@@ -62,7 +65,9 @@ class SafetyLoss(nn.Module):
         if self.time_integral:
             # Compute average time integral of trajectory cost
             # Issue: uneven eval points may undercut cost by quickly crossing obstacles
-            cost_colli = cost.reshape(-1, pos_coe.shape[1]).mean(dim=-1)  # [B*H*V, N]
+            point_cost = cost.reshape(-1, pos_coe.shape[1])
+            cost_colli = point_cost.mean(dim=-1)
+            cost_colli = cost_colli + self.peak_weight * point_cost.max(dim=-1).values
         else:
             # Compute average line integral of trajectory cost
             vel_coe = self.get_velocity_from_coeff(coe, t_list)
@@ -71,7 +76,15 @@ class SafetyLoss(nn.Module):
             line_length = (vel_coe * dt).sum(dim=1)  # [B*H*V]
             cost_colli = line_integral_cost / line_length  # [B*H*V]
 
-        return cost_colli
+        # Exponential clearance cost is smooth but can still be traded for
+        # progress. Add an explicit differentiable barrier at the configured
+        # robot-plus-margin boundary so selected primitives cannot sit on an
+        # obstacle while gaining a longer endpoint.
+        point_violation = th.relu(self.required_clearance - dist.reshape(-1, pos_coe.shape[1]))
+        collision_barrier = point_violation.square().mean(dim=-1)
+        collision_barrier = collision_barrier + self.peak_weight * point_violation.square().max(dim=-1).values
+        self.last_collision_barrier = collision_barrier
+        return cost_colli + self.collision_margin_weight * collision_barrier
 
     def get_distance_cost(self, pos, map_id):
         """
@@ -90,6 +103,10 @@ class SafetyLoss(nn.Module):
         grid = (pos - local_origin.unsqueeze(1)) / self.voxel_size  # (B, N, 3)
 
         # 归一化 grid 到 [-1, 1]
+        # grid_sample's 5-D grid coordinates are expressed as [x, y, z],
+        # corresponding to the input tensor's [W, H, D] dimensions.  The
+        # ESDF tensor is stored as [D, H, W] = [z, y, x], so no permutation is
+        # needed here: world/local coordinates already use [x, y, z].
         grid_point = 2.0 * grid / (local_shape - 1).unsqueeze(1) - 1.0  # (B, N, 3)
 
         grid_point = grid_point.view(B, 1, 1, N, 3)

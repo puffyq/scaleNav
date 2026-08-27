@@ -104,7 +104,11 @@ class LIOInterface {
                         std::size_t max_points, float prune_distance) {
     std::lock_guard<std::mutex> lock(mutex_);
     voxel_size_ = std::max(voxel_size, 0.05F);
-    history_radius_ = std::max(history_radius, 1.0F);
+    // A zero radius makes the obstacle KD-tree a current-frame sensor view.
+    // Persistent navigation memory belongs to TopoGraph/Bubbles; retaining
+    // raw depth hits here is optional for map backends that need a local
+    // multi-frame window.
+    history_radius_ = std::max(history_radius, 0.0F);
     max_points_ = std::max<std::size_t>(max_points, 1000);
     prune_distance_ = std::max(prune_distance, 0.1F);
     ikd_Tree_map->set_downsample_param(voxel_size_);
@@ -131,7 +135,12 @@ class LIOInterface {
     last_hit_voxels_ = 0;
     last_free_voxels_ = 0;
     last_carved_voxels_ = 0;
-    bool changed = false;
+    const bool current_frame_only = history_radius_ <= 0.0F;
+    if (current_frame_only) {
+      cloud_->clear();
+      occupied_index_.clear();
+    }
+    bool changed = current_frame_only;
     std::size_t hit_voxels = 0;
     for (const auto &point : points_world.points) {
       if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
@@ -157,9 +166,10 @@ class LIOInterface {
       }
     }
     last_hit_voxels_ = hit_voxels;
-    const bool moved_for_prune = !have_prune_pose_ ||
-      (pose - last_prune_pose_).norm() >= prune_distance_;
-    const bool needs_prune = moved_for_prune || cloud_->size() > max_points_;
+    const bool moved_for_prune = !current_frame_only && (!have_prune_pose_ ||
+      (pose - last_prune_pose_).norm() >= prune_distance_);
+    const bool needs_prune = !current_frame_only &&
+      (moved_for_prune || cloud_->size() > max_points_);
     if (!changed && !needs_prune) return false;
     if (needs_prune) pruneLocked(pose);
     rebuildKdTreeLocked();

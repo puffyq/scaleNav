@@ -176,6 +176,282 @@ inline float routeLength(const std::vector<Eigen::Vector3f> &route)
   return length;
 }
 
+// Return the arc-length parameter of the closest point on an ordered route.
+// The parameter follows the route direction; it is therefore suitable for
+// tracking execution progress even when the vehicle moves laterally around a
+// local obstacle.
+inline float routeProgressAlongPath(const std::vector<Eigen::Vector3f> &route,
+                                    const Eigen::Vector3f &position)
+{
+  if (route.size() < 2 || !position.allFinite()) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+  float total_before = 0.0F;
+  float best_progress = 0.0F;
+  float best_distance_sq = std::numeric_limits<float>::infinity();
+  for (std::size_t i = 1; i < route.size(); ++i) {
+    const Eigen::Vector3f segment = route[i] - route[i - 1];
+    const float length_sq = segment.squaredNorm();
+    if (length_sq < 1e-8F) continue;
+    const float length = std::sqrt(length_sq);
+    const float t = std::clamp(
+      (position - route[i - 1]).dot(segment) / length_sq, 0.0F, 1.0F);
+    const Eigen::Vector3f projection = route[i - 1] + t * segment;
+    const float distance_sq = (position - projection).squaredNorm();
+    if (distance_sq < best_distance_sq) {
+      best_distance_sq = distance_sq;
+      best_progress = total_before + t * length;
+    }
+    total_before += length;
+  }
+  return std::isfinite(best_distance_sq) ? best_progress :
+    std::numeric_limits<float>::quiet_NaN();
+}
+
+// Low-order polynomial P(t) fitted to witness polyline control points.  Arc-length
+// of the original witness defines t in [0, 1].  Progress and subgoal sampling both
+// use this curve; witness polylines remain the route source for A* and clearance.
+struct WitnessParametricCurve
+{
+  int degree = 0;
+  Eigen::MatrixXf coefficients;
+  float total_length = 0.0F;
+  bool valid = false;
+
+  static WitnessParametricCurve fit(const std::vector<Eigen::Vector3f> &route)
+  {
+    WitnessParametricCurve curve;
+    if (route.size() < 2) return curve;
+    curve.degree = std::min<int>(3, static_cast<int>(route.size()) - 1);
+    const int rows = static_cast<int>(route.size());
+    Eigen::MatrixXf basis(rows, curve.degree + 1);
+    Eigen::MatrixXf values(rows, 3);
+    float total_length = 0.0F;
+    std::vector<float> arc(route.size(), 0.0F);
+    for (std::size_t i = 1; i < route.size(); ++i) {
+      const float length = (route[i] - route[i - 1]).norm();
+      if (std::isfinite(length)) total_length += length;
+      arc[i] = total_length;
+    }
+    if (!std::isfinite(total_length) || total_length < 1e-4F) return curve;
+    curve.total_length = total_length;
+    for (int row = 0; row < rows; ++row) {
+      const float t = arc[static_cast<std::size_t>(row)] / total_length;
+      float power = 1.0F;
+      for (int column = 0; column <= curve.degree; ++column) {
+        basis(row, column) = power;
+        power *= t;
+      }
+      values.row(row) = route[static_cast<std::size_t>(row)].transpose();
+    }
+    curve.coefficients = basis.colPivHouseholderQr().solve(values);
+    curve.valid = curve.coefficients.allFinite();
+    return curve;
+  }
+
+  Eigen::Vector3f evaluate(float t) const
+  {
+    if (!valid) {
+      return Eigen::Vector3f::Constant(std::numeric_limits<float>::quiet_NaN());
+    }
+    const float clamped = std::clamp(t, 0.0F, 1.0F);
+    Eigen::VectorXf powers(degree + 1);
+    float power = 1.0F;
+    for (int column = 0; column <= degree; ++column) {
+      powers(column) = power;
+      power *= clamped;
+    }
+    return (powers.transpose() * coefficients).transpose();
+  }
+};
+
+inline bool routeProgressTAlongPath(const std::vector<Eigen::Vector3f> &route,
+                                    const Eigen::Vector3f &position,
+                                    float minimum_t,
+                                    float &progress_t)
+{
+  if (route.size() < 2 || !position.allFinite()) return false;
+  const WitnessParametricCurve curve = WitnessParametricCurve::fit(route);
+  if (!curve.valid) return false;
+
+  const float start_t = std::clamp(minimum_t, 0.0F, 1.0F);
+  constexpr int samples = 128;
+  float best_t = start_t;
+  float best_distance_sq = std::numeric_limits<float>::infinity();
+  for (int sample = 0; sample <= samples; ++sample) {
+    const float t = start_t + (1.0F - start_t) *
+      static_cast<float>(sample) / static_cast<float>(samples);
+    const Eigen::Vector3f estimate = curve.evaluate(t);
+    if (!estimate.allFinite()) continue;
+    const float distance_sq = (position - estimate).squaredNorm();
+    if (distance_sq < best_distance_sq) {
+      best_distance_sq = distance_sq;
+      best_t = t;
+    }
+  }
+  if (!std::isfinite(best_distance_sq)) return false;
+  progress_t = std::max(start_t, best_t);
+  return true;
+}
+
+// Return the original witness suffix at a monotonic normalized parameter.
+// Interpolation is done on the witness itself so this helper never publishes
+// points introduced by the polynomial fit.
+inline std::vector<Eigen::Vector3f> forwardRouteFromT(
+    const std::vector<Eigen::Vector3f> &route, float progress_t)
+{
+  if (route.size() < 2) return {};
+  const float target_t = std::clamp(progress_t, 0.0F, 1.0F);
+  float total_length = 0.0F;
+  for (std::size_t i = 1; i < route.size(); ++i) {
+    const float length = (route[i] - route[i - 1]).norm();
+    if (std::isfinite(length)) total_length += length;
+  }
+  if (!std::isfinite(total_length) || total_length < 1e-4F) return {route.back()};
+  const float target_length = target_t * total_length;
+  float accumulated = 0.0F;
+  std::vector<Eigen::Vector3f> forward;
+  for (std::size_t i = 1; i < route.size(); ++i) {
+    const Eigen::Vector3f segment = route[i] - route[i - 1];
+    const float length = segment.norm();
+    if (!std::isfinite(length) || length < 1e-6F) continue;
+    if (target_length <= accumulated + length) {
+      const float local = std::clamp((target_length - accumulated) / length, 0.0F, 1.0F);
+      forward.push_back(route[i - 1] + local * segment);
+      for (std::size_t j = i; j < route.size(); ++j) {
+        if ((forward.back() - route[j]).norm() > 1e-4F) forward.push_back(route[j]);
+      }
+      return forward;
+    }
+    accumulated += length;
+  }
+  return {route.back()};
+}
+
+// Select a subgoal on P(t) by advancing monotonically from the latched progress.
+inline bool routeLookaheadPointFromT(
+    const std::vector<Eigen::Vector3f> &route, const Eigen::Vector3f &position,
+    float minimum_t, float lookahead, Eigen::Vector3f &point)
+{
+  if (!position.allFinite() || !std::isfinite(lookahead) || lookahead <= 0.0F) {
+    return false;
+  }
+  float current_t = minimum_t;
+  if (!routeProgressTAlongPath(route, position, minimum_t, current_t)) return false;
+  const WitnessParametricCurve curve = WitnessParametricCurve::fit(route);
+  if (!curve.valid || curve.total_length < 1e-4F) return false;
+  const float delta_t = lookahead / curve.total_length;
+  point = curve.evaluate(std::clamp(current_t + delta_t, current_t, 1.0F));
+  return point.allFinite();
+}
+
+inline bool isContinuousForwardRouteFromT(
+    const Eigen::Vector3f &vehicle, const std::vector<Eigen::Vector3f> &route,
+    float minimum_t, float maximum_lateral_distance)
+{
+  if (route.size() < 2 || maximum_lateral_distance < 0.0F) return false;
+  float projected_t = 0.0F;
+  if (!routeProgressTAlongPath(route, vehicle, minimum_t, projected_t)) return false;
+  const WitnessParametricCurve curve = WitnessParametricCurve::fit(route);
+  if (!curve.valid) return false;
+  const Eigen::Vector3f on_curve = curve.evaluate(projected_t);
+  if (!on_curve.allFinite()) return false;
+  return (vehicle - on_curve).norm() <= maximum_lateral_distance &&
+         forwardRouteFromT(route, projected_t).size() >= 2;
+}
+
+// Evaluate the cubic (or lower-order) least-squares curve used for ordered
+// witness parameterization. The witness endpoints are kept exact.
+inline bool routePolynomialPointAtT(const std::vector<Eigen::Vector3f> &route,
+                                    float t, Eigen::Vector3f &point)
+{
+  if (route.size() < 2 || !std::isfinite(t)) return false;
+  const int degree = std::min<int>(3, static_cast<int>(route.size()) - 1);
+  const int rows = static_cast<int>(route.size());
+  Eigen::MatrixXf basis(rows, degree + 1);
+  Eigen::MatrixXf values(rows, 3);
+  float total_length = 0.0F;
+  std::vector<float> arc(route.size(), 0.0F);
+  for (std::size_t i = 1; i < route.size(); ++i) {
+    const float length = (route[i] - route[i - 1]).norm();
+    if (std::isfinite(length)) total_length += length;
+    arc[i] = total_length;
+  }
+  if (!std::isfinite(total_length) || total_length < 1e-4F) return false;
+  for (int row = 0; row < rows; ++row) {
+    const float sample_t = arc[static_cast<std::size_t>(row)] / total_length;
+    float power = 1.0F;
+    for (int column = 0; column <= degree; ++column) {
+      basis(row, column) = power;
+      power *= sample_t;
+    }
+    values.row(row) = route[static_cast<std::size_t>(row)].transpose();
+  }
+  const Eigen::MatrixXf coefficients = basis.colPivHouseholderQr().solve(values);
+  if (!coefficients.allFinite()) return false;
+  const float target_t = std::clamp(t, 0.0F, 1.0F);
+  Eigen::VectorXf powers(degree + 1);
+  float power = 1.0F;
+  for (int column = 0; column <= degree; ++column) {
+    powers(column) = power;
+    power *= target_t;
+  }
+  point = (powers.transpose() * coefficients).transpose();
+  if (target_t <= 1e-5F) point = route.front();
+  if (target_t >= 1.0F - 1e-5F) point = route.back();
+  return point.allFinite();
+}
+
+// Return the route suffix after a monotonic arc-length progress value. The
+// nearest projection is only allowed on segments at or after min_progress;
+// nearby loops therefore cannot move the execution list back to an older
+// segment.
+inline std::vector<Eigen::Vector3f> forwardRouteFromProgress(
+    const std::vector<Eigen::Vector3f> &route, const Eigen::Vector3f &position,
+    float min_progress)
+{
+  if (route.size() < 2 || !position.allFinite()) return {};
+  const float required_progress = std::max(0.0F, min_progress);
+  float total_before = 0.0F;
+  float best_distance_sq = std::numeric_limits<float>::infinity();
+  std::size_t best_segment = route.size() - 2;
+  float best_t = 1.0F;
+  bool found = false;
+  for (std::size_t i = 1; i < route.size(); ++i) {
+    const Eigen::Vector3f segment = route[i] - route[i - 1];
+    const float length_sq = segment.squaredNorm();
+    if (length_sq < 1e-8F) continue;
+    const float length = std::sqrt(length_sq);
+    const float segment_end = total_before + length;
+    if (segment_end + 1e-4F < required_progress) {
+      total_before = segment_end;
+      continue;
+    }
+    const float min_t = std::clamp(
+      (required_progress - total_before) / length, 0.0F, 1.0F);
+    const float projected_t = std::clamp(
+      (position - route[i - 1]).dot(segment) / length_sq, min_t, 1.0F);
+    const Eigen::Vector3f projection = route[i - 1] + projected_t * segment;
+    const float distance_sq = (position - projection).squaredNorm();
+    if (!found || distance_sq < best_distance_sq) {
+      found = true;
+      best_distance_sq = distance_sq;
+      best_segment = i - 1;
+      best_t = projected_t;
+    }
+    total_before = segment_end;
+  }
+  if (!found) return {route.back()};
+  std::vector<Eigen::Vector3f> forward;
+  const Eigen::Vector3f projection = route[best_segment] + best_t *
+    (route[best_segment + 1] - route[best_segment]);
+  forward.push_back(projection);
+  for (std::size_t i = best_segment + 1; i < route.size(); ++i) {
+    if ((forward.back() - route[i]).norm() > 1e-4F) forward.push_back(route[i]);
+  }
+  return forward;
+}
+
 // A rolling frontier may move forward without reopening the already accepted
 // corridor. Require a longer candidate and protect the prefix of the current
 // route; a candidate that changes lanes near the vehicle is a route switch and
@@ -208,16 +484,16 @@ inline bool candidateExtendsAcceptedRoute(
   return true;
 }
 
-inline bool shouldReuseTerminal(const Eigen::Vector3f &vehicle,
-                                const Eigen::Vector3f &terminal,
+inline bool shouldReuseFrontierGoal(const Eigen::Vector3f &vehicle,
+                                const Eigen::Vector3f &frontier_goal,
                                 float release_distance)
 {
-  return (vehicle - terminal).norm() > std::max(0.0F, release_distance);
+  return (vehicle - frontier_goal).norm() > std::max(0.0F, release_distance);
 }
 
-// A remembered terminal is valid only while the vehicle remains on the
-// directed witness route that led to it.  Distance to the terminal alone is
-// insufficient: a vehicle that has passed or circled around the terminal is
+// A remembered frontier_goal is valid only while the vehicle remains on the
+// directed witness route that led to it.  Distance to the frontier_goal alone is
+// insufficient: a vehicle that has passed or circled around the frontier_goal is
 // still far away and would otherwise keep reusing the same stale edge.
 inline bool canReuseForwardRoute(const Eigen::Vector3f &vehicle,
                                  const std::vector<Eigen::Vector3f> &route,

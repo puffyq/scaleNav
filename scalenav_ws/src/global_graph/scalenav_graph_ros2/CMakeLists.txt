@@ -13,7 +13,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(Eigen3 REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common octree io)
+find_package(PCL REQUIRED COMPONENTS common octree io filters)
 find_package(OpenMP REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)

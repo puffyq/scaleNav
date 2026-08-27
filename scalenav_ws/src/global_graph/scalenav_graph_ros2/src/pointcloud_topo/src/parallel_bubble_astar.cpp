@@ -266,7 +266,9 @@ void ParallelBubbleAstar::IndexToPos(Eigen::Vector3f &pt, Eigen::Vector3i &idx) 
   pt = ((idx.cast<float>() + Eigen::Vector3f(0.5, 0.5, 0.5)) * resolution_ + origin_);
 }
 
-bool ParallelBubbleAstar::collisionCheck_shortenPath(vector<Eigen::Vector3f> &path) {
+bool ParallelBubbleAstar::collisionCheck_shortenPath(
+    vector<Eigen::Vector3f> &path, CollisionCheckInfo *info) {
+  if (info != nullptr) *info = CollisionCheckInfo{};
   // if (path.size() < 2)
   //   return false;
   // vector<Eigen::Vector3f> path_shorten;
@@ -301,11 +303,43 @@ bool ParallelBubbleAstar::collisionCheck_shortenPath(vector<Eigen::Vector3f> &pa
   // }
   // path.swap(path_shorten);
   // return true;
-  if (path.size() < 2)
+  if (path.size() < 2) {
+    if (info != nullptr) info->reason = CollisionCheckInfo::INVALID_PATH;
     return false;
+  }
   std::vector<Eigen::Vector3f> path_shorten;
   std::vector<double> raduis_lis;
-  for (int i = 0; i < path.size(); i++) {
+  raduis_lis.reserve(path.size());
+  const auto validate_segment = [&](const Eigen::Vector3f &start,
+                                    const Eigen::Vector3f &end,
+                                    std::size_t failed_index) {
+    const Eigen::Vector3f segment = end - start;
+    const double length = static_cast<double>(segment.norm());
+    if (!std::isfinite(length)) return false;
+    if (length <= 1e-4) return true;
+    const double map_resolution = std::isfinite(resolution_) && resolution_ > 1e-3 ?
+      resolution_ : 0.30;
+    const double sample_step = std::clamp(0.5 * map_resolution, 0.05, 0.25);
+    const int samples = std::max(1, static_cast<int>(std::ceil(length / sample_step)));
+    for (int sample = 1; sample < samples; ++sample) {
+      const Eigen::Vector3f point = start + segment *
+        (static_cast<float>(sample) / static_cast<float>(samples));
+      const double clearance = graphClearance(point);
+      const double radius = clearance - safe_distance_;
+      if (!std::isfinite(radius) || radius < 1e-3) {
+        if (info != nullptr) {
+          info->reason = CollisionCheckInfo::CLEARANCE;
+          info->failed_index = failed_index;
+          info->failed_point = point;
+          info->clearance = clearance;
+          info->radius = radius;
+        }
+        return false;
+      }
+    }
+    return true;
+  };
+  for (std::size_t i = 0; i < path.size(); ++i) {
     // Do not impose an unrelated 2 m radius cap here.  EPIC's witness path
     // is already sampled through safe bubbles, and the overlap test below is
     // the actual proof that a shortcut is covered by those bubbles.  The cap
@@ -315,8 +349,23 @@ bool ParallelBubbleAstar::collisionCheck_shortenPath(vector<Eigen::Vector3f> &pa
     double dis = graphClearance(path[i]) - safe_distance_;
     raduis_lis.push_back(dis);
     if (raduis_lis.back() < 1e-3) {
+      if (info != nullptr) {
+        info->reason = CollisionCheckInfo::CLEARANCE;
+        info->failed_index = i;
+        info->failed_point = path[i];
+        info->clearance = graphClearance(path[i]);
+        info->radius = raduis_lis.back();
+      }
       return false;
     }
+
+    // A witness vertex can be clear on both sides of a thin obstacle while
+    // the segment between them crosses it.  Validate the complete segment at
+    // a resolution tied to the map voxel size before allowing any bubble
+    // shortcut.  The endpoint checks above remain the radii used by the
+    // shortening proof below.
+    if (i == 0) continue;
+    if (!validate_segment(path[i - 1], path[i], i)) return false;
   }
 
   std::deque<int> indices;
@@ -335,11 +384,42 @@ bool ParallelBubbleAstar::collisionCheck_shortenPath(vector<Eigen::Vector3f> &pa
       }
     }
     if (!connected) {
-      return false;
+      if (info != nullptr) {
+        // The witness segment itself has already passed validate_segment().
+        // Failure to overlap a predecessor bubble only means that this
+        // vertex cannot be removed by the shortcut pass; it is not a
+        // collision.  Keep the original sampled witness instead of turning
+        // a valid, conservatively sampled route into a rejected route.
+        info->reason = CollisionCheckInfo::NONE;
+        info->failed_index = i;
+        info->failed_point = path[i];
+        info->radius = i_raduis;
+        info->predecessor_index = 0;
+        info->predecessor_radius = raduis_lis.front();
+        info->predecessor_distance = (path[i] - path.front()).norm();
+        for (int j = i - 1; j >= 0; --j) {
+          const double distance = (path[i] - path[j]).norm();
+          if (distance < info->predecessor_distance) {
+            info->predecessor_index = static_cast<std::size_t>(j);
+            info->predecessor_radius = raduis_lis[j];
+            info->predecessor_distance = distance;
+          }
+        }
+      }
+      path_shorten.clear();
+      path_shorten.insert(path_shorten.end(), path.begin(), path.end());
+      path.swap(path_shorten);
+      return true;
     }
   }
   for (auto &idx : indices) {
     path_shorten.emplace_back(path[idx]);
+  }
+  // The overlap test decides which vertices can be removed, but it is not a
+  // substitute for checking the newly-created chord against the map. A pair
+  // of large endpoint bubbles can straddle a thin wall.
+  for (std::size_t i = 1; i < path_shorten.size(); ++i) {
+    if (!validate_segment(path_shorten[i - 1], path_shorten[i], i)) return false;
   }
   path.swap(path_shorten);
   return true;

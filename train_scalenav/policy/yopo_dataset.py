@@ -35,10 +35,20 @@ class SceneData:
 
 def _load_toml(path: Path) -> dict[str, Any]:
     try:
-        import rtoml
-    except ImportError as error:
-        raise RuntimeError("rtoml is required to read ScaleNav scenes") from error
-    return dict(rtoml.load(path))
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib
+        except ImportError:
+            try:
+                import rtoml
+            except ImportError as error:
+                raise RuntimeError(
+                    "tomllib, tomli, or rtoml is required to read ScaleNav scenes"
+                ) from error
+            return dict(rtoml.load(path))
+    with path.open("rb") as stream:
+        return dict(tomllib.load(stream))
 
 
 def _rotation_wxyz(quaternion: Sequence[float]) -> np.ndarray:
@@ -101,6 +111,7 @@ class YOPODataset(Dataset):
             raise ValueError("route_dropout_probability must be in [0, 1]")
         self.mode = mode
         self.seed = int(seed)
+        self.split_strategy = "all"
         self.scenes = self._load_scenes()
         self.obstacle_paths = [scene.path / "tree.ply" for scene in self.scenes]
         all_samples = self._valid_samples()
@@ -143,15 +154,40 @@ class YOPODataset(Dataset):
         if mode == "all" or validation_ratio == 0.0:
             return samples
         scene_ids = sorted({scene_index for scene_index, _ in samples})
-        if len(scene_ids) >= 2:
-            validation_count = max(1, int(round(len(scene_ids) * validation_ratio)))
-            validation_scenes = set(scene_ids[-validation_count:])
-            is_valid = lambda sample: sample[0] in validation_scenes
-        else:
+        self.split_strategy = "frame_group_holdout"
+        validation_frames: set[tuple[int, int]] = set()
+        rng = np.random.default_rng(self.seed)
+        for scene_index in scene_ids:
+            route_indices = [route for scene, route in samples if scene == scene_index]
+            frame_indices = sorted(
+                {
+                    int(self.scenes[scene_index].routes.arrays["frame_index"][route])
+                    for route in route_indices
+                }
+            )
+            if len(frame_indices) < 2:
+                continue
+            validation_count = min(
+                len(frame_indices) - 1,
+                max(1, int(round(len(frame_indices) * validation_ratio))),
+            )
+            selected_frames = rng.permutation(frame_indices)[:validation_count]
+            validation_frames.update((scene_index, int(frame)) for frame in selected_frames)
+
+        def is_valid(sample: tuple[int, int]) -> bool:
+            scene_index, route_index = sample
+            frame_index = int(
+                self.scenes[scene_index].routes.arrays["frame_index"][route_index]
+            )
+            return (scene_index, frame_index) in validation_frames
+
+        if not validation_frames:
             validation_count = max(1, int(round(len(samples) * validation_ratio)))
-            validation_indices = set(range(len(samples) - validation_count, len(samples)))
-            index_by_sample = {sample: index for index, sample in enumerate(samples)}
-            is_valid = lambda sample: index_by_sample[sample] in validation_indices
+            validation_samples = set(samples[-validation_count:])
+
+            def is_valid(sample: tuple[int, int]) -> bool:
+                return sample in validation_samples
+
         selected = [sample for sample in samples if is_valid(sample) == (mode == "valid")]
         return selected or samples
 
@@ -168,7 +204,12 @@ class YOPODataset(Dataset):
         position = np.asarray(frame["posStart"], dtype=np.float32)
         rotation = _rotation_wxyz(frame["orientationWxyz"])
         motion = self._random_motion()
-        frontier_world = arrays["frontier_goal_world"][route_index].astype(np.float32, copy=True)
+        goal_field = (
+            "local_subgoal_world"
+            if "local_subgoal_world" in arrays
+            else "frontier_goal_world"
+        )
+        frontier_world = arrays[goal_field][route_index].astype(np.float32, copy=True)
         frontier_body = world_to_body_flu(frontier_world, position, rotation).astype(np.float32)
 
         path_world, _, path_radius = scene.routes.path(route_index)

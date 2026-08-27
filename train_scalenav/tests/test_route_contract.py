@@ -9,10 +9,22 @@ from data.route_contract import (
     build_witness_corridor,
     dense_route_arrays,
     load_route_table,
+    local_subgoal_on_witness,
     pack_route_records,
     sample_route_bubbles,
     save_route_table,
 )
+
+
+def test_local_subgoal_uses_witness_arclength_not_goal_chord():
+    points = np.array(
+        [[0.0, 0.0, 1.6], [6.0, 0.0, 1.6], [6.0, 8.0, 1.6], [16.0, 8.0, 1.6]],
+        dtype=np.float32,
+    )
+    goal, distance = local_subgoal_on_witness(points, 10.0)
+    np.testing.assert_allclose(goal, [6.0, 4.0, 1.6], atol=1.0e-6)
+    assert distance == 10.0
+    assert np.linalg.norm(goal - points[0]) < 10.0
 from data.epic_route_labeler import label_epic_routes
 from data.synthetic_dataset import generate_synthetic_dataset
 
@@ -43,6 +55,11 @@ def test_route_npz_round_trip_without_pickle(tmp_path: Path):
     assert points.shape == (17, 3)
     np.testing.assert_allclose(clearance - radius, 0.5, atol=1e-6)
     assert int(table.topology(0)[2][-1]) == 12
+    assert np.isclose(table.arrays["route_min_safe_radius_m"][0], 0.7)
+    assert np.isclose(table.arrays["route_safe_radius_p05_m"][0], 0.7)
+    assert np.isclose(table.arrays["route_neck_length_m"][0], 4.0)
+    assert table.arrays["route_continuous_min_clearance_m"][0] > 1.0
+    assert table.arrays["route_bubble_overlap_margin_m"][0] > 1.0
 
 
 def test_quality_gate_accepts_safe_forward_corridor():
@@ -57,6 +74,10 @@ def test_quality_gate_accepts_safe_forward_corridor():
     )
     assert result.valid
     assert result.path_length_m == 4.0
+    assert np.isclose(result.minimum_safe_radius_m, 0.7)
+    assert np.isclose(result.safe_radius_p05_m, 0.7)
+    assert np.isclose(result.neck_length_m, 4.0)
+    assert result.continuous_minimum_clearance_m > 1.0
 
 
 def test_quality_gate_rejects_clearance_and_reverse_route():
@@ -122,6 +143,18 @@ def test_fixed_and_dense_route_sampling_are_masked_and_conservative():
     assert dense_radii.shape == (24,)
     assert int(dense_mask.sum()) == 17
     np.testing.assert_allclose(dense_points[-1], record.path_points_world[-1])
+
+
+def test_route_sampler_fills_all_valid_slots_after_priority_deduplication():
+    x = np.linspace(0.0, 31.0, 311, dtype=np.float32)
+    points = np.stack((x, 0.08 * np.sin(3.0 * x), np.full_like(x, 1.6)), axis=1)
+    radii = (0.8 + 0.2 * np.cos(2.0 * x)).astype(np.float32)
+    anchors = [1, 2, 3, 4, 5, 6, 8, 10, 14, 18, 24, 30]
+    centers, sampled_radii, mask, distances = sample_route_bubbles(points, radii, anchors)
+    assert centers.shape == (12, 3)
+    assert sampled_radii.shape == mask.shape == distances.shape == (12,)
+    assert mask.tolist() == [1.0] * 12
+    assert np.all(np.diff(distances) > 0.0)
 
 
 def test_epic_labeler_preserves_failures_and_builds_corridor(tmp_path: Path):

@@ -496,11 +496,20 @@ class SceneValidationError(ValueError):
 
 def _load_toml(path: Path) -> dict[str, Any]:
     try:
-        import rtoml
-
-        return dict(rtoml.load(path))
-    except ImportError as error:
-        raise RuntimeError("rtoml is required to validate collected scenes") from error
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib
+        except ImportError:
+            try:
+                import rtoml
+            except ImportError as error:
+                raise RuntimeError(
+                    "tomllib, tomli, or rtoml is required to read ScaleNav scenes"
+                ) from error
+            return dict(rtoml.load(path))
+    with path.open("rb") as stream:
+        return dict(tomllib.load(stream))
 
 
 def validate_scene(

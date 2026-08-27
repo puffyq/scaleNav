@@ -104,8 +104,10 @@ TEST(EpicIntegration, SemanticUpdateChangesTheNextPlannerDecision)
   std::vector<TopoNode::Ptr> path;
   ASSERT_TRUE(graph.goalDirectedSearch(
     start, goal->center_, path, 0.2, 0.2F, 1.0F, {}, 4.0F));
-  ASSERT_EQ(path.size(), 2U);
-  EXPECT_EQ(path.back(), direct);
+  ASSERT_EQ(path.size(), 3U);
+  EXPECT_EQ(path.front(), start);
+  EXPECT_EQ(path[1], direct);
+  EXPECT_EQ(path.back(), goal);
 
   // The semantic frame arrives at t=0.5 s. It is the only state change; the
   // next planner tick must select the clear side branch.
@@ -113,10 +115,11 @@ TEST(EpicIntegration, SemanticUpdateChangesTheNextPlannerDecision)
   path.clear();
   ASSERT_TRUE(graph.goalDirectedSearch(
     start, goal->center_, path, 0.2, 0.2F, 1.0F, {}, 4.0F));
-  ASSERT_EQ(path.size(), 2U);
-  // Rolling EPIC planning is allowed to stop at the side branch as its next
-  // subgoal rather than forcing the full mission goal into this local graph.
-  EXPECT_EQ(path.back(), side);
+  ASSERT_EQ(path.size(), 3U);
+  // The frontier_goal remains the outer verified Bubble; the changed middle node
+  // proves that the semantic update selected the clear branch.
+  EXPECT_EQ(path[1], side);
+  EXPECT_EQ(path.back(), goal);
   EXPECT_GT(graph.semanticRiskForEdge(start, direct),
             graph.semanticRiskForEdge(start, side) + 0.2F);
 }
@@ -178,6 +181,26 @@ TEST(EpicIntegration, OpenLongBubbleEdgeIsNotRejectedByAnArbitraryTwoMeterCap)
   ASSERT_EQ(path.size(), 2U);
   EXPECT_TRUE(path.front().isApprox(p(0.0F, 0.0F)));
   EXPECT_TRUE(path.back().isApprox(p(6.0F, 0.0F)));
+}
+
+TEST(EpicIntegration, EdgeCrossingObservedObstacleIsRejectedBetweenEndpoints)
+{
+  auto map = std::make_shared<LIOInterface>();
+  map->configureBounds(Eigen::Vector3f(-2.0F, -2.0F, 0.0F),
+                       Eigen::Vector3f(8.0F, 2.0F, 4.0F));
+  map->configureStorage(0.10F, 20.0F, 20000, 0.5F);
+  // The endpoints are clear and their bubbles overlap, but the observed
+  // obstacle lies in the middle of the chord. Endpoint-only checking used to
+  // accept this edge and allowed a topology connection through a wall.
+  map->updateCloudWorld(singlePoint(PointType(3.0F, 0.0F, 1.6F)),
+                        Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity());
+
+  ParallelBubbleAstar astar;
+  astar.lidar_map_interface_ = map;
+  astar.resolution_ = 0.10;
+  astar.safe_distance_ = 0.20;
+  std::vector<Eigen::Vector3f> path = {p(0.0F, 0.0F), p(6.0F, 0.0F)};
+  EXPECT_FALSE(astar.collisionCheck_shortenPath(path));
 }
 
 }  // namespace

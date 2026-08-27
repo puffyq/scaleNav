@@ -18,6 +18,8 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <sstream>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -25,6 +27,7 @@
 
 #include <Eigen/Dense>
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/filters/voxel_grid.h>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -133,9 +136,13 @@ class EpicGraphNode final : public rclcpp::Node {
     graph_fixed_layer_ = declare_parameter<bool>("graph_fixed_layer", true);
     graph_layer_z_ = declare_parameter<double>("graph_layer_z", 1.6);
     reuse_graph_on_goal_ = declare_parameter<bool>("reuse_graph_on_goal", true);
+    // Keep route planning stateless while diagnosing replanning behavior. The
+    // The accepted witness remains executable state for the current tick,
+    // but it must not bias or replace a fresh A* search.
+    reuse_previous_route_ = declare_parameter<bool>("reuse_previous_route", false);
     map_margin_ = declare_parameter<double>("map_margin", 20.0);
     map_voxel_size_ = declare_parameter<double>("map_voxel_size", 0.1);
-    map_history_radius_m_ = declare_parameter<double>("map_history_radius_m", 40.0);
+    map_history_radius_m_ = declare_parameter<double>("map_history_radius_m", 0.0);
     map_max_points_ = declare_parameter<int>("map_max_points", 20000);
     map_prune_distance_m_ = declare_parameter<double>("map_prune_distance_m", 0.5);
     update_period_ms_ = declare_parameter<int>("update_period_ms", 100);
@@ -163,7 +170,7 @@ class EpicGraphNode final : public rclcpp::Node {
     // EPIC already stores collision-checked witness paths on each edge.  A
     // second clearance raycast over every published segment is not part of
     // the original planner and can consume most of the route-update period.
-    goal_path_cost_weight_ = declare_parameter<double>("goal_path_cost_weight", 0.2);
+    goal_path_cost_weight_ = declare_parameter<double>("goal_path_cost_weight", 1.0);
     semantic_cost_weight_ = declare_parameter<double>("semantic_cost_weight", 2.0);
     semantic_route_replan_delta_ = declare_parameter<double>(
       "semantic_route_replan_delta", 0.05);
@@ -183,15 +190,15 @@ class EpicGraphNode final : public rclcpp::Node {
       "semantic_visualization_max_score", 0.4);
     semantic_baseline_quantile_ = declare_parameter<double>(
       "semantic_baseline_quantile", 0.25);
-    previous_path_cost_factor_ = declare_parameter<double>("previous_path_cost_factor", 0.9);
+    previous_path_cost_factor_ = declare_parameter<double>("previous_path_cost_factor", 1.0);
     route_remap_distance_m_ = declare_parameter<double>("route_remap_distance_m", 1.25);
     route_reuse_horizon_m_ = declare_parameter<double>("route_reuse_horizon_m", 10.0);
     route_reuse_lateral_distance_m_ =
       declare_parameter<double>("route_reuse_lateral_distance_m", 1.5);
-    route_terminal_release_distance_m_ =
-      declare_parameter<double>("route_terminal_release_distance_m", 1.0);
     local_goal_hold_timeout_ms_ = declare_parameter<double>(
       "local_goal_hold_timeout_ms", 400.0);
+    frontier_extension_search_period_ms_ = declare_parameter<double>(
+      "frontier_extension_search_period_ms", 1000.0);
     goal_connect_distance_m_ = declare_parameter<double>("goal_connect_distance_m", 6.0);
     goal_connect_timeout_ms_ = declare_parameter<double>("goal_connect_timeout_ms", 20.0);
     odom_reconnect_distance_m_ = declare_parameter<double>("odom_reconnect_distance_m", 1.0);
@@ -249,7 +256,7 @@ class EpicGraphNode final : public rclcpp::Node {
     declare_parameter<double>("bubble_topo/planar_z", graph_layer_z_);
     declare_parameter<int>("max_update_region_num", 0);
     // Odom reconnection is on the online update path. Keep the EPIC local
-    // connection search bounded; terminal-to-goal uses its separate budget.
+    // connection search bounded; frontier_goal-to-mission_goal uses its separate budget.
     declare_parameter<double>("parallel_astar/update_connection_timeout", 0.003);
     declare_parameter<double>("parallel_astar/insert_node_timeout", 0.02);
     declare_parameter<double>("bubble_astar/resolution_astar", 0.30);
@@ -280,9 +287,12 @@ class EpicGraphNode final : public rclcpp::Node {
     RCLCPP_INFO(
       get_logger(),
       "EPIC config: clearance_target=%.2f m clearance_weight=%.2f "
-      "semantic_radius=%.2f m semantic_visual_max=%.2f baseline_q=%.2f "
+      "geometry_map=%s reuse_previous_route=%d semantic_radius=%.2f m "
+      "semantic_visual_max=%.2f baseline_q=%.2f "
       "diagnostic_period=%d ms",
       clearance_target_m_, clearance_cost_weight_,
+      map_history_radius_m_ <= 0.0 ? "CURRENT_FRAME" : "SLIDING_WINDOW",
+      static_cast<int>(reuse_previous_route_),
       semantic_point_radius_m_, semantic_visualization_max_score_,
       semantic_baseline_quantile_,
       diagnostic_log_period_ms_);
@@ -371,6 +381,34 @@ class EpicGraphNode final : public rclcpp::Node {
     std::vector<Eigen::Vector3f> points_world;
     std::vector<float> scores;
     std::vector<float> confidences;
+  };
+
+  // The only persistent representation of the route currently accepted for
+  // execution.  A candidate topology path is not part of this state until
+  // publish() has assembled and collision-checked its complete witness.
+  struct AcceptedRouteState
+  {
+    bool valid = false;
+    Eigen::Vector3f frontier_goal = Eigen::Vector3f::Zero();
+    std::uint64_t frontier_goal_id = 0;
+    float frontier_goal_initial_route_length_m =
+      std::numeric_limits<float>::quiet_NaN();
+    float frontier_goal_progress_m = 0.0F;
+    float frontier_goal_progress_t = 0.0F;
+    std::vector<TopoNode::Ptr> topology_path;
+    std::vector<Eigen::Vector3f> witness_path;
+
+    void clear()
+    {
+      valid = false;
+      frontier_goal.setZero();
+      frontier_goal_id = 0;
+      frontier_goal_initial_route_length_m = std::numeric_limits<float>::quiet_NaN();
+      frontier_goal_progress_m = 0.0F;
+      frontier_goal_progress_t = 0.0F;
+      topology_path.clear();
+      witness_path.clear();
+    }
   };
 
   void onOdom(const nav_msgs::msg::Odometry::ConstSharedPtr &message)
@@ -683,10 +721,11 @@ class EpicGraphNode final : public rclcpp::Node {
       << ",\"stamp_ns\":" << now().nanoseconds()
       << ",\"position\":[" << position_.x() << "," << position_.y() << ","
       << position_.z() << "],\"mission_goal\":[" << goal_.x() << "," << goal_.y() << ","
-      << goal_.z() << "],\"frontier_goal\":[" << route_terminal_.x() << ","
-      << route_terminal_.y() << "," << route_terminal_.z() << "],\"local_goal\":["
-      << last_subgoal_.x() << "," << last_subgoal_.y() << "," << last_subgoal_.z()
-      << "],\"local_goal_valid\":" << (have_subgoal_ ? 1 : 0)
+      << goal_.z() << "],\"frontier_goal\":[" << accepted_route_.frontier_goal.x() << ","
+      << accepted_route_.frontier_goal.y() << "," << accepted_route_.frontier_goal.z() << "],\"local_goal\":["
+      << previous_local_goal_.x() << "," << previous_local_goal_.y() << ","
+      << previous_local_goal_.z()
+      << "],\"local_goal_valid\":" << (have_previous_local_goal_ ? 1 : 0)
       << ",\"found\":" << (found ? 1 : 0)
       << ",\"node_count\":" << nodes.size() << ",\"edge_count\":" << edge_count
       << ",\"directed_edge_count\":" << directed_edge_count
@@ -990,16 +1029,13 @@ class EpicGraphNode final : public rclcpp::Node {
       have_goal_ = true;
       // A new mission goal gets a new route, even when the existing topology
       // and its edge witness paths are reused.
-      last_topology_path_centers_.clear();
-      last_witness_path_.clear();
-      last_path_nodes_.clear();
-      have_route_terminal_ = false;
-      route_terminal_persistent_id_ = 0;
+      accepted_route_.clear();
+      have_last_extension_search_ = false;
       semantic_replan_requested_ = false;
       have_evaluated_route_risk_ = false;
       evaluated_route_risk_ = 0.0F;
       high_risk_evaluated_ = false;
-      have_subgoal_ = false;
+      have_previous_local_goal_ = false;
       corridor_hint_route_.clear();
       const bool can_reuse = reuse_graph_on_goal_ && graph_initialized_.load() &&
         skeleton_initialized_.load() && topo_ && astar_ &&
@@ -1082,6 +1118,24 @@ class EpicGraphNode final : public rclcpp::Node {
     const double transform_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - transform_start).count();
 
+    const auto voxel_start = std::chrono::steady_clock::now();
+    pcl::PointCloud<fast_planner::PointType>::Ptr voxel_cloud(
+      new pcl::PointCloud<fast_planner::PointType>());
+    pcl::VoxelGrid<fast_planner::PointType> voxel_filter;
+    const float voxel_size = static_cast<float>(std::max(map_voxel_size_, 0.05));
+    voxel_filter.setLeafSize(voxel_size, voxel_size, voxel_size);
+    voxel_filter.setInputCloud(cloud_world.makeShared());
+    voxel_filter.filter(*voxel_cloud);
+    const double voxel_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - voxel_start).count();
+    if (voxel_cloud->empty()) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "[EPIC input] dropped cloud after voxel filtering: input=%zu leaf=%.3f m",
+        cloud_body.size(), voxel_size);
+      return;
+    }
+
     const auto map_start = std::chrono::steady_clock::now();
     fast_planner::LIOInterface::Ptr active_map;
     {
@@ -1089,7 +1143,7 @@ class EpicGraphNode final : public rclcpp::Node {
       active_map = map_;
     }
     const bool changed = active_map->updateCloudWorld(
-      cloud_world, capture_pose.position, capture_pose.orientation);
+      *voxel_cloud, capture_pose.position, capture_pose.orientation);
     if (changed) map_changed_.store(true);
     const double map_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - map_start).count();
@@ -1103,9 +1157,11 @@ class EpicGraphNode final : public rclcpp::Node {
       std::chrono::steady_clock::now() - callback_start).count();
     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
       "[EPIC timing][cloud] decode=%.3f ms transform=%.3f ms map_update=%.3f ms "
-      "total=%.3f ms pose_sync=%.3f ms input=%zu map_points=%zu occupied_hits=%zu",
-      decode_ms, transform_ms, map_ms, total_ms, pose_sync_ms, cloud_body.size(),
-      active_map->pointCount(), occupied_hits);
+      "voxel=%.3f ms total=%.3f ms pose_sync=%.3f ms input=%zu voxel_points=%zu "
+      "map_points=%zu occupied_hits=%zu leaf=%.3f",
+      decode_ms, transform_ms, map_ms, voxel_ms, total_ms, pose_sync_ms,
+      cloud_body.size(), voxel_cloud->size(), active_map->pointCount(), occupied_hits,
+      voxel_size);
   }
 
   void onFreeRays(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &)
@@ -1336,6 +1392,7 @@ class EpicGraphNode final : public rclcpp::Node {
             graph_initialized_ = true;
             skeleton_initialized_ = true;
             ++skeleton_update_count_;
+            ++topology_update_generation_;
           }
           const double total_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - total_start).count();
@@ -1461,155 +1518,147 @@ class EpicGraphNode final : public rclcpp::Node {
       corridor_hint_edges;
     std::unordered_set<std::pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash>
       last_path_edges;
-    const auto witness_route = scalenav_graph::forwardRouteWindow(
-      last_witness_path_, position_,
-      static_cast<float>(route_reuse_horizon_m_));
-    if (witness_route.size() >= 2) {
+    const auto witness_route = reuse_previous_route_ ? scalenav_graph::forwardRouteWindow(
+      accepted_route_.witness_path, position_, static_cast<float>(route_reuse_horizon_m_)) :
+      std::vector<Eigen::Vector3f>();
+    if (reuse_previous_route_ && witness_route.size() >= 2) {
       buildRememberedEdges(
         active_topo, witness_route, static_cast<float>(route_remap_distance_m_),
         witness_path_edges);
     }
-    if (corridor_hint_route_.size() >= 2) {
+    if (reuse_previous_route_ && corridor_hint_route_.size() >= 2) {
       buildRememberedEdges(
         active_topo, corridor_hint_route_,
         static_cast<float>(route_remap_distance_m_), corridor_hint_edges);
     }
-    const bool route_aligned = scalenav_graph::canReuseForwardRoute(
-      position_, last_witness_path_, 0.0F,
-      static_cast<float>(route_reuse_lateral_distance_m_));
+    // Route reuse is governed by monotonic witness progress and the temporal
+    // extension timer.  Lateral YOPO avoidance must not invalidate the guide.
+    const bool route_aligned = reuse_previous_route_ && scalenav_graph::canReuseForwardRoute(
+      position_, accepted_route_.witness_path, 0.0F,
+      std::numeric_limits<float>::infinity());
+    const float route_lateral_error = accepted_route_.witness_path.size() >= 2 ?
+      scalenav_graph::pointPathDistance(position_, accepted_route_.witness_path) :
+      std::numeric_limits<float>::infinity();
     last_path_edges.clear();
-    if (route_aligned) {
+    if (reuse_previous_route_ && witness_route.size() >= 2) {
       last_path_edges.insert(witness_path_edges.begin(), witness_path_edges.end());
     }
-    // Apply the mission corridor hint only when there is no active witness
-    // route (e.g. after a goal flip) or the vehicle has left the witness.
-    // Mixing it with a live witness made every corridor edge free and pinned
-    // the rolling terminal a few metres ahead of the vehicle.
-    if (witness_route.size() < 2 || !route_aligned) {
+    // Apply the mission corridor hint only when there is no active witness,
+    // for example after a goal flip. YOPO is free to leave the witness
+    // laterally; that deviation must not alter global route memory.
+    if (reuse_previous_route_ && witness_route.size() < 2) {
       last_path_edges.insert(corridor_hint_edges.begin(), corridor_hint_edges.end());
     }
     const std::size_t geometrically_remembered_edges = last_path_edges.size() / 2;
 
     const auto astar_start = std::chrono::steady_clock::now();
-    bool reused_terminal = false;
     bool candidate_found = false;
     bool candidate_accepted = false;
     const char *route_switch_reason = "NONE";
     bool found = false;
     TopoGraphSearchStats incumbent_search_stats;
     TopoGraphSearchStats candidate_search_stats;
-    bool incumbent_search_attempted = false;
     const bool semantic_request_for_plan = semantic_replan_requested_;
-    const float frontier_refresh_reserve_m = static_cast<float>(std::max(
-      effective_lookahead_m,
-      static_cast<float>(std::max(0.0, local_graph_radius_m_ - frontier_goal_margin_m_))));
-    const bool route_has_planning_horizon = scalenav_graph::canReuseForwardRoute(
-      position_, last_witness_path_, frontier_refresh_reserve_m,
-      static_cast<float>(route_reuse_lateral_distance_m_));
     Eigen::Vector3f layer_goal = goal_;
     if (graph_fixed_layer_) layer_goal.z() = static_cast<float>(graph_layer_z_);
     const float vehicle_to_goal = (position_ - layer_goal).norm();
     const bool goal_in_window = have_goal_ &&
       vehicle_to_goal <= static_cast<float>(local_graph_radius_m_);
-    const std::int64_t active_virtual_semantic_stamp_ns =
-      activeVirtualSemanticStampNs();
-    bool current_route_blocked = false;
-    std::size_t route_probe_points = 0;
-    if (last_witness_path_.size() >= 2 && active_topo->parallel_bubble_astar_) {
-      std::vector<Eigen::Vector3f> probe = last_witness_path_;
-      // The consumed prefix is no longer an execution constraint. Checking it
-      // again after the vehicle has moved lets stale map changes behind the
-      // vehicle invalidate an otherwise usable forward corridor and forces a
-      // needless left/right route switch.
-      const auto forward_probe = scalenav_graph::forwardRouteFromPosition(
-        last_witness_path_, position_);
-      if (forward_probe.size() >= 2) probe = forward_probe;
-      route_probe_points = probe.size();
-      current_route_blocked =
-        !active_topo->parallel_bubble_astar_->collisionCheck_shortenPath(probe);
-    }
-    current_route_blocked_ = current_route_blocked;
-    const float current_route_risk =
-      semanticRiskAlongRoute(active_topo, last_witness_path_);
-    // A blocked corridor is a hard invalidation. Semantic risk only requests
-    // a candidate evaluation; it must not erase the incumbent route here.
-    if (current_route_blocked) {
-      last_path_edges.clear();
-      last_path_edges.insert(corridor_hint_edges.begin(), corridor_hint_edges.end());
-    }
-    if (have_route_terminal_ && !route_aligned) {
-      last_path_edges.clear();
-      last_path_edges.insert(corridor_hint_edges.begin(), corridor_hint_edges.end());
-    }
-    // Recover the incumbent independently of the refresh horizon. Running low
-    // on planning reserve requests an extension; it does not invalidate the
-    // accepted route to the current terminal.
-    std::vector<TopoNode::Ptr> incumbent_nodes;
-    const bool accepted_witness_usable = have_route_terminal_ && route_aligned &&
-      !goal_in_window && !current_route_blocked &&
-      active_topo->odom_node_ && !active_topo->odom_node_->neighbors_.empty();
-    bool incumbent_recovered = false;
-    const char *incumbent_result = accepted_witness_usable ?
-      "REMAP_FAILED" : "NOT_ELIGIBLE";
-    if (accepted_witness_usable) {
-      const auto terminal = nearestPersistentNode(
-        active_topo, route_terminal_, static_cast<float>(route_remap_distance_m_),
-        route_terminal_persistent_id_);
-      if (terminal) {
-        incumbent_search_attempted = true;
-        incumbent_recovered = active_topo->graphSearch(
-          active_topo->odom_node_, terminal, incumbent_nodes, 0.05, true, last_path_edges,
-          static_cast<float>(semantic_cost_weight_),
-          static_cast<float>(local_graph_radius_m_), &incumbent_search_stats,
-          active_virtual_semantic_stamp_ns);
-        if (incumbent_recovered && incumbent_nodes.size() < 2) {
-          incumbent_recovered = false;
-          incumbent_nodes.clear();
-          incumbent_result = "SEARCH_EMPTY";
-        }
-        if (incumbent_recovered) incumbent_result = "RECOVERED";
-        else incumbent_result = incumbent_nodes.empty() ? "SEARCH_EMPTY" : "SEARCH_FAILED";
+    const float accepted_route_length = scalenav_graph::routeLength(accepted_route_.witness_path);
+    if (accepted_route_.valid && accepted_route_length > 1e-3F) {
+      float projected_t = 0.0F;
+      if (scalenav_graph::routeProgressTAlongPath(
+            accepted_route_.witness_path, position_,
+            accepted_route_.frontier_goal_progress_t, projected_t)) {
+        accepted_route_.frontier_goal_progress_t = std::max(
+          accepted_route_.frontier_goal_progress_t, std::clamp(projected_t, 0.0F, 1.0F));
+        accepted_route_.frontier_goal_progress_m =
+          accepted_route_.frontier_goal_progress_t * accepted_route_length;
       }
     }
-    const bool frontier_horizon_expired = !route_has_planning_horizon;
-    const bool need_candidate_search = current_route_blocked ||
-      semantic_request_for_plan || frontier_horizon_expired ||
-      !incumbent_recovered || goal_in_window;
-    std::vector<TopoNode::Ptr> candidate_nodes;
+    const auto accepted_forward_route = scalenav_graph::forwardRouteFromT(
+      accepted_route_.witness_path, accepted_route_.frontier_goal_progress_t);
+    const float accepted_route_remaining =
+      scalenav_graph::routeLength(accepted_forward_route);
+    const bool frontier_half_consumed = accepted_route_.valid &&
+      std::isfinite(accepted_route_.frontier_goal_initial_route_length_m) &&
+      accepted_route_.frontier_goal_initial_route_length_m > 1e-3F &&
+      accepted_route_.frontier_goal_progress_m >=
+        0.5F * accepted_route_.frontier_goal_initial_route_length_m;
+    const bool route_has_planning_horizon = accepted_route_.valid &&
+      std::isfinite(accepted_route_.frontier_goal_initial_route_length_m) &&
+      !frontier_half_consumed;
+    const std::int64_t active_virtual_semantic_stamp_ns =
+      activeVirtualSemanticStampNs();
+    // The accepted witness is a guide for YOPO, not a second local obstacle
+    // planner.  Do not invalidate it from a current-frame clearance probe;
+    // only an explicit graph-level route decision can replace it.
+    const float current_route_risk =
+      semanticRiskAlongRoute(active_topo, accepted_route_.witness_path);
+    // A blocked corridor is a hard invalidation. Semantic risk only requests
+    // a candidate evaluation; it must not erase the incumbent route here.
+    // Keep the accepted guide route while YOPO handles local obstacle
+    // avoidance. Replan only when the current guide is exhausted halfway,
+    // explicitly blocked, or missing. A goal change clears accepted_route_,
+    // so it naturally takes the missing-route branch. Semantic observations
+    // still affect the next A* edge costs, but do not seize control by
+    // triggering a separate replanning cycle.
+    // `reuse_previous_route_` remains separate: it only controls historical
+    // witness/edge cost reuse and stays false in the default configuration.
+    const bool accepted_witness_usable = accepted_route_.valid &&
+      accepted_route_.witness_path.size() >= 2 &&
+      accepted_route_.topology_path.size() >= 2;
+    const std::uint64_t topology_generation = topology_update_generation_.load();
+    const bool frontier_route_exhausted = accepted_route_.valid &&
+      (accepted_route_remaining <= 1.0F ||
+       accepted_route_.frontier_goal_progress_t >= 0.99F);
+    const bool frontier_extension_needed = accepted_witness_usable &&
+      (!route_has_planning_horizon || frontier_route_exhausted);
+    const auto extension_clock = std::chrono::steady_clock::now();
+    const double ms_since_last_extension = have_last_extension_search_ ?
+      std::chrono::duration<double, std::milli>(
+        extension_clock - last_extension_search_time_).count() :
+      std::numeric_limits<double>::infinity();
+    // Search immediately when the route first becomes exhausted, then use the
+    // normal retry period while waiting for the map to expose a continuation.
+    // A zero period here caused the planner to either thrash at 10 Hz or remain
+    // in an ambiguous incumbent-reuse state between graph updates.
+    const double extension_period_ms =
+      std::max(0.0, frontier_extension_search_period_ms_);
+    // Local witness half consumed: re-search for the next frontier on a timer.
+    const bool frontier_horizon_expired = frontier_extension_needed &&
+      ms_since_last_extension >= extension_period_ms;
+    const bool route_search_allowed =
+      last_route_search_generation_ != topology_generation;
+    const bool need_candidate_search =
+      (!accepted_witness_usable && route_search_allowed) ||
+      frontier_horizon_expired;
     if (need_candidate_search) {
-      // mission_goal, frontier_goal and local_goal are separate layers:
-      // search to the far side of the local graph for frontier_goal, then
-      // publish a shorter lookahead point on that route as local_goal.
-      const float frontier_margin_m = static_cast<float>(std::clamp(
-        frontier_goal_margin_m_, 0.0, local_graph_radius_m_));
-      const float frontier_goal_horizon_m = static_cast<float>(std::max(
-        local_goal_lookahead_m_, local_graph_radius_m_ - frontier_margin_m));
-      const float preferred_terminal_forward_m =
-        goal_in_window ? 0.0F : frontier_goal_horizon_m;
-      // Semantic observations live on a 30 m camera-centred shell. Keep
-      // 31.5 m as the preferred rolling reserve, while allowing
-      // wide detour endpoints whose radial reach is 30 m but whose mission-axis
-      // projection is necessarily shorter.
-      const float preferred_terminal_radial_m = goal_in_window ?
-        std::numeric_limits<float>::infinity() :
-        static_cast<float>(std::min(
-          semantic_virtual_depth_m_, static_cast<double>(frontier_goal_horizon_m)));
-      const Eigen::Vector3f view_direction =
-        orientation_ * Eigen::Vector3f::UnitX();
+      last_route_search_generation_ = topology_generation;
+    }
+    const char *incumbent_result = accepted_witness_usable ? "ACCEPTED" : "NONE";
+    bool using_accepted_route = false;
+    std::vector<TopoNode::Ptr> candidate_nodes;
+    if (!need_candidate_search && accepted_witness_usable) {
+      // No graph decision is needed this tick. Re-emit the accepted topology
+      // path so visualization and the existing publish-level witness check
+      // remain consistent, without running another A* search.
+      path_nodes = accepted_route_.topology_path;
+      found = true;
+      using_accepted_route = true;
+    }
+    if (need_candidate_search) {
       candidate_found = active_topo->goalDirectedSearch(
-        active_topo->odom_node_, goal_, path_nodes, 0.05,
+        active_topo->odom_node_, goal_, path_nodes, 0.0,
         static_cast<float>(goal_path_cost_weight_),
-        static_cast<float>(previous_path_cost_factor_), last_path_edges,
+        reuse_previous_route_ ? static_cast<float>(previous_path_cost_factor_) : 1.0F,
+        last_path_edges,
         static_cast<float>(semantic_cost_weight_),
         static_cast<float>(local_graph_radius_m_),
-        &position_, preferred_terminal_forward_m, goal_in_window,
-        preferred_terminal_radial_m,
-        goal_in_window ? 0.0F : effective_lookahead_m, &view_direction,
-        static_cast<float>(semantic_horizontal_fov_deg_),
-        static_cast<float>(frontier_progress_loss_weight_),
-        static_cast<float>(frontier_direction_loss_weight_),
-        static_cast<float>(frontier_fov_loss_weight_),
-        static_cast<float>(frontier_smoothness_loss_weight_),
+        &position_, 0.0F, goal_in_window,
+        std::numeric_limits<float>::infinity(),
+        effective_lookahead_m, nullptr, 0.0F,
+        0.0F, 0.0F, 0.0F, 0.0F,
         &candidate_search_stats, active_virtual_semantic_stamp_ns);
       candidate_nodes.swap(path_nodes);
       if (candidate_found && candidate_nodes.size() < 2) {
@@ -1620,9 +1669,8 @@ class EpicGraphNode final : public rclcpp::Node {
           "EPIC rejected topology search result without node path");
       }
     }
-    // Compare the newly searched route with the accepted incumbent. The
-    // incumbent wins near ties; only a hard blockage, missing incumbent, or a
-    // materially safer/lower-cost candidate may replace it.
+    // Compare candidate against the accepted route; only switch on blockage,
+    // goal window, missing incumbent, or materially better progress/cost.
     auto route_points = [](const std::vector<TopoNode::Ptr> &nodes) {
       std::vector<Eigen::Vector3f> points;
       points.reserve(nodes.size());
@@ -1650,30 +1698,29 @@ class EpicGraphNode final : public rclcpp::Node {
           static_cast<float>(semantic_cost_weight_), false, 1.0F,
           &local_semantic_nodes);
       }
-      metrics.objective += 0.2F * (points.back() - layer_goal).norm();
+      metrics.objective += static_cast<float>(goal_path_cost_weight_) *
+        (points.back() - layer_goal).norm();
       return metrics;
     };
-    bool using_accepted_witness = false;
-    if (incumbent_recovered) {
-      path_nodes = incumbent_nodes;
-      found = true;
-      reused_terminal = true;
+    RouteMetrics incumbent_metrics{0.0F, 0.0F, 0.0F};
+    RouteMetrics candidate_metrics{0.0F, 0.0F, 0.0F};
+    bool compared_route_metrics = false;
+    if (using_accepted_route) {
+      incumbent_metrics = metrics_for(path_nodes);
+    } else if (accepted_witness_usable && accepted_route_.topology_path.size() >= 2) {
+      incumbent_metrics = metrics_for(accepted_route_.topology_path);
     }
     if (candidate_found) {
-      // A short execution reserve requests an extension search, but it does
-      // not make the current corridor invalid. Let a compatible extension or
-      // the normal risk/cost hysteresis decide; otherwise the vehicle changes
-      // corridors every time the rolling lookahead approaches its terminal.
-      const bool hard_switch = current_route_blocked || goal_in_window ||
-        !accepted_witness_usable || !incumbent_recovered;
+      candidate_metrics = metrics_for(candidate_nodes);
+      const bool hard_switch = !accepted_witness_usable;
       bool switch_route = hard_switch;
-      if (current_route_blocked) route_switch_reason = "BLOCKED";
-      else if (goal_in_window) route_switch_reason = "GOAL_WINDOW";
-      else if (!accepted_witness_usable) route_switch_reason = "NO_ACCEPTED_ROUTE";
-      else if (!incumbent_recovered) route_switch_reason = "INCUMBENT_LOST";
-      if (!switch_route && incumbent_recovered) {
-        const RouteMetrics incumbent_metrics = metrics_for(incumbent_nodes);
-        const RouteMetrics candidate_metrics = metrics_for(candidate_nodes);
+      if (!accepted_witness_usable) {
+        // Distinguish the first commit from the diagnostic mode where a
+        // fresh candidate is intentionally evaluated every tick.
+        route_switch_reason = accepted_route_.valid ? "FRESH_SEARCH" : "INITIAL_ACCEPT";
+      }
+      if (!switch_route && accepted_witness_usable) {
+        compared_route_metrics = true;
         switch_route = scalenav_graph::shouldSwitchRoute(
           false, incumbent_metrics.risk, candidate_metrics.risk,
           static_cast<float>(semantic_route_switch_risk_margin_),
@@ -1683,35 +1730,98 @@ class EpicGraphNode final : public rclcpp::Node {
           static_cast<float>(semantic_route_switch_cost_ratio_));
         if (switch_route) route_switch_reason = "LOWER_LOSS";
       }
-      if (!switch_route && accepted_witness_usable && frontier_horizon_expired) {
-        const auto accepted_forward = scalenav_graph::forwardRouteFromPosition(
-          last_witness_path_, position_);
+      if (!switch_route && accepted_witness_usable && frontier_extension_needed &&
+          candidate_found && !candidate_nodes.empty()) {
+        const TopoNode::Ptr &candidate_frontier = candidate_nodes.back();
+        if (candidate_frontier &&
+            candidate_frontier->persistent_id_ != accepted_route_.frontier_goal_id) {
+          const float incumbent_goal_dist =
+            (accepted_route_.frontier_goal - layer_goal).norm();
+          const float candidate_goal_dist =
+            (candidate_frontier->center_ - layer_goal).norm();
+          if (candidate_goal_dist + 0.5F < incumbent_goal_dist) {
+            switch_route = true;
+            route_switch_reason = "FRONTIER_HALF";
+          }
+        }
+      }
+      if (!switch_route && accepted_witness_usable && frontier_extension_needed) {
         switch_route = scalenav_graph::candidateExtendsAcceptedRoute(
-          accepted_forward, route_points(candidate_nodes), 0.25F,
-          static_cast<float>(route_reuse_lateral_distance_m_));
+          accepted_forward_route, route_points(candidate_nodes), 0.25F,
+          std::numeric_limits<float>::infinity());
         if (switch_route) route_switch_reason = "COMPATIBLE_EXTENSION";
       }
-      if (!switch_route && using_accepted_witness && semantic_request_for_plan) {
-        const RouteMetrics candidate_metrics = metrics_for(candidate_nodes);
+      if (!switch_route && semantic_request_for_plan && accepted_witness_usable) {
         switch_route = candidate_metrics.risk +
           static_cast<float>(semantic_route_switch_risk_margin_) < current_route_risk;
+        if (switch_route) route_switch_reason = "SEMANTIC_RISK";
       }
+      const bool compatible_extension_switch =
+        switch_route && std::strcmp(route_switch_reason, "COMPATIBLE_EXTENSION") == 0;
       if (switch_route) {
         path_nodes = candidate_nodes;
         found = true;
-        reused_terminal = false;
-        using_accepted_witness = false;
+        using_accepted_route = false;
         candidate_accepted = true;
+      } else if (accepted_witness_usable && !frontier_route_exhausted) {
+        const auto frontier_node = nearestPersistentNode(
+          active_topo, accepted_route_.frontier_goal,
+          static_cast<float>(route_remap_distance_m_), accepted_route_.frontier_goal_id);
+        if (frontier_node && active_topo->graphSearch(
+              active_topo->odom_node_, frontier_node, path_nodes, 0.05, true,
+              last_path_edges, static_cast<float>(semantic_cost_weight_),
+              static_cast<float>(local_graph_radius_m_), nullptr,
+              active_virtual_semantic_stamp_ns,
+              reuse_previous_route_ ? static_cast<float>(previous_path_cost_factor_) : 1.0F,
+              static_cast<float>(goal_path_cost_weight_)) &&
+            path_nodes.size() >= 2) {
+          found = true;
+          using_accepted_route = true;
+          incumbent_result = "ACCEPTED";
+        } else if (accepted_route_.topology_path.size() >= 2) {
+          path_nodes = accepted_route_.topology_path;
+          found = true;
+          using_accepted_route = true;
+          incumbent_result = "ACCEPTED";
+        }
       }
     }
-    if (current_route_blocked && !candidate_accepted) {
-      // Never keep publishing an incumbent that the collision probe rejected.
-      path_nodes.clear();
-      found = false;
-      reused_terminal = false;
+    if (frontier_horizon_expired) {
+      last_extension_search_time_ = extension_clock;
+      have_last_extension_search_ = true;
+      if (!candidate_accepted) {
+        const std::uint64_t candidate_frontier_id = candidate_found && !candidate_nodes.empty() &&
+          candidate_nodes.back() ? candidate_nodes.back()->persistent_id_ : 0;
+        if (!candidate_found) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+          "[EPIC frontier extension] route horizon exhausted but no candidate topology; "
+          "frontier_goal_id=%llu progress_t=%.3f remaining=%.2f m retry_in=%.0f ms",
+            static_cast<unsigned long long>(accepted_route_.frontier_goal_id),
+            static_cast<double>(accepted_route_.frontier_goal_progress_t),
+            static_cast<double>(accepted_route_remaining),
+            extension_period_ms);
+        } else if (candidate_frontier_id == accepted_route_.frontier_goal_id) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "[EPIC frontier extension] half consumed but search returned same "
+            "frontier_goal_id=%llu; retry_in=%.0f ms",
+            static_cast<unsigned long long>(candidate_frontier_id),
+            extension_period_ms);
+        } else {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "[EPIC frontier extension] half consumed but candidate "
+            "frontier_goal_id=%llu rejected (incumbent=%llu) retry_in=%.0f ms",
+            static_cast<unsigned long long>(candidate_frontier_id),
+            static_cast<unsigned long long>(accepted_route_.frontier_goal_id),
+            extension_period_ms);
+        }
+      }
     }
-    if (found && (path_nodes.size() < 2 || !active_topo->odom_node_ ||
-        active_topo->odom_node_->neighbors_.empty())) {
+    if (found && !using_accepted_route &&
+        (path_nodes.size() < 2 || !active_topo->odom_node_ ||
+         active_topo->odom_node_->neighbors_.empty())) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 1000,
         "EPIC rejected route without a connected topology head: path_nodes=%zu odom_degree=%zu",
@@ -1719,7 +1829,6 @@ class EpicGraphNode final : public rclcpp::Node {
           active_topo->odom_node_->neighbors_.size() : 0U);
       path_nodes.clear();
       found = false;
-      reused_terminal = false;
     }
     std::size_t reused_path_edges = 0;
     for (std::size_t i = 1; i < path_nodes.size(); ++i) {
@@ -1727,70 +1836,102 @@ class EpicGraphNode final : public rclcpp::Node {
         ++reused_path_edges;
       }
     }
-    std::vector<Eigen::Vector3f> terminal_extension;
-    if (found && !using_accepted_witness && !path_nodes.empty()) {
-      connectTerminalToGoal(active_topo, path_nodes.back(), terminal_extension);
-    }
-    if (found && goal_in_window && terminal_extension.empty() && !path_nodes.empty()) {
-      terminal_extension = {path_nodes.back()->center_, layer_goal};
-    }
-    if (found && have_route_terminal_ && !route_aligned &&
-        !route_has_planning_horizon && path_nodes.size() >= 2 &&
-        (path_nodes.back()->center_ - route_terminal_).norm() <=
-          static_cast<float>(route_remap_distance_m_) &&
-        (path_nodes.back()->center_ - position_).dot(goal_ - position_) < -0.5F) {
-      // A* can return the last persistent node when the new goal lies outside
-      // the currently observed corridor. Once the vehicle has left that
-      // directed route, that node is behind the vehicle and must not be sent
-      // back to the local controller as a fresh goal.
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 1000,
-        "EPIC rejected stale terminal behind vehicle: terminal=(%.2f,%.2f,%.2f)",
-        path_nodes.back()->center_.x(), path_nodes.back()->center_.y(),
-        path_nodes.back()->center_.z());
-      found = false;
-      path_nodes.clear();
-      terminal_extension.clear();
-      have_route_terminal_ = false;
-      route_terminal_persistent_id_ = 0;
+    std::vector<Eigen::Vector3f> frontier_goal_extension;
+    if (found && !path_nodes.empty()) {
+      connectFrontierGoalToMissionGoal(active_topo, path_nodes.back(), frontier_goal_extension);
     }
     astar_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - astar_start).count();
-    if (found && !using_accepted_witness) {
-      last_topology_path_centers_.clear();
-      last_topology_path_centers_.reserve(path_nodes.size());
-      for (const auto &node : path_nodes) {
-        if (node) last_topology_path_centers_.push_back(node->center_);
-      }
-      last_path_nodes_ = path_nodes;
-      if (!path_nodes.empty() && (!reused_terminal || !have_route_terminal_)) {
-        route_terminal_ = (goal_in_window || !terminal_extension.empty()) ?
-          layer_goal : path_nodes.back()->center_;
-        route_terminal_persistent_id_ = path_nodes.back()->persistent_id_;
-      }
-      if (!path_nodes.empty()) have_route_terminal_ = true;
-    } else if (!found) {
-      last_path_nodes_.clear();
-    }
-    const bool preserve_route_memory = using_accepted_witness ||
-      (reused_terminal && route_aligned && !goal_in_window &&
-       terminal_extension.empty());
+    // Keep the candidate frontier_goal local until publish() has accepted the
+    // complete witness.  A topology path is not an incumbent by itself.
+    const Eigen::Vector3f proposed_frontier_goal =
+      (found && !path_nodes.empty()) ?
+      path_nodes.back()->center_ :
+      accepted_route_.frontier_goal;
+    const std::uint64_t proposed_frontier_goal_id =
+      (found && !path_nodes.empty()) ? path_nodes.back()->persistent_id_ :
+      accepted_route_.frontier_goal_id;
+    const bool proposed_have_frontier_goal = found && !path_nodes.empty();
     // A semantic search attempt is itself an evaluation. If it finds no
     // candidate while the incumbent remains valid, latch the observed risk
     // and wait for a further accumulated increase instead of retrying at 10 Hz.
     const bool semantic_evaluation_attempted =
-      semantic_request_for_plan && need_candidate_search && accepted_witness_usable;
+      semantic_request_for_plan && need_candidate_search && accepted_route_.valid;
     const bool route_evaluation_completed = candidate_found ||
       semantic_evaluation_attempted || !have_evaluated_route_risk_;
+    const std::size_t route_memory_points = accepted_route_.witness_path.size();
     const auto publish_start = std::chrono::steady_clock::now();
+    const float publish_progress_t = using_accepted_route ?
+      accepted_route_.frontier_goal_progress_t : 0.0F;
     const auto stats = publish(
-      active_topo, path_nodes, terminal_extension, found,
-      preserve_route_memory,
-      effective_lookahead_m);
+      active_topo, path_nodes, frontier_goal_extension, found,
+      effective_lookahead_m, using_accepted_route ? &accepted_forward_route : nullptr,
+      publish_progress_t);
     publish_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - publish_start).count();
-    if (found && route_evaluation_completed && last_witness_path_.size() >= 2) {
-      evaluated_route_risk_ = semanticRiskAlongRoute(active_topo, last_witness_path_);
+    if (found && !stats.witness_collision_free) {
+      // A topology search may reuse an edge witness that became stale while
+      // the map was updated. Do not retain its frontier_goal as an executable
+      // route; the next tick must start a fresh candidate search.  A failed
+      // new candidate does not invalidate an already accepted route unless
+      // the current accepted witness was independently blocked above.
+      found = false;
+      path_nodes.clear();
+      frontier_goal_extension.clear();
+      if (using_accepted_route) {
+        accepted_route_.clear();
+        have_last_extension_search_ = false;
+        if (using_accepted_route) {
+          last_route_search_generation_ = std::numeric_limits<std::uint64_t>::max();
+        }
+      }
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "[EPIC route rejected] final published witness failed collision check; "
+        "frontier goal state cleared for fresh search");
+    }
+    if (found && stats.witness_collision_free && !using_accepted_route) {
+      // Commit route state only after the exact witness that will be executed
+      // has passed the publish-level collision check.
+      const std::uint64_t old_frontier_goal_id = accepted_route_.frontier_goal_id;
+      accepted_route_.topology_path = path_nodes;
+      accepted_route_.witness_path = stats.witness_path;
+      const bool frontier_goal_changed = !accepted_route_.valid ||
+        proposed_frontier_goal_id != accepted_route_.frontier_goal_id ||
+        (proposed_frontier_goal - accepted_route_.frontier_goal).norm() > 1e-3F;
+      accepted_route_.frontier_goal = proposed_frontier_goal;
+      accepted_route_.frontier_goal_id = proposed_frontier_goal_id;
+      accepted_route_.valid = proposed_have_frontier_goal;
+      if (frontier_goal_changed || candidate_accepted) {
+        accepted_route_.frontier_goal_initial_route_length_m =
+          scalenav_graph::routeLength(accepted_route_.witness_path);
+        accepted_route_.frontier_goal_progress_m = 0.0F;
+        accepted_route_.frontier_goal_progress_t = 0.0F;
+      }
+      RCLCPP_INFO(
+        get_logger(),
+        "[EPIC route switch] reason=%s old_frontier_goal_id=%llu new_frontier_goal_id=%llu "
+        "route_aligned=%d route_lateral_error=%.2f m compatible_extension=%d "
+        "route_length=%.2f route_remaining=%.2f",
+        route_switch_reason,
+        static_cast<unsigned long long>(old_frontier_goal_id),
+        static_cast<unsigned long long>(accepted_route_.frontier_goal_id),
+        static_cast<int>(route_aligned), static_cast<double>(route_lateral_error),
+        static_cast<int>(std::strcmp(route_switch_reason, "COMPATIBLE_EXTENSION") == 0),
+        static_cast<double>(scalenav_graph::routeLength(stats.witness_path)),
+        static_cast<double>(scalenav_graph::routeLength(stats.witness_path)));
+      if (frontier_goal_changed) {
+        have_last_extension_search_ = false;
+        last_route_search_generation_ = std::numeric_limits<std::uint64_t>::max();
+      }
+      if (candidate_accepted) {
+        // A newly committed route gets one fresh chance to react if the next
+        // current-frame probe immediately discovers a blockage.
+        last_route_search_generation_ = std::numeric_limits<std::uint64_t>::max();
+      }
+    }
+    if (found && route_evaluation_completed && accepted_route_.witness_path.size() >= 2) {
+      evaluated_route_risk_ = semanticRiskAlongRoute(active_topo, accepted_route_.witness_path);
       have_evaluated_route_risk_ = true;
       high_risk_evaluated_ = evaluated_route_risk_ >=
         static_cast<float>(semantic_route_high_risk_);
@@ -1811,29 +1952,55 @@ class EpicGraphNode final : public rclcpp::Node {
       stats.semantic_nodes + stats.virtual_semantic_nodes;
     const std::size_t local_graph_nodes = active_topo->nodeCountWithinRadius(
       position_, static_cast<float>(local_graph_radius_m_));
-    const std::size_t astar_searches =
-      static_cast<std::size_t>(incumbent_search_attempted) +
-      static_cast<std::size_t>(need_candidate_search);
-    const std::size_t astar_expanded_nodes =
-      incumbent_search_stats.expanded_nodes + candidate_search_stats.expanded_nodes;
-    const std::size_t astar_edge_evaluations =
-      incumbent_search_stats.edge_evaluations + candidate_search_stats.edge_evaluations;
-    const std::size_t astar_semantic_nodes = std::max(
-      incumbent_search_stats.semantic_query_nodes,
-      candidate_search_stats.semantic_query_nodes);
-    const std::size_t astar_inactive_virtual_semantic_nodes = std::max(
-      incumbent_search_stats.semantic_inactive_virtual_nodes_skipped,
-      candidate_search_stats.semantic_inactive_virtual_nodes_skipped);
-    const std::size_t astar_semantic_checks =
-      incumbent_search_stats.semantic_candidate_checks +
-      candidate_search_stats.semantic_candidate_checks;
-    const bool astar_timed_out =
-      incumbent_search_stats.timed_out || candidate_search_stats.timed_out;
+    const std::size_t astar_searches = static_cast<std::size_t>(need_candidate_search);
+    const std::size_t astar_expanded_nodes = candidate_search_stats.expanded_nodes;
+    const std::size_t astar_edge_evaluations = candidate_search_stats.edge_evaluations;
+    const std::size_t astar_semantic_nodes = candidate_search_stats.semantic_query_nodes;
+    const std::size_t astar_inactive_virtual_semantic_nodes =
+      candidate_search_stats.semantic_inactive_virtual_nodes_skipped;
+    const std::size_t astar_semantic_checks = candidate_search_stats.semantic_candidate_checks;
+    const bool astar_timed_out = candidate_search_stats.timed_out;
+    const bool waiting_for_frontier_extension = accepted_route_.valid &&
+      frontier_route_exhausted && !found && !candidate_accepted;
+    const char *route_decision = candidate_accepted && found && stats.witness_collision_free ?
+      "CANDIDATE_COMMITTED" :
+      (using_accepted_route && found && stats.witness_collision_free ? "ACCEPTED_ROUTE_REUSED" :
+      (candidate_found && !stats.witness_collision_free ? "CANDIDATE_WITNESS_REJECTED" :
+      (candidate_found ? "CANDIDATE_REJECTED" :
+      (waiting_for_frontier_extension ? "WAITING_FOR_FRONTIER" : "NO_CANDIDATE"))));
+    float path_semantic_risk_min = 0.0F;
+    float path_semantic_risk_max = 0.0F;
+    float path_semantic_risk_mean = 0.0F;
+    std::string path_semantic_risks = "none";
+    if (!stats.path_edge_semantic_risks.empty()) {
+      path_semantic_risk_min = *std::min_element(
+        stats.path_edge_semantic_risks.begin(), stats.path_edge_semantic_risks.end());
+      path_semantic_risk_max = *std::max_element(
+        stats.path_edge_semantic_risks.begin(), stats.path_edge_semantic_risks.end());
+      for (const float risk : stats.path_edge_semantic_risks) {
+        path_semantic_risk_mean += risk;
+      }
+      path_semantic_risk_mean /= static_cast<float>(stats.path_edge_semantic_risks.size());
+      std::ostringstream risk_stream;
+      risk_stream << std::fixed << std::setprecision(3);
+      for (std::size_t i = 0; i < stats.path_edge_semantic_risks.size(); ++i) {
+        if (i != 0) risk_stream << ',';
+        if (i + 1 < path_nodes.size() && path_nodes[i] && path_nodes[i + 1]) {
+          risk_stream << path_nodes[i]->persistent_id_ << "->" <<
+            path_nodes[i + 1]->persistent_id_ << ':';
+        } else {
+          risk_stream << i << ':';
+        }
+        risk_stream << stats.path_edge_semantic_risks[i];
+      }
+      path_semantic_risks = risk_stream.str();
+    }
 
     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
       "[EPIC timing][update] rebuild_running=%d odom_connect=%.3f ms "
       "astar=%.3f ms publish=%.3f ms total=%.3f ms cloud=%zu skeleton_updates=%zu "
       "bubbles=%zu nodes=%zu edges=%zu path_nodes=%zu witness_points=%zu->%zu "
+      "route_memory_points=%zu "
       "persistent_semantic_records=%zu global_nodes=%zu global_edges=%zu "
       "global_semantic_nodes=%zu global_verified_semantic_nodes=%zu "
       "global_virtual_semantic_nodes=%zu local_graph_nodes=%zu local_semantic_nodes=%zu "
@@ -1842,22 +2009,31 @@ class EpicGraphNode final : public rclcpp::Node {
       "candidate_expanded_nodes=%zu astar_edge_evaluations=%zu "
       "astar_semantic_nodes=%zu astar_inactive_virtual_semantic_nodes=%zu "
       "astar_semantic_checks=%zu "
-      "astar_candidate_terminals=%zu astar_timed_out=%d "
+      "astar_candidate_frontier_goals=%zu astar_timed_out=%d "
       "geometry_source=%s "
       "remembered_edges=%zu/%zu geometric_edges=%zu route_mode=%s "
-      "semantic_request=%d incumbent=%s terminal_id=%llu candidate_found=%d candidate_accepted=%d switch_reason=%s "
+      "semantic_request=%d incumbent=%s frontier_goal_id=%llu candidate_found=%d candidate_accepted=%d "
+      "switch_reason=%s route_decision=%s "
+      "route_compare=%d incumbent_loss=%.2f candidate_loss=%.2f "
+      "incumbent_risk=%.3f candidate_risk=%.3f "
+      "incumbent_progress=%.2f candidate_progress=%.2f "
       "semantic_nodes=%zu virtual_semantic_nodes=%zu semantic_path_nodes=%zu semantic_max=%.3f "
+      "path_edge_semantic_risks=%s path_edge_risk_min=%.3f path_edge_risk_mean=%.3f "
+      "path_edge_risk_max=%.3f "
       "path_cost=%.2f geometry=%.2f semantic=%.2f clearance=%.2f "
       "local_graph_radius=%.1f m "
-      "route_aligned=%d horizon_ready=%d route_blocked=%d route_probe_points=%zu route_risk=%.3f "
-      "terminal=(%.2f,%.2f,%.2f) "
-      "terminal_goal_distance=%.2f m "
-      "vehicle_to_terminal=%.2f m "
-      "terminal_extension=%zu found=%d",
+      "route_aligned=%d route_lateral_error=%.2f m "
+      "horizon_ready=%d frontier_half_replan=%d "
+      "route_length=%.2f route_remaining=%.2f "
+      "frontier_initial_route_length=%.2f frontier_progress=%.2f frontier_progress_t=%.4f "
+      "route_risk=%.3f "
+      "frontier_goal=(%.2f,%.2f,%.2f) "
+      "frontier_goal_distance=%.2f m "
+      "frontier_goal_extension=%zu found=%d",
       static_cast<int>(rebuild_running_.load()), odom_ms, astar_ms, publish_ms, ms,
       cloud_count_, skeleton_update_count_.load(), stats.bubbles,
       stats.skeleton_nodes, stats.edges, path_nodes.size(), stats.witness_points_raw,
-      stats.witness_points, persistent_semantic_records,
+      stats.witness_points, route_memory_points, persistent_semantic_records,
       stats.skeleton_nodes, stats.edges, global_semantic_nodes,
       stats.semantic_nodes, stats.virtual_semantic_nodes,
       local_graph_nodes, local_semantic_nodes.size(),
@@ -1867,34 +2043,48 @@ class EpicGraphNode final : public rclcpp::Node {
       candidate_search_stats.expanded_nodes, astar_edge_evaluations,
       astar_semantic_nodes, astar_inactive_virtual_semantic_nodes,
       astar_semantic_checks,
-      candidate_search_stats.candidate_terminals,
+      candidate_search_stats.candidate_frontier_goals,
       static_cast<int>(astar_timed_out),
       use_edge_witness_path_ ? "EDGE_WITNESS" : "TOPO_CENTERS",
       reused_path_edges,
       path_nodes.size() > 1 ? path_nodes.size() - 1 : 0,
       geometrically_remembered_edges,
-      stats.persistent_route ? "RHC_DISPLAY" :
-      (reused_terminal ? "RHC_REPLAN" : "EXTEND"),
+      "EXTEND",
       static_cast<int>(semantic_request_for_plan), incumbent_result,
-      static_cast<unsigned long long>(route_terminal_persistent_id_),
+      static_cast<unsigned long long>(accepted_route_.frontier_goal_id),
       static_cast<int>(candidate_found),
       static_cast<int>(candidate_accepted),
       route_switch_reason,
+      route_decision,
+      static_cast<int>(compared_route_metrics),
+      static_cast<double>(incumbent_metrics.objective),
+      static_cast<double>(candidate_metrics.objective),
+      static_cast<double>(incumbent_metrics.risk),
+      static_cast<double>(candidate_metrics.risk),
+      static_cast<double>(incumbent_metrics.progress),
+      static_cast<double>(candidate_metrics.progress),
       stats.semantic_nodes, stats.virtual_semantic_nodes,
       stats.semantic_path_nodes, stats.semantic_max,
+      path_semantic_risks.c_str(), static_cast<double>(path_semantic_risk_min),
+      static_cast<double>(path_semantic_risk_mean),
+      static_cast<double>(path_semantic_risk_max),
       static_cast<double>(stats.path_geometry_cost + stats.path_semantic_cost +
         stats.path_clearance_cost), static_cast<double>(stats.path_geometry_cost),
       static_cast<double>(stats.path_semantic_cost),
       static_cast<double>(stats.path_clearance_cost),
       local_graph_radius_m_,
-      static_cast<int>(route_aligned), static_cast<int>(route_has_planning_horizon),
-      static_cast<int>(current_route_blocked),
-      route_probe_points,
+      static_cast<int>(route_aligned), static_cast<double>(route_lateral_error),
+      static_cast<int>(route_has_planning_horizon),
+      static_cast<int>(frontier_half_consumed),
+      static_cast<double>(accepted_route_length),
+      static_cast<double>(accepted_route_remaining),
+      static_cast<double>(accepted_route_.frontier_goal_initial_route_length_m),
+      static_cast<double>(accepted_route_.frontier_goal_progress_m),
+      static_cast<double>(accepted_route_.frontier_goal_progress_t),
       static_cast<double>(current_route_risk),
-      route_terminal_.x(), route_terminal_.y(), route_terminal_.z(),
-      (route_terminal_ - layer_goal).norm(),
-      (position_ - route_terminal_).norm(),
-      terminal_extension.size(), static_cast<int>(found));
+      accepted_route_.frontier_goal.x(), accepted_route_.frontier_goal.y(), accepted_route_.frontier_goal.z(),
+      (accepted_route_.frontier_goal - layer_goal).norm(),
+      frontier_goal_extension.size(), static_cast<int>(found));
     // Persist a throttled, self-contained graph snapshot after the planner
     // timing window so diagnostic I/O is not reported as route publication
     // latency.
@@ -2076,14 +2266,14 @@ class EpicGraphNode final : public rclcpp::Node {
     return count;
   }
 
-  bool connectTerminalToGoal(const TopoGraph::Ptr &topo, const TopoNode::Ptr &terminal,
+  bool connectFrontierGoalToMissionGoal(const TopoGraph::Ptr &topo, const TopoNode::Ptr &frontier_goal,
                              std::vector<Eigen::Vector3f> &extension) const
   {
     extension.clear();
-    if (!topo || !terminal || !topo->parallel_bubble_astar_) return false;
+    if (!topo || !frontier_goal || !topo->parallel_bubble_astar_) return false;
     Eigen::Vector3f layer_goal = goal_;
     if (graph_fixed_layer_) layer_goal.z() = static_cast<float>(graph_layer_z_);
-    const float distance = (terminal->center_ - layer_goal).norm();
+    const float distance = (frontier_goal->center_ - layer_goal).norm();
     const bool goal_in_window =
       (position_ - layer_goal).norm() <= static_cast<float>(local_graph_radius_m_);
     const float max_connect_m = goal_in_window ?
@@ -2091,27 +2281,27 @@ class EpicGraphNode final : public rclcpp::Node {
       static_cast<float>(goal_connect_distance_m_);
     if (distance > max_connect_m) return false;
     if (distance < 1e-3F) {
-      extension = {terminal->center_, layer_goal};
+      extension = {frontier_goal->center_, layer_goal};
       return true;
     }
     const int result = topo->parallel_bubble_astar_->search(
-      terminal->center_, layer_goal, extension,
+      frontier_goal->center_, layer_goal, extension,
       std::max(1.0, goal_connect_timeout_ms_) / 1000.0, true);
     if (result != ParallelBubbleAstar::REACH_END || extension.size() < 2 ||
         !topo->parallel_bubble_astar_->collisionCheck_shortenPath(extension)) {
       extension.clear();
       return false;
     }
-    if ((extension.front() - terminal->center_).norm() >
-        (extension.back() - terminal->center_).norm()) {
+    if ((extension.front() - frontier_goal->center_).norm() >
+        (extension.back() - frontier_goal->center_).norm()) {
       std::reverse(extension.begin(), extension.end());
     }
-    if ((extension.front() - terminal->center_).norm() > 0.5F ||
+    if ((extension.front() - frontier_goal->center_).norm() > 0.5F ||
         (extension.back() - layer_goal).norm() > 0.5F) {
       extension.clear();
       return false;
     }
-    extension.front() = terminal->center_;
+    extension.front() = frontier_goal->center_;
     extension.back() = layer_goal;
     return true;
   }
@@ -2164,7 +2354,7 @@ class EpicGraphNode final : public rclcpp::Node {
       frame = semantic_frame_;
     }
 
-    const float route_risk_before = semanticRiskAlongRoute(topo, last_witness_path_);
+    const float route_risk_before = semanticRiskAlongRoute(topo, accepted_route_.witness_path);
     std::size_t semantic_nodes_updated = 0;
     std::size_t semantic_candidates = 0;
     std::size_t semantic_connected_nodes = 0;
@@ -2231,9 +2421,9 @@ class EpicGraphNode final : public rclcpp::Node {
     last_semantic_applied_stamp_ns_ = frame->stamp_ns;
     // Semantic costs can change the preferred route without changing the
     // geometric graph. Request a candidate evaluation, but keep the accepted
-    // terminal and witness alive until that candidate is compared.
-    const float route_risk_after = semanticRiskAlongRoute(topo, last_witness_path_);
-    const bool has_route_memory = last_witness_path_.size() >= 2;
+    // frontier_goal and witness alive until that candidate is compared.
+    const float route_risk_after = semanticRiskAlongRoute(topo, accepted_route_.witness_path);
+    const bool has_route_memory = accepted_route_.witness_path.size() >= 2;
     const float trigger_delta = static_cast<float>(std::max(0.0, semantic_route_replan_delta_));
     const bool frame_delta_trigger = scalenav_graph::semanticRiskIncreaseRequiresReplan(
       route_risk_before, route_risk_after, trigger_delta);
@@ -2251,7 +2441,7 @@ class EpicGraphNode final : public rclcpp::Node {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
         "[EPIC semantic route] node_updates=%zu candidates=%zu guide_points=%zu "
         "risk=%.3f->%.3f delta=%.3f reference=%.3f request=%d high_latched=%d",
-        semantic_nodes_updated, semantic_candidates, last_witness_path_.size(),
+        semantic_nodes_updated, semantic_candidates, accepted_route_.witness_path.size(),
         route_risk_before, route_risk_after,
         std::abs(route_risk_after - route_risk_before),
         evaluated_route_risk_, static_cast<int>(semantic_replan_requested_),
@@ -2301,15 +2491,21 @@ class EpicGraphNode final : public rclcpp::Node {
     std::size_t semantic_nodes = 0;
     std::size_t virtual_semantic_nodes = 0;
     std::size_t semantic_path_nodes = 0;
-    bool persistent_route = false;
     float semantic_max = 0.0F;
     float path_geometry_cost = 0.0F;
     float path_semantic_cost = 0.0F;
     float path_clearance_cost = 0.0F;
+    // One entry per selected topology edge, in path_nodes order.  Keeping
+    // this on the publish result ties the diagnostic to the exact candidate
+    // witness that was checked and potentially committed.
+    std::vector<float> path_edge_semantic_risks;
+    bool witness_collision_free = true;
+    std::vector<Eigen::Vector3f> witness_path;
   };
 
   bool selectNextGoal(const std::vector<Eigen::Vector3f> &path, bool found,
-                     float lookahead_m, Eigen::Vector3f &next_goal) const
+                     float lookahead_m, Eigen::Vector3f &next_goal,
+                     float minimum_progress_t = 0.0F) const
   {
     if (!found || path.size() < 2) return false;
     if (graph_fixed_layer_) {
@@ -2327,19 +2523,24 @@ class EpicGraphNode final : public rclcpp::Node {
       next_goal = layer_goal;
       return next_goal.allFinite();
     }
-    if (!scalenav_graph::routeLookaheadPoint(
-        path, position_, lookahead_m, next_goal)) return false;
+    if (!scalenav_graph::routeLookaheadPointFromT(
+          path, position_, minimum_progress_t, lookahead_m, next_goal)) {
+      return false;
+    }
     if ((next_goal - position_).norm() < local_goal_min_advance_m_) {
-      next_goal = path.back();
+      if (!scalenav_graph::routePolynomialPointAtT(path, 1.0F, next_goal)) {
+        next_goal = path.back();
+      }
     }
     return next_goal.allFinite();
   }
 
   PublishStats publish(const TopoGraph::Ptr &topo,
                        const std::vector<TopoNode::Ptr> &path_nodes,
-                       const std::vector<Eigen::Vector3f> &terminal_extension,
-                       bool found, bool preserve_route_memory,
-                       float effective_lookahead_m)
+                       const std::vector<Eigen::Vector3f> &frontier_goal_extension,
+                       bool found, float effective_lookahead_m,
+                       const std::vector<Eigen::Vector3f> *accepted_witness_override = nullptr,
+                       float minimum_route_progress_t = 0.0F)
   {
     PublishStats stats;
     visualization_msgs::msg::MarkerArray graph;
@@ -2476,24 +2677,33 @@ class EpicGraphNode final : public rclcpp::Node {
       &position_, static_cast<float>(local_graph_radius_m_ +
         std::max(0.0, semantic_route_influence_m_)),
       activeVirtualSemanticStampNs());
+    stats.path_edge_semantic_risks.reserve(path_nodes.size() > 1 ? path_nodes.size() - 1 : 0);
     for (std::size_t i = 1; i < path_nodes.size(); ++i) {
       const auto &from = path_nodes[i - 1];
       const auto &to = path_nodes[i];
       if (!from || !to) continue;
       const float edge_length = (to->center_ - from->center_).norm();
       const auto weight_it = from->weight_.find(to);
-      stats.path_geometry_cost += weight_it != from->weight_.end() &&
+      const float geometry_cost = weight_it != from->weight_.end() &&
         std::isfinite(weight_it->second) ? weight_it->second : edge_length;
+      stats.path_geometry_cost += static_cast<float>(goal_path_cost_weight_) *
+        geometry_cost;
       const float risk = std::clamp(
         topo->semanticRiskForEdge(from, to, &local_semantic_nodes), 0.0F, 1.0F);
+      stats.path_edge_semantic_risks.push_back(risk);
       stats.path_semantic_cost += static_cast<float>(semantic_cost_weight_) * edge_length *
         (-std::log(std::max(1e-3F, 1.0F - risk)));
       stats.path_clearance_cost += topo->clearanceCostForEdge(from, to);
     }
-    graph.markers.push_back(path_marker);
-
     std::vector<Eigen::Vector3f> selected_witness_path;
-    if (!use_edge_witness_path_) {
+    bool witness_rejected = false;
+    // An accepted route is already a complete, collision-checked witness.
+    // Do not reconstruct it from topology edges that may have been replaced
+    // by an incremental graph update; missing/stale edge caches must not
+    // invalidate the executable route.
+    if (accepted_witness_override && !accepted_witness_override->empty()) {
+      selected_witness_path = *accepted_witness_override;
+    } else if (!use_edge_witness_path_) {
       for (const auto &node : path_nodes) {
         if (!node) continue;
         const auto &point = node->center_;
@@ -2509,8 +2719,22 @@ class EpicGraphNode final : public rclcpp::Node {
         if (!from || !to) continue;
         std::vector<Eigen::Vector3f> edge_path;
         const auto path_it = from->paths_.find(to);
-        if (path_it != from->paths_.end()) edge_path = path_it->second;
-        if (edge_path.empty()) edge_path = {from->center_, to->center_};
+        if (path_it == from->paths_.end() || path_it->second.size() < 2) {
+          // A missing witness is not an invitation to use the straight chord:
+          // the chord may cross an obstacle while both endpoint bubbles are
+          // free. Reject the route and force graph recovery/replanning.
+          stats.witness_collision_free = false;
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "[EPIC route rejected] selected edge has no valid witness: "
+            "from=%llu to=%llu",
+            static_cast<unsigned long long>(from->persistent_id_),
+            static_cast<unsigned long long>(to->persistent_id_));
+          witness_rejected = true;
+          found = false;
+          continue;
+        }
+        edge_path = path_it->second;
         if ((edge_path.front() - from->center_).norm() >
             (edge_path.back() - from->center_).norm()) {
           std::reverse(edge_path.begin(), edge_path.end());
@@ -2538,47 +2762,54 @@ class EpicGraphNode final : public rclcpp::Node {
       const float layer_z = static_cast<float>(graph_layer_z_);
       for (auto &point : selected_witness_path) point.z() = layer_z;
     }
-    // RHC memory ends at the persistent EPIC terminal.  Once that terminal is
-    // being reused, keep displaying and executing the same forward polyline;
-    // rebuilding it from the moving odom node every tick made the selected route
-    // move even when A* had selected the same route.  The direct terminal to
-    // goal extension is only added when a new route is committed.
-    const std::vector<Eigen::Vector3f> route_memory_path = selected_witness_path;
-    bool used_persistent_route = false;
-    if (preserve_route_memory && last_witness_path_.size() >= 2 &&
-        scalenav_graph::canReuseForwardRoute(
-          position_, last_witness_path_, 0.0F,
-          static_cast<float>(route_reuse_lateral_distance_m_))) {
-      const auto stable_route = scalenav_graph::forwardRouteFromPosition(
-        last_witness_path_, position_);
-      if (stable_route.size() >= 2) {
-        selected_witness_path = stable_route;
-        stats.persistent_route = true;
-        used_persistent_route = true;
-      }
-    }
-    if (!used_persistent_route) {
-      for (const auto &point : terminal_extension) {
-        if (selected_witness_path.empty() ||
-            (selected_witness_path.back() - point).norm() > 1e-3F) {
-          selected_witness_path.push_back(point);
-        }
-      }
-    } else if (!terminal_extension.empty()) {
-      // Near the mission goal the terminal→goal extension must still be
-      // appended even when the rolling witness is reused for display stability.
-      for (const auto &point : terminal_extension) {
-        if (selected_witness_path.empty() ||
-            (selected_witness_path.back() - point).norm() > 1e-3F) {
-          selected_witness_path.push_back(point);
-        }
-      }
-    }
     stats.witness_points_raw = selected_witness_path.size();
-
+    const bool route_already_reaches_extension =
+      !frontier_goal_extension.empty() && !selected_witness_path.empty() &&
+      (selected_witness_path.back() - frontier_goal_extension.back()).norm() <= 1e-3F;
+    if (!route_already_reaches_extension) {
+      for (const auto &point : frontier_goal_extension) {
+        if (selected_witness_path.empty() ||
+            (selected_witness_path.back() - point).norm() > 1e-3F) {
+          selected_witness_path.push_back(point);
+        }
+      }
+    }
     stats.witness_points = selected_witness_path.size();
-    if (found && route_memory_path.size() >= 2 && !used_persistent_route) {
-      last_witness_path_ = route_memory_path;
+    if (found && selected_witness_path.size() >= 2 && topo->parallel_bubble_astar_ &&
+        accepted_witness_override == nullptr) {
+      std::vector<Eigen::Vector3f> checked_witness = selected_witness_path;
+      ParallelBubbleAstar::CollisionCheckInfo witness_info;
+      stats.witness_collision_free =
+        topo->parallel_bubble_astar_->collisionCheck_shortenPath(
+          checked_witness, &witness_info);
+      if (!stats.witness_collision_free) {
+        const char *reason = witness_info.reason ==
+            ParallelBubbleAstar::CollisionCheckInfo::CLEARANCE ? "CLEARANCE" :
+          witness_info.reason == ParallelBubbleAstar::CollisionCheckInfo::BUBBLE_OVERLAP ?
+            "BUBBLE_OVERLAP" : "INVALID_PATH";
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "[EPIC candidate rejected] reason=%s witness_index=%zu/%zu point=(%.2f,%.2f,%.2f) "
+          "clearance=%.3f radius=%.3f predecessor=%zu distance=%.3f predecessor_radius=%.3f",
+          reason, witness_info.failed_index, selected_witness_path.size(),
+          witness_info.failed_point.x(), witness_info.failed_point.y(),
+          witness_info.failed_point.z(), witness_info.clearance, witness_info.radius,
+          witness_info.predecessor_index, witness_info.predecessor_distance,
+          witness_info.predecessor_radius);
+        selected_witness_path.clear();
+        stats.witness_points = 0;
+        witness_rejected = true;
+        found = false;
+      }
+    }
+    // Add the topology path only after witness validation so a rejected route
+    // is visibly diagnostic rather than styled like an executable route.
+    setColor(path_marker.color, kSelectedPath, found ? 0.55F : 0.20F);
+    graph.markers.push_back(path_marker);
+    if (found && selected_witness_path.size() >= 2) {
+      // Return the exact executable witness to update(); it becomes accepted
+      // state only after this function has completed all publication checks.
+      stats.witness_path = selected_witness_path;
     }
 
     visualization_msgs::msg::Marker selected_witness = path_marker;
@@ -2593,43 +2824,29 @@ class EpicGraphNode final : public rclcpp::Node {
     graph.markers.push_back(selected_witness);
 
     Eigen::Vector3f computed_next_goal = position_;
-    const float witness_lateral_error = selected_witness_path.empty() ?
-      std::numeric_limits<float>::infinity() :
-      scalenav_graph::pointPathDistance(position_, selected_witness_path);
-    const bool witness_is_continuous = scalenav_graph::isContinuousForwardRoute(
-      position_, selected_witness_path, static_cast<float>(std::max(
-        odom_reconnect_distance_m_, route_reuse_lateral_distance_m_)));
-    // selected_witness_path is already ordered from the current odom node (or
-    // from the forward suffix of the remembered route). Re-projecting it onto
-    // the globally nearest segment here can jump back into a nearby loop or
-    // parallel corridor and send local_goal behind the vehicle.
-    const bool computed_has_next_goal = witness_is_continuous && selectNextGoal(
-      selected_witness_path, found, effective_lookahead_m, computed_next_goal);
-    if (found && !selected_witness_path.empty() && !witness_is_continuous) {
-      RCLCPP_ERROR_THROTTLE(
-        get_logger(), *get_clock(), 1000,
-        "EPIC rejected discontinuous witness path: vehicle=(%.2f,%.2f,%.2f) "
-        "lateral_error=%.2f m",
-        position_.x(), position_.y(), position_.z(), witness_lateral_error);
-    } else if (found && !selected_witness_path.empty() && !computed_has_next_goal) {
+    // Subgoal follows monotonic witness time only; YOPO handles lateral avoidance.
+    const bool computed_has_next_goal = selectNextGoal(
+      selected_witness_path, found, effective_lookahead_m, computed_next_goal,
+      minimum_route_progress_t);
+    if (found && !selected_witness_path.empty() && !computed_has_next_goal) {
       RCLCPP_ERROR_THROTTLE(
         get_logger(), *get_clock(), 1000,
         "EPIC found a topology route but rejected its local goal; "
         "the witness path is not a valid fixed-height path");
     }
-    const Eigen::Vector3f subgoal_offset = last_subgoal_ - position_;
+    const Eigen::Vector3f local_goal_offset = previous_local_goal_ - position_;
     const Eigen::Vector3f forward_reference = world_velocity_.norm() > 0.5F ?
       world_velocity_ : goal_ - position_;
-    const bool subgoal_is_ahead = forward_reference.norm() <= 1e-3F ||
-      subgoal_offset.dot(forward_reference) > 0.0F;
-    const bool hold_subgoal = !computed_has_next_goal && have_subgoal_ &&
-      !current_route_blocked_ &&
+    const bool local_goal_is_ahead = forward_reference.norm() <= 1e-3F ||
+      local_goal_offset.dot(forward_reference) > 0.0F;
+    const bool hold_local_goal = !computed_has_next_goal && have_previous_local_goal_ &&
+      !witness_rejected &&
       std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - last_subgoal_time_).count() <=
+        std::chrono::steady_clock::now() - previous_local_goal_time_).count() <=
         local_goal_hold_timeout_ms_ &&
-      subgoal_offset.norm() >= local_goal_min_advance_m_ && subgoal_is_ahead;
-    const bool has_next_goal = computed_has_next_goal || hold_subgoal;
-    const Eigen::Vector3f next_goal = hold_subgoal ? last_subgoal_ : computed_next_goal;
+      local_goal_offset.norm() >= local_goal_min_advance_m_ && local_goal_is_ahead;
+    const bool has_local_goal = computed_has_next_goal || hold_local_goal;
+    const Eigen::Vector3f local_goal = hold_local_goal ? previous_local_goal_ : computed_next_goal;
     visualization_msgs::msg::Marker next_goal_marker = skeleton_nodes;
     next_goal_marker.ns = "epic_local_goal";
     next_goal_marker.id = 6;
@@ -2638,23 +2855,24 @@ class EpicGraphNode final : public rclcpp::Node {
     next_goal_marker.scale.y = 0.48;
     next_goal_marker.scale.z = 0.48;
     setColor(next_goal_marker.color, kLocalGoal);
-    next_goal_marker.action = has_next_goal ? visualization_msgs::msg::Marker::ADD :
+    next_goal_marker.action = has_local_goal ? visualization_msgs::msg::Marker::ADD :
       visualization_msgs::msg::Marker::DELETE;
-    if (has_next_goal) {
-      last_subgoal_ = next_goal;
-      have_subgoal_ = true;
-      if (!hold_subgoal) last_subgoal_time_ = std::chrono::steady_clock::now();
-      next_goal_marker.pose.position = toPoint(next_goal);
+    if (has_local_goal) {
+      previous_local_goal_ = local_goal;
+      have_previous_local_goal_ = true;
+      if (!hold_local_goal) previous_local_goal_time_ = std::chrono::steady_clock::now();
+      next_goal_marker.pose.position = toPoint(local_goal);
       next_goal_marker.pose.orientation.w = 1.0;
       geometry_msgs::msg::PoseStamped next_goal_message;
       next_goal_message.header.stamp = now();
       next_goal_message.header.frame_id = next_goal_frame_;
-      next_goal_message.pose.position = toPoint(next_goal);
+      next_goal_message.pose.position = toPoint(local_goal);
       next_goal_message.pose.orientation.w = 1.0;
       next_goal_pub_->publish(next_goal_message);
-      const float subgoal_to_terminal = (next_goal - route_terminal_).norm();
-      const Eigen::Vector3f topology_terminal = found && !path_nodes.empty() ?
-        path_nodes.back()->center_ : route_terminal_;
+      const float local_goal_to_frontier_goal =
+        (local_goal - accepted_route_.frontier_goal).norm();
+      const Eigen::Vector3f topology_frontier_goal = found && !path_nodes.empty() ?
+        path_nodes.back()->center_ : accepted_route_.frontier_goal;
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
         "[EPIC goals] vehicle=(%.2f,%.2f,%.2f) mission_goal=(%.2f,%.2f,%.2f) "
         "topology_anchor=(%.2f,%.2f,%.2f) frontier_goal=(%.2f,%.2f,%.2f) "
@@ -2663,14 +2881,24 @@ class EpicGraphNode final : public rclcpp::Node {
         "local_goal_source=%s speed=%.2f m/s lookahead=%.2f m "
         "planner_tick=%d ms",
         position_.x(), position_.y(), position_.z(), goal_.x(), goal_.y(), goal_.z(),
-        topology_terminal.x(), topology_terminal.y(), topology_terminal.z(),
-        route_terminal_.x(), route_terminal_.y(), route_terminal_.z(),
-        next_goal.x(), next_goal.y(), next_goal.z(), (next_goal - position_).norm(),
-        subgoal_to_terminal, (route_terminal_ - position_).norm(),
-        hold_subgoal ? "HELD" : (used_persistent_route ? "RHC_DISPLAY" : "CURRENT"),
+        topology_frontier_goal.x(), topology_frontier_goal.y(), topology_frontier_goal.z(),
+        accepted_route_.frontier_goal.x(), accepted_route_.frontier_goal.y(), accepted_route_.frontier_goal.z(),
+        local_goal.x(), local_goal.y(), local_goal.z(), (local_goal - position_).norm(),
+        local_goal_to_frontier_goal, (accepted_route_.frontier_goal - position_).norm(),
+        hold_local_goal ? "HELD" : "CURRENT",
         speed_mps_, effective_lookahead_m, update_period_ms_);
     } else {
-      have_subgoal_ = false;
+      have_previous_local_goal_ = false;
+      // Any route without a valid next goal must retract the previous command.
+      // This includes an exhausted accepted route while the next frontier
+      // search is pending; otherwise the controller can keep pursuing a stale
+      // subgoal and fly past the frontier.
+      geometry_msgs::msg::PoseStamped stop_message;
+      stop_message.header.stamp = now();
+      stop_message.header.frame_id = next_goal_frame_;
+      stop_message.pose.position = toPoint(position_);
+      stop_message.pose.orientation.w = 1.0;
+      next_goal_pub_->publish(stop_message);
     }
     graph.markers.push_back(next_goal_marker);
 
@@ -2708,40 +2936,40 @@ class EpicGraphNode final : public rclcpp::Node {
 
     // The rolling A* frontier goal is distinct from both the mission goal and
     // the short local execution goal. Make all three visible in RViz.
-    visualization_msgs::msg::Marker route_terminal_marker = goal_marker;
-    route_terminal_marker.ns = "epic_frontier_goal";
-    route_terminal_marker.id = 10;
-    route_terminal_marker.action = have_route_terminal_ ?
+    visualization_msgs::msg::Marker frontier_goal_marker = goal_marker;
+    frontier_goal_marker.ns = "epic_frontier_goal";
+    frontier_goal_marker.id = 10;
+    frontier_goal_marker.action = accepted_route_.valid ?
       visualization_msgs::msg::Marker::ADD : visualization_msgs::msg::Marker::DELETE;
-    route_terminal_marker.scale.x = 0.62;
-    route_terminal_marker.scale.y = 0.62;
-    route_terminal_marker.scale.z = 0.62;
-    setColor(route_terminal_marker.color, kFrontierGoal);
-    route_terminal_marker.pose.position = toPoint(route_terminal_);
-    graph.markers.push_back(route_terminal_marker);
+    frontier_goal_marker.scale.x = 0.62;
+    frontier_goal_marker.scale.y = 0.62;
+    frontier_goal_marker.scale.z = 0.62;
+    setColor(frontier_goal_marker.color, kFrontierGoal);
+    frontier_goal_marker.pose.position = toPoint(accepted_route_.frontier_goal);
+    graph.markers.push_back(frontier_goal_marker);
 
-    visualization_msgs::msg::Marker route_terminal_label = goal_marker;
-    route_terminal_label.ns = "epic_frontier_goal_label";
-    route_terminal_label.id = 11;
-    route_terminal_label.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
-    route_terminal_label.action = have_route_terminal_ ?
+    visualization_msgs::msg::Marker frontier_goal_label = goal_marker;
+    frontier_goal_label.ns = "epic_frontier_goal_label";
+    frontier_goal_label.id = 11;
+    frontier_goal_label.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+    frontier_goal_label.action = accepted_route_.valid ?
       visualization_msgs::msg::Marker::ADD : visualization_msgs::msg::Marker::DELETE;
-    const Eigen::Vector3f route_terminal_label_position =
-      route_terminal_ + Eigen::Vector3f(0.0F, 0.0F, 0.8F);
-    route_terminal_label.pose.position = toPoint(route_terminal_label_position);
-    setColor(route_terminal_label.color, kFrontierGoal);
-    route_terminal_label.text = "FRONTIER GOAL";
-    route_terminal_label.scale.z = 0.45;
-    graph.markers.push_back(route_terminal_label);
+    const Eigen::Vector3f frontier_goal_label_position =
+      accepted_route_.frontier_goal + Eigen::Vector3f(0.0F, 0.0F, 0.8F);
+    frontier_goal_label.pose.position = toPoint(frontier_goal_label_position);
+    setColor(frontier_goal_label.color, kFrontierGoal);
+    frontier_goal_label.text = "FRONTIER GOAL";
+    frontier_goal_label.scale.z = 0.45;
+    graph.markers.push_back(frontier_goal_label);
 
     visualization_msgs::msg::Marker subgoal_label = goal_marker;
     subgoal_label.ns = "epic_local_goal_label";
     subgoal_label.id = 12;
     subgoal_label.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
-    subgoal_label.action = has_next_goal ?
+    subgoal_label.action = has_local_goal ?
       visualization_msgs::msg::Marker::ADD : visualization_msgs::msg::Marker::DELETE;
     const Eigen::Vector3f subgoal_label_position =
-      next_goal + Eigen::Vector3f(0.0F, 0.0F, 0.8F);
+      local_goal + Eigen::Vector3f(0.0F, 0.0F, 0.8F);
     subgoal_label.pose.position = toPoint(subgoal_label_position);
     setColor(subgoal_label.color, kLocalGoal);
     subgoal_label.text = "LOCAL GOAL";
@@ -2872,10 +3100,11 @@ class EpicGraphNode final : public rclcpp::Node {
   double map_margin_ = 20.0;
   bool graph_fixed_layer_ = true;
   bool reuse_graph_on_goal_ = true;
+  bool reuse_previous_route_ = false;
   bool graph_layer_initialized_ = false;
   double graph_layer_z_ = 1.6;
   double map_voxel_size_ = 0.1;
-  double map_history_radius_m_ = 40.0;
+  double map_history_radius_m_ = 0.0;
   int map_max_points_ = 20000;
   double map_prune_distance_m_ = 0.5;
   double skeleton_rebuild_period_ms_ = 200.0;
@@ -2891,7 +3120,7 @@ class EpicGraphNode final : public rclcpp::Node {
   double frontier_fov_loss_weight_ = 0.2;
   double frontier_smoothness_loss_weight_ = 0.35;
   bool use_edge_witness_path_ = true;
-  double goal_path_cost_weight_ = 0.2;
+  double goal_path_cost_weight_ = 1.0;
   double semantic_cost_weight_ = 2.0;
   double semantic_route_replan_delta_ = 0.15;
   bool semantic_route_replan_enabled_ = true;
@@ -2914,7 +3143,6 @@ class EpicGraphNode final : public rclcpp::Node {
   double route_remap_distance_m_ = 1.25;
   double route_reuse_horizon_m_ = 10.0;
   double route_reuse_lateral_distance_m_ = 1.5;
-  double route_terminal_release_distance_m_ = 1.0;
   double local_goal_hold_timeout_ms_ = 400.0;
   double goal_connect_distance_m_ = 6.0;
   double goal_connect_timeout_ms_ = 20.0;
@@ -2939,24 +3167,24 @@ class EpicGraphNode final : public rclcpp::Node {
   ParallelBubbleAstar::Ptr astar_;
   TopoGraph::Ptr topo_;
   TopoGraph::Ptr graph_odom_topo_;
-  std::vector<Eigen::Vector3f> last_topology_path_centers_;
-  std::vector<TopoNode::Ptr> last_path_nodes_;
-  std::vector<Eigen::Vector3f> last_witness_path_;
+  AcceptedRouteState accepted_route_;
+  double frontier_extension_search_period_ms_ = 1000.0;
+  bool have_last_extension_search_ = false;
+  std::chrono::steady_clock::time_point last_extension_search_time_{};
+  std::atomic<std::uint64_t> topology_update_generation_{0};
+  std::uint64_t last_route_search_generation_ =
+    std::numeric_limits<std::uint64_t>::max();
   // Straight vehicle→goal polyline captured at each reused-graph goal change.
   // Supplies remembered-edge priors after witness memory is cleared on a new
   // mission goal (e.g. the return leg of an out-and-back run).
   std::vector<Eigen::Vector3f> corridor_hint_route_;
-  Eigen::Vector3f route_terminal_ = Eigen::Vector3f::Zero();
-  std::uint64_t route_terminal_persistent_id_ = 0;
-  bool have_route_terminal_ = false;
   bool semantic_replan_requested_ = false;
   float evaluated_route_risk_ = 0.0F;
   bool have_evaluated_route_risk_ = false;
   bool high_risk_evaluated_ = false;
-  Eigen::Vector3f last_subgoal_ = Eigen::Vector3f::Zero();
-  bool have_subgoal_ = false;
-  std::chrono::steady_clock::time_point last_subgoal_time_{};
-  bool current_route_blocked_ = false;
+  Eigen::Vector3f previous_local_goal_ = Eigen::Vector3f::Zero();
+  bool have_previous_local_goal_ = false;
+  std::chrono::steady_clock::time_point previous_local_goal_time_{};
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr free_ray_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr semantic_heatmap_sub_;

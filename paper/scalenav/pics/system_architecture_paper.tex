@@ -140,14 +140,20 @@
 
 % The unchanged local policy receives only geometry/state and local_goal.
 \filldraw[box,draw=localgoal!70,fill=white] (173,31) rectangle (195,44);
-\node[box,draw=none,fill=none] at (184,39.5) {Unchanged YOPO};
-\node[note] at (184,35.2) {one depth channel};
+\node[box,draw=none,fill=none] at (184,39.5) {Route-conditioned YOPO};
+\node[note] at (184,35.2) {depth + state + route bubbles};
+
+\filldraw[box,draw=plan!70,fill=planbg] (173,23.5) rectangle (195,30.5);
+\node[box,draw=none,fill=none] at (184,28.3) {Witness corridor};
+\node[note] at (184,25.3) {ordered bubbles};
 
 \filldraw[box,draw=structure!65,fill=structurebg] (173,12) rectangle (195,23);
 \node[box,draw=none,fill=none] at (184,19.1) {Local trajectory};
 \node[note] at (184,15.6) {controller command};
 
 \draw[localgoalflow] (164,14.5)--(169.5,14.5)--(169.5,37.5)--(173,37.5);
+\draw[planflow] (149,22.5)--(149,21.5)--(173,21.5)--(173,23.5);
+\draw[planflow] (184,30.5)--(184,31);
 \draw[depthflow] (24,30.5)--(26,30.5)--(26,6)--(170,6)--(170,34.5)--(173,34.5);
 \node[note,text=depth,fill=white,inner sep=.6mm] at (153,6) {depth + 9-D state};
 \draw[flow] (184,31)--(184,23);
