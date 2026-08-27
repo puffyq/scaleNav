@@ -1921,7 +1921,6 @@ class EpicGraphNode final : public rclcpp::Node {
           scalenav_graph::routeLength(accepted_route_.witness_path);
         accepted_route_.frontier_goal_progress_m = 0.0F;
         accepted_route_.frontier_goal_progress_t = 0.0F;
-        refitPolynomialGuideFromWitness(accepted_route_.witness_path);
       }
       RCLCPP_INFO(
         get_logger(),
