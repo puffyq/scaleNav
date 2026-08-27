@@ -1031,6 +1031,9 @@ class EpicGraphNode final : public rclcpp::Node {
       // A new mission goal gets a new route, even when the existing topology
       // and its edge witness paths are reused.
       accepted_route_.clear();
+      polynomial_guide_path_.clear();
+      polynomial_curve_ = scalenav_graph::WitnessParametricCurve();
+      polynomial_curve_valid_ = false;
       have_last_extension_search_ = false;
       semantic_replan_requested_ = false;
       have_evaluated_route_risk_ = false;
@@ -1568,8 +1571,8 @@ class EpicGraphNode final : public rclcpp::Node {
     const float accepted_route_length = scalenav_graph::routeLength(accepted_route_.witness_path);
     if (accepted_route_.valid && accepted_route_length > 1e-3F) {
       float projected_t = 0.0F;
-      if (scalenav_graph::routeProgressTAlongPath(
-            accepted_route_.witness_path, position_,
+      if (polynomial_curve_valid_ && scalenav_graph::routeProgressTAlongCurve(
+            polynomial_curve_, position_,
             accepted_route_.frontier_goal_progress_t, projected_t)) {
         accepted_route_.frontier_goal_progress_t = std::max(
           accepted_route_.frontier_goal_progress_t, std::clamp(projected_t, 0.0F, 1.0F));
@@ -1867,7 +1870,7 @@ class EpicGraphNode final : public rclcpp::Node {
     const auto stats = publish(
       active_topo, path_nodes, frontier_goal_extension, found,
       effective_lookahead_m, using_accepted_route ? &accepted_forward_route : nullptr,
-      publish_progress_t);
+      publish_progress_t, candidate_accepted);
     publish_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - publish_start).count();
     if (found && !stats.witness_collision_free) {
@@ -1881,10 +1884,20 @@ class EpicGraphNode final : public rclcpp::Node {
       frontier_goal_extension.clear();
       if (using_accepted_route) {
         accepted_route_.clear();
+        polynomial_guide_path_.clear();
+        polynomial_curve_ = scalenav_graph::WitnessParametricCurve();
+        polynomial_curve_valid_ = false;
         have_last_extension_search_ = false;
         if (using_accepted_route) {
           last_route_search_generation_ = std::numeric_limits<std::uint64_t>::max();
         }
+      }
+      if (!using_accepted_route) {
+        // The candidate curve was provisional until its witness passed the
+        // final collision check.
+        polynomial_guide_path_.clear();
+        polynomial_curve_ = scalenav_graph::WitnessParametricCurve();
+        polynomial_curve_valid_ = false;
       }
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 1000,
@@ -1908,6 +1921,7 @@ class EpicGraphNode final : public rclcpp::Node {
           scalenav_graph::routeLength(accepted_route_.witness_path);
         accepted_route_.frontier_goal_progress_m = 0.0F;
         accepted_route_.frontier_goal_progress_t = 0.0F;
+        refitPolynomialGuideFromWitness(accepted_route_.witness_path);
       }
       RCLCPP_INFO(
         get_logger(),
@@ -2502,11 +2516,15 @@ class EpicGraphNode final : public rclcpp::Node {
     std::vector<float> path_edge_semantic_risks;
     bool witness_collision_free = true;
     std::vector<Eigen::Vector3f> witness_path;
+    std::vector<Eigen::Vector3f> polynomial_guide;
+    scalenav_graph::WitnessParametricCurve polynomial_curve;
   };
 
   bool selectNextGoal(const std::vector<Eigen::Vector3f> &path, bool found,
                      float lookahead_m, Eigen::Vector3f &next_goal,
-                     float minimum_progress_t = 0.0F) const
+                     float minimum_progress_t = 0.0F,
+                     float terminal_progress_t = -1.0F,
+                     const scalenav_graph::WitnessParametricCurve *curve = nullptr) const
   {
     Eigen::Vector3f layer_goal = goal_;
     if (graph_fixed_layer_) layer_goal.z() = static_cast<float>(graph_layer_z_);
@@ -2515,7 +2533,9 @@ class EpicGraphNode final : public rclcpp::Node {
     // vehicle is already at the mission endpoint.  In that terminal state,
     // bypass witness validation and keep publishing the mission goal so the
     // controller can finish instead of receiving a stop at its current pose.
-    const bool terminal_goal = have_goal_ && minimum_progress_t >= 0.99F &&
+    const float terminal_t = terminal_progress_t >= 0.0F ? terminal_progress_t :
+      minimum_progress_t;
+    const bool terminal_goal = have_goal_ && terminal_t >= 0.99F &&
       (position_ - layer_goal).norm() <= static_cast<float>(goal_connect_distance_m_);
     if (terminal_goal) {
       next_goal = layer_goal;
@@ -2523,7 +2543,9 @@ class EpicGraphNode final : public rclcpp::Node {
     }
 
     if (!found || path.size() < 2) return false;
-    if (graph_fixed_layer_) {
+    // When a cached replan curve is active, planar validation already happened
+    // at fit time on the snapped guide path.
+    if (graph_fixed_layer_ && curve == nullptr) {
       const bool path_is_planar = std::all_of(
         path.begin(), path.end(), [this](const Eigen::Vector3f &point) {
           return std::abs(point.z() - static_cast<float>(graph_layer_z_)) < 1e-3F;
@@ -2536,16 +2558,45 @@ class EpicGraphNode final : public rclcpp::Node {
       next_goal = layer_goal;
       return next_goal.allFinite();
     }
-    if (!scalenav_graph::routeLookaheadPointFromT(
-          path, position_, minimum_progress_t, lookahead_m, next_goal)) {
+    const bool lookahead_ok = curve != nullptr ?
+      scalenav_graph::routeLookaheadPointFromCurve(
+        *curve, position_, minimum_progress_t, lookahead_m, next_goal) :
+      scalenav_graph::routeLookaheadPointFromT(
+        path, position_, minimum_progress_t, lookahead_m, next_goal);
+    if (!lookahead_ok) {
       return false;
     }
     if ((next_goal - position_).norm() < local_goal_min_advance_m_) {
-      if (!scalenav_graph::routePolynomialPointAtT(path, 1.0F, next_goal)) {
+      if (curve != nullptr && curve->valid) {
+        next_goal = curve->evaluate(1.0F);
+      } else if (!scalenav_graph::routePolynomialPointAtT(path, 1.0F, next_goal)) {
         next_goal = path.back();
       }
     }
+    if (graph_fixed_layer_) next_goal.z() = static_cast<float>(graph_layer_z_);
     return next_goal.allFinite();
+  }
+
+  void refitPolynomialGuideFromWitness(const std::vector<Eigen::Vector3f> &witness)
+  {
+    if (witness.size() < 2) {
+      polynomial_guide_path_.clear();
+      polynomial_curve_ = scalenav_graph::WitnessParametricCurve();
+      polynomial_curve_valid_ = false;
+      return;
+    }
+    const float layer_z = graph_fixed_layer_ ? static_cast<float>(graph_layer_z_) :
+      std::numeric_limits<float>::quiet_NaN();
+    polynomial_guide_path_ = scalenav_graph::buildPolynomialGuidePath(
+      witness, position_, world_velocity_, layer_z);
+    if (polynomial_guide_path_.size() < 2) {
+      polynomial_guide_path_.clear();
+      polynomial_curve_ = scalenav_graph::WitnessParametricCurve();
+      polynomial_curve_valid_ = false;
+      return;
+    }
+    polynomial_curve_ = scalenav_graph::WitnessParametricCurve::fit(polynomial_guide_path_);
+    polynomial_curve_valid_ = polynomial_curve_.valid;
   }
 
   PublishStats publish(const TopoGraph::Ptr &topo,
@@ -2553,7 +2604,8 @@ class EpicGraphNode final : public rclcpp::Node {
                        const std::vector<Eigen::Vector3f> &frontier_goal_extension,
                        bool found, float effective_lookahead_m,
                        const std::vector<Eigen::Vector3f> *accepted_witness_override = nullptr,
-                       float minimum_route_progress_t = 0.0F)
+                       float minimum_route_progress_t = 0.0F,
+                       bool replan_polynomial = false)
   {
     PublishStats stats;
     visualization_msgs::msg::MarkerArray graph;
@@ -2846,19 +2898,26 @@ class EpicGraphNode final : public rclcpp::Node {
     polynomial_witness.scale.x = 0.075;
     polynomial_witness.points.clear();
     setColor(polynomial_witness.color, kPolynomialPath, found ? 0.95F : 0.25F);
-    if (selected_witness_path.size() >= 2) {
-      const auto curve = scalenav_graph::WitnessParametricCurve::fit(selected_witness_path);
-      if (curve.valid) {
+    // Fit once on route replan; reuse ticks only advance latched progress_t.
+    if (replan_polynomial && found && selected_witness_path.size() >= 2) {
+      refitPolynomialGuideFromWitness(selected_witness_path);
+      stats.polynomial_guide = polynomial_guide_path_;
+      stats.polynomial_curve = polynomial_curve_;
+    }
+    const auto *active_curve = polynomial_curve_valid_ ? &polynomial_curve_ : nullptr;
+    const std::vector<Eigen::Vector3f> &local_guide_path =
+      polynomial_guide_path_.empty() ? selected_witness_path : polynomial_guide_path_;
+    const float local_guide_progress_t = minimum_route_progress_t;
+    if (active_curve != nullptr) {
         constexpr int polynomial_samples = 96;
         polynomial_witness.points.reserve(polynomial_samples + 1);
         for (int sample = 0; sample <= polynomial_samples; ++sample) {
           const float t = static_cast<float>(sample) /
             static_cast<float>(polynomial_samples);
-          Eigen::Vector3f point = curve.evaluate(t);
+          Eigen::Vector3f point = active_curve->evaluate(t);
           if (graph_fixed_layer_) point.z() = static_cast<float>(graph_layer_z_);
           if (point.allFinite()) polynomial_witness.points.push_back(toPoint(point));
         }
-      }
     }
     polynomial_witness.action = polynomial_witness.points.size() >= 2 ?
       visualization_msgs::msg::Marker::ADD : visualization_msgs::msg::Marker::DELETE;
@@ -2867,8 +2926,8 @@ class EpicGraphNode final : public rclcpp::Node {
     Eigen::Vector3f computed_next_goal = position_;
     // Subgoal follows monotonic witness time only; YOPO handles lateral avoidance.
     const bool computed_has_next_goal = selectNextGoal(
-      selected_witness_path, found, effective_lookahead_m, computed_next_goal,
-      minimum_route_progress_t);
+      local_guide_path, found, effective_lookahead_m, computed_next_goal,
+      local_guide_progress_t, minimum_route_progress_t, active_curve);
     if (found && !selected_witness_path.empty() && !computed_has_next_goal) {
       RCLCPP_ERROR_THROTTLE(
         get_logger(), *get_clock(), 1000,
@@ -3209,6 +3268,9 @@ class EpicGraphNode final : public rclcpp::Node {
   TopoGraph::Ptr topo_;
   TopoGraph::Ptr graph_odom_topo_;
   AcceptedRouteState accepted_route_;
+  std::vector<Eigen::Vector3f> polynomial_guide_path_;
+  scalenav_graph::WitnessParametricCurve polynomial_curve_;
+  bool polynomial_curve_valid_ = false;
   double frontier_extension_search_period_ms_ = 1000.0;
   bool have_last_extension_search_ = false;
   std::chrono::steady_clock::time_point last_extension_search_time_{};

@@ -45,6 +45,39 @@
 - 改为使用 bubble 球心处的 ESDF 半径；每颗球仍独立满足安全净空，邻接重叠继续由路线质量门禁审计。
 - 该修改只改变模型输入 bubble 的半径表达，不平移 witness 中心线；需要在新输入下重新训练和评测。
 
+<a id="chg-0021"></a>
+## CHG-0021 保持路径搜索选定的安全半径
+
+- 修复中心线 refinement 的安全约束回退：原先 A* 选出的 clearance threshold 在后续样条/梯度 refinement 中丢失，局部安全半径可能从 `1.2 m` 缩回基础规划余量。
+- `refine_witness_centerline` 现在接收 `minimum_safe_radius_m` 作为窄腰改善目标；候选点和线段始终保持基础可行净空，并在低于目标时沿 3D clearance 梯度优先抬高局部最小半径。
+- 对称真实窄通道不会被强行平移；生成新数据后，bubble 的窄腰应只保留无法改善的真实瓶颈。
+
+<a id="chg-0022"></a>
+## CHG-0022 窄腰参数对照数据
+
+- 新增小批量三场景验证集：`dataset/pilot_narrowwaist_002/viewer/index.html`，覆盖 YOPO 树林、真实树点云和大方块。
+- 新增放宽绕行预算的对照集：`dataset/pilot_narrowwaist_detour_001/viewer/index.html`，`widest_detour_ratio=1.35`。
+- 对照结果：平均 `safe_radius_p05` 从 `0.837 m` 提升到 `1.091 m`，平均 bubble overlap margin 从 `1.386 m` 提升到 `1.904 m`，平均路线长度从 `14.24 m` 增至 `15.70 m`。
+- 结论：窄腰主要来自路线搜索的绕行预算，不是 bubble 半径区间采样；默认 `1.12` 暂不盲目修改，完整数据重建时应把该参数作为可配置实验项。
+- `data.ground_truth_dataset` 新增 `--widest-detour-ratio` 与 `--widest-clearance-target`，可复现实验参数并生成完整训练集。
+
+<a id="chg-0023"></a>
+## CHG-0023 YOPO_52 窄腰修复后训练评测
+
+- 使用 `YOPO_50/best.pth` 初始化，在 `benchmark_004_esdf_001` 的 1479 条路线继续训练 6 个 epoch，GPU 为 RTX 3090。
+- 单模型 HTML：`dataset/benchmark_004_esdf_001/evaluation_yopo52_viewer/index.html`。
+- 统一对比 HTML：`dataset/benchmark_004_esdf_001/comparison_027/viewer/index.html`。
+- `YOPO_52`：碰撞率 `0.203%`、平均最大走廊偏差 `0.109 m`、平均进度 `6.642 m`。
+- `YOPO_50`：碰撞率 `0.473%`、平均最大走廊偏差 `0.090 m`、平均进度 `6.603 m`；YOPO-Simple：碰撞率 `8.046%`、平均最大走廊偏差 `0.287 m`、平均进度 `6.225 m`。
+
+<a id="chg-0024"></a>
+## CHG-0024 中心线距离量化与 YOPO_54
+
+- 评测和统一对比报告新增 `meanCenterlineDistanceM` 与 `meanMaximumCenterlineDistanceM`，按 3D witness 折线计算。
+- `YOPO_53`（中心线权重 `2.0`）继续以 `1e-5` 学习率微调得到 `YOPO_54`。
+- `YOPO_54`：平均中心线距离 `0.220 m`、平均最大中心线距离 `0.609 m`、平均最大走廊偏差 `0.057 m`、碰撞率 `0.203%`。
+- 对比页面：`dataset/benchmark_004_esdf_001/comparison_029/viewer/index.html`。
+
 <a id="chg-0009"></a>
 ## CHG-0009 安全球融合 ESDF 场并只增加有序 path MSE
 

@@ -12,6 +12,7 @@ scalenav_log_node:
     control_topic: "/scalenav/trajectory_point"
     semantic_topic: "/scalenav/text_heatmap_raw"
     goal_topic: "/goal_pose"
+    local_goal_topic: "/epic/local_goal"
     clearance_topic: "/epic/clearance"
     pointcloud_max_points: 200000
     pointcloud_stride: 1

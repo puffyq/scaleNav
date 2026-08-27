@@ -183,6 +183,7 @@ public:
     control_topic_ = declare_parameter<std::string>("control_topic", "/scalenav/trajectory_point");
     semantic_topic_ = declare_parameter<std::string>("semantic_topic", "/scalenav/text_heatmap_raw");
     goal_topic_ = declare_parameter<std::string>("goal_topic", "/goal_pose");
+    local_goal_topic_ = declare_parameter<std::string>("local_goal_topic", "/epic/local_goal");
     clearance_topic_ = declare_parameter<std::string>("clearance_topic", "/epic/clearance");
 
     store_ = std::make_unique<SlidingLogStore>(fs::path(output_dir));
@@ -196,6 +197,7 @@ public:
       << ",\"bubbles\":" << jsonQuote(bubble_topic_) << ",\"path\":" << jsonQuote(path_topic_)
       << ",\"odom\":" << jsonQuote(odom_topic_) << ",\"control\":" << jsonQuote(control_topic_)
       << ",\"semantic\":" << jsonQuote(semantic_topic_) << ",\"goal\":" << jsonQuote(goal_topic_)
+      << ",\"local_goal\":" << jsonQuote(local_goal_topic_)
       << ",\"clearance\":" << jsonQuote(clearance_topic_)
       << "},\"pointcloud_max_points\":" << pointcloud_max_points_
       << ",\"pointcloud_stride\":" << pointcloud_stride_ << "}";
@@ -224,6 +226,8 @@ public:
       [this](sensor_msgs::msg::Image::ConstSharedPtr message) { captureDepth(*message, "semantic"); });
     goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(goal_topic_, qos_depth,
       [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr message) { captureGoal(*message); });
+    local_goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(local_goal_topic_, qos_depth,
+      [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr message) { captureLocalGoal(*message); });
     clearance_sub_ = create_subscription<geometry_msgs::msg::Vector3Stamped>(
       clearance_topic_, qos_depth,
       [this](geometry_msgs::msg::Vector3Stamped::ConstSharedPtr message) {
@@ -439,6 +443,14 @@ private:
     store_->record("goal", stampNs(message.header.stamp), "", extra.size(), extra);
   }
 
+  void captureLocalGoal(const geometry_msgs::msg::PoseStamped &message)
+  {
+    const auto extra = "{\"frame_id\":" + jsonQuote(message.header.frame_id) +
+      ",\"position\":" + array3(message.pose.position) +
+      ",\"orientation\":" + quaternion(message.pose.orientation) + "}";
+    store_->record("local_goal", stampNs(message.header.stamp), "", extra.size(), extra);
+  }
+
   void captureClearance(const geometry_msgs::msg::Vector3Stamped &message)
   {
     const auto extra = "{\"frame_id\":" + jsonQuote(message.header.frame_id) +
@@ -454,7 +466,7 @@ private:
   std::uint64_t depth_seq_ = 0, rgb_seq_ = 0, pointcloud_seq_ = 0, graph_seq_ = 0, path_seq_ = 0;
   std::string depth_topic_, rgb_topic_, pointcloud_topic_, free_ray_topic_, graph_topic_,
     bubble_topic_, path_topic_, odom_topic_, control_topic_, semantic_topic_, goal_topic_,
-    clearance_topic_;
+    local_goal_topic_, clearance_topic_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_, rgb_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_, free_ray_sub_;
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr graph_sub_, bubble_sub_;
@@ -462,7 +474,7 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>::SharedPtr control_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr semantic_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_, local_goal_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr clearance_sub_;
 };
 

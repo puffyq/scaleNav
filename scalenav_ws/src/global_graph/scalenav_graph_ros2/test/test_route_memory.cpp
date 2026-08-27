@@ -373,4 +373,19 @@ TEST(RouteMemory, CompatibleCandidateMayExtendTheRollingFrontier)
     accepted, lane_switch, 1.0F, 1.5F));
 }
 
+TEST(RouteMemory, PolynomialGuideSnapsVelocityBoundaryToLayer)
+{
+  const std::vector<Eigen::Vector3f> witness{
+    point(0.0F), point(0.0F, 10.0F), point(0.0F, 20.0F)};
+  const Eigen::Vector3f velocity(5.0F, 0.0F, 0.05F);
+  const auto guide = scalenav_graph::buildPolynomialGuidePath(
+    witness, point(0.0F, 2.0F), velocity, 1.6F);
+
+  ASSERT_GE(guide.size(), 2U);
+  for (const auto &point : guide) {
+    EXPECT_NEAR(point.z(), 1.6F, 1e-5F);
+  }
+  EXPECT_NEAR(guide.front().y(), 2.0F, 1e-3F);
+}
+
 }  // namespace

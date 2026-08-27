@@ -983,7 +983,10 @@ class GroundTruthScene:
         return cumulative, float(cumulative[-1])
 
     def refine_witness_centerline(
-        self, path_points_world: np.ndarray
+        self,
+        path_points_world: np.ndarray,
+        *,
+        minimum_safe_radius_m: float | None = None,
     ) -> CenterlineRefinementResult:
         config = self.config
         points, _ = resample_polyline(
@@ -995,6 +998,15 @@ class GroundTruthScene:
         current_minimum, current_p05, current_risk = before_minimum, before_p05, before_risk
         initial_curvature = maximum_polyline_curvature(points)
         iterations = 0
+        # Keep every update physically executable.  The search threshold is a
+        # bottleneck target, rather than a hard constraint here: if the input
+        # path already contains a narrower real passage, gradient refinement
+        # must be allowed to push it outward and improve it incrementally.
+        target_safe_radius = (
+            config.planning_extra_margin_m
+            if minimum_safe_radius_m is None
+            else max(config.planning_extra_margin_m, float(minimum_safe_radius_m))
+        )
         required = config.robot_radius_m + config.safety_margin_m + config.planning_extra_margin_m
         for iteration in range(config.centerline_iterations):
             gradient = self.clearance_gradient_at_world(points)
@@ -1025,8 +1037,14 @@ class GroundTruthScene:
             ):
                 break
             candidate_minimum, candidate_p05, candidate_risk = self._centerline_metrics(candidate)
-            improves_bottleneck = candidate_p05 > current_p05 + 1.0e-4 \
-                and candidate_minimum + 1.0e-4 >= current_minimum
+            if current_minimum + 1.0e-4 < target_safe_radius:
+                # While below the selected corridor width, prioritize the
+                # actual minimum so an isolated bubble waist is widened.
+                improves_bottleneck = candidate_minimum > current_minimum + 1.0e-4 \
+                    and candidate_p05 + 1.0e-4 >= current_p05
+            else:
+                improves_bottleneck = candidate_p05 > current_p05 + 1.0e-4 \
+                    and candidate_minimum + 1.0e-4 >= current_minimum
             improves_risk = candidate_risk < current_risk - 1.0e-4 \
                 and candidate_minimum + 1.0e-4 >= current_minimum \
                 and candidate_p05 + 1.0e-4 >= current_p05
@@ -1303,7 +1321,9 @@ def _candidate_route(
         if smoothed is None:
             rejection_stats["smoothing_failed"] = rejection_stats.get("smoothing_failed", 0) + 1
             continue
-        refinement = scene.refine_witness_centerline(smoothed)
+        refinement = scene.refine_witness_centerline(
+            smoothed, minimum_safe_radius_m=search.clearance_threshold_m
+        )
         refined = refinement.points_world
         length = _path_length(refined)
         if not config.route_min_length_m <= length <= 1.5 * config.route_max_length_m:
@@ -1620,6 +1640,18 @@ def main() -> None:
     parser.add_argument("--routes-per-frame", type=int, default=3)
     parser.add_argument("--obstacles", type=int, default=40)
     parser.add_argument(
+        "--widest-detour-ratio",
+        type=float,
+        default=1.12,
+        help="maximum route length divided by the shortest route length",
+    )
+    parser.add_argument(
+        "--widest-clearance-target",
+        type=float,
+        default=1.2,
+        help="target safe radius for widest-shortest search, in meters",
+    )
+    parser.add_argument(
         "--scene-style",
         choices=tuple(sorted(SCENE_STYLES)),
         default="alternating",
@@ -1644,6 +1676,8 @@ def main() -> None:
         routes_per_frame=args.routes_per_frame,
         obstacle_count=args.obstacles,
         scene_style=args.scene_style,
+        widest_detour_ratio=args.widest_detour_ratio,
+        widest_clearance_target_m=args.widest_clearance_target,
     )
     print(
         generate_ground_truth_dataset(

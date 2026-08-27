@@ -393,13 +393,6 @@ def sample_route_bubbles(
         ]
     ).astype(np.float32)
     sampled_radii = np.empty(len(anchors), dtype=np.float32)
-    boundaries = np.concatenate(
-        (
-            [0.0],
-            0.5 * (sample_distances[:-1] + sample_distances[1:]),
-            [max(length, float(sample_distances[-1]))],
-        )
-    )
     for index in range(len(anchors)):
         # The sphere is certified at its own center.  Using the minimum radius
         # over the whole interval creates an artificial narrow waist whenever

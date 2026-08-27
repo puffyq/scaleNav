@@ -79,6 +79,23 @@ def _corridor_metrics(
     return float(np.max(violation)), float(np.mean(violation)), float(progress)
 
 
+def _centerline_metrics(prediction: np.ndarray, route_points: np.ndarray) -> tuple[float, float]:
+    """Return mean and peak distance from a trajectory to the witness polyline."""
+    points = np.asarray(route_points, dtype=np.float32)
+    segment_start = points[:-1]
+    segment = points[1:] - segment_start
+    length_squared = np.maximum(np.sum(segment * segment, axis=1), 1.0e-8)
+    difference = prediction[:, None, :] - segment_start[None, :, :]
+    alpha = np.clip(
+        np.sum(difference * segment[None, :, :], axis=2) / length_squared,
+        0.0,
+        1.0,
+    )
+    closest = segment_start[None, :, :] + alpha[:, :, None] * segment[None, :, :]
+    distances = np.linalg.norm(prediction[:, None, :] - closest, axis=2).min(axis=1)
+    return float(np.mean(distances)), float(np.max(distances))
+
+
 def evaluate(
     data_root: Path,
     checkpoint_path: Path,
@@ -159,6 +176,7 @@ def evaluate(
                 maximum_violation, mean_violation, progress = _corridor_metrics(
                     trajectory, path, radii
                 )
+                mean_centerline, maximum_centerline = _centerline_metrics(trajectory, path)
                 minimum_clearance = float(np.min(clearance))
                 predictions[(scene.path.name, route_index)] = {
                     "path": trajectory.round(4).tolist(),
@@ -170,6 +188,8 @@ def evaluate(
                     ),
                     "maximumCorridorViolationM": round(maximum_violation, 4),
                     "meanCorridorViolationM": round(mean_violation, 4),
+                    "meanCenterlineDistanceM": round(mean_centerline, 4),
+                    "maximumCenterlineDistanceM": round(maximum_centerline, 4),
                     "routeProgressM": round(progress, 4),
                 }
             cursor += count
@@ -189,6 +209,12 @@ def evaluate(
         "meanMinimumClearanceM": float(np.mean([item["minimumClearanceM"] for item in values])),
         "meanMaximumCorridorViolationM": float(
             np.mean([item["maximumCorridorViolationM"] for item in values])
+        ),
+        "meanCenterlineDistanceM": float(
+            np.mean([item["meanCenterlineDistanceM"] for item in values])
+        ),
+        "meanMaximumCenterlineDistanceM": float(
+            np.mean([item["maximumCenterlineDistanceM"] for item in values])
         ),
         "meanRouteProgressM": float(np.mean([item["routeProgressM"] for item in values])),
     }

@@ -157,6 +157,22 @@ def test_route_sampler_fills_all_valid_slots_after_priority_deduplication():
     assert np.all(np.diff(distances) > 0.0)
 
 
+def test_route_sampler_does_not_spread_isolated_radius_dip_into_bubble():
+    points = np.stack(
+        [np.linspace(0.0, 10.0, 101), np.zeros(101), np.full(101, 1.6)], axis=1
+    ).astype(np.float32)
+    radii = np.full(101, 1.0, dtype=np.float32)
+    radii[45:56] = 0.2
+    centers, sampled_radii, mask, distances = sample_route_bubbles(
+        points, radii, [2, 4, 6, 8]
+    )
+    assert mask.tolist() == [1.0] * 4
+    # Bubble centers are certified locally; the dip straddles the 4 m and 6 m
+    # anchors, but only the sphere whose own center is inside it is narrow.
+    # Interval-minimum sampling incorrectly shrank both neighboring spheres.
+    np.testing.assert_allclose(sampled_radii, [1.0, 1.0, 0.2, 1.0], atol=1.0e-6)
+
+
 def test_epic_labeler_preserves_failures_and_builds_corridor(tmp_path: Path):
     root = generate_synthetic_dataset(tmp_path / "data", scene_count=1, frames_per_scene=1)
     scene = root / "Scene_0000"

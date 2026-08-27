@@ -156,6 +156,31 @@ def test_centerline_refinement_does_not_invent_space_in_symmetric_narrow_passage
     assert np.max(np.abs(result.points_world[:, 1])) < 0.05
 
 
+def test_centerline_refinement_honors_selected_safe_radius():
+    config = GroundTruthConfig(
+        map_size_x_m=24.0,
+        map_size_y_m=20.0,
+        obstacle_count=0,
+        grid_resolution_m=0.2,
+        centerline_iterations=8,
+    )
+    scene = GroundTruthScene(
+        config,
+        [BoxObstacle(0.0, 0.0, 4.0, 6.0, 4.0, 0.0)],
+    )
+    path = np.asarray(
+        [[-9.0, 0.0, 1.6], [-3.0, 5.0, 1.6], [3.0, 5.0, 1.6], [9.0, 0.0, 1.6]],
+        dtype=np.float32,
+    )
+    result = scene.refine_witness_centerline(path, minimum_safe_radius_m=1.2)
+    safe_radius = (
+        scene.clearance_at_world(result.points_world)
+        - config.robot_radius_m
+        - config.safety_margin_m
+    )
+    assert float(np.min(safe_radius[1:-1])) + 1.0e-4 >= 1.2
+
+
 def test_depth_renderer_sees_map2_style_block():
     config = GroundTruthConfig(
         map_size_x_m=20.0,

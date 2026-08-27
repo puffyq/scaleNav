@@ -26,7 +26,7 @@ from policy.state_transform import rotate_body2world, state_body2world
 from policy.yopo_dataset import YOPODataset
 from policy.yopo_network import YopoNetwork
 from policy.yopo_simple_baseline import YopoSimpleBaseline
-from evaluate_yopo import _corridor_metrics, _sample_trajectory
+from evaluate_yopo import _centerline_metrics, _corridor_metrics, _sample_trajectory
 
 
 def _load_baseline(path: Path, device: torch.device) -> YopoSimpleBaseline:
@@ -50,6 +50,7 @@ def _single_metrics(
     maximum_violation, mean_violation, progress = _corridor_metrics(
         trajectory, route_path, route_radii
     )
+    mean_centerline, maximum_centerline = _centerline_metrics(trajectory, route_path)
     minimum_clearance = float(np.min(clearance))
     trajectory_length = float(np.linalg.norm(np.diff(trajectory, axis=0), axis=1).sum())
     endpoint_distance = float(np.linalg.norm(trajectory[-1] - trajectory[0]))
@@ -59,6 +60,8 @@ def _single_metrics(
         "collision": bool(minimum_clearance < float(cfg["robot_radius_m"]) + float(cfg["safety_margin_m"])),
         "maximumCorridorViolationM": round(maximum_violation, 4),
         "meanCorridorViolationM": round(mean_violation, 4),
+        "meanCenterlineDistanceM": round(mean_centerline, 4),
+        "maximumCenterlineDistanceM": round(maximum_centerline, 4),
         "routeProgressM": round(progress, 4),
         "trajectoryLengthM": round(trajectory_length, 4),
         "endpointDistanceM": round(endpoint_distance, 4),
@@ -77,6 +80,12 @@ def _aggregate(values: list[dict[str, Any]]) -> dict[str, Any]:
         "meanMinimumClearanceM": float(np.mean([item["minimumClearanceM"] for item in values])),
         "meanMaximumCorridorViolationM": float(
             np.mean([item["maximumCorridorViolationM"] for item in values])
+        ),
+        "meanCenterlineDistanceM": float(
+            np.mean([item["meanCenterlineDistanceM"] for item in values])
+        ),
+        "meanMaximumCenterlineDistanceM": float(
+            np.mean([item["maximumCenterlineDistanceM"] for item in values])
         ),
         "corridorViolationRate": float(
             np.mean([item["maximumCorridorViolationM"] > 0.0 for item in values])

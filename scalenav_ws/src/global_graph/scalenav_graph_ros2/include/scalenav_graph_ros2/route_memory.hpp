@@ -265,14 +265,12 @@ struct WitnessParametricCurve
   }
 };
 
-inline bool routeProgressTAlongPath(const std::vector<Eigen::Vector3f> &route,
-                                    const Eigen::Vector3f &position,
-                                    float minimum_t,
-                                    float &progress_t)
+inline bool routeProgressTAlongCurve(const WitnessParametricCurve &curve,
+                                     const Eigen::Vector3f &position,
+                                     float minimum_t,
+                                     float &progress_t)
 {
-  if (route.size() < 2 || !position.allFinite()) return false;
-  const WitnessParametricCurve curve = WitnessParametricCurve::fit(route);
-  if (!curve.valid) return false;
+  if (!curve.valid || !position.allFinite()) return false;
 
   const float start_t = std::clamp(minimum_t, 0.0F, 1.0F);
   constexpr int samples = 128;
@@ -292,6 +290,16 @@ inline bool routeProgressTAlongPath(const std::vector<Eigen::Vector3f> &route,
   if (!std::isfinite(best_distance_sq)) return false;
   progress_t = std::max(start_t, best_t);
   return true;
+}
+
+inline bool routeProgressTAlongPath(const std::vector<Eigen::Vector3f> &route,
+                                    const Eigen::Vector3f &position,
+                                    float minimum_t,
+                                    float &progress_t)
+{
+  if (route.size() < 2 || !position.allFinite()) return false;
+  const WitnessParametricCurve curve = WitnessParametricCurve::fit(route);
+  return routeProgressTAlongCurve(curve, position, minimum_t, progress_t);
 }
 
 // Return the original witness suffix at a monotonic normalized parameter.
@@ -328,7 +336,40 @@ inline std::vector<Eigen::Vector3f> forwardRouteFromT(
   return {route.back()};
 }
 
-// Select a subgoal on P(t) by advancing monotonically from the latched progress.
+// Build the polynomial guide used for monotonic progress and subgoal sampling.
+// The witness suffix is truncated at the vehicle projection; the vehicle pose
+// (and optional velocity tangent) anchor t=0.  All points are snapped to
+// layer_z when it is finite so fixed-height validation stays consistent.
+inline std::vector<Eigen::Vector3f> buildPolynomialGuidePath(
+    const std::vector<Eigen::Vector3f> &witness,
+    const Eigen::Vector3f &position, const Eigen::Vector3f &velocity,
+    float layer_z = std::numeric_limits<float>::quiet_NaN())
+{
+  const auto snap = [layer_z](const Eigen::Vector3f &point) {
+    Eigen::Vector3f snapped = point;
+    if (std::isfinite(layer_z)) snapped.z() = layer_z;
+    return snapped;
+  };
+  if (witness.size() < 2 || !position.allFinite()) return {};
+
+  std::vector<Eigen::Vector3f> guide;
+  guide.push_back(snap(position));
+  const float speed = velocity.norm();
+  if (std::isfinite(speed) && speed > 0.1F) {
+    constexpr float velocity_boundary_dt_s = 0.2F;
+    guide.push_back(snap(position + velocity_boundary_dt_s * velocity));
+  }
+  for (const auto &point : witness) {
+    const Eigen::Vector3f snapped = snap(point);
+    if ((snapped - guide.back()).norm() > 1e-3F) guide.push_back(snapped);
+  }
+  return guide.size() >= 2 ? guide : std::vector<Eigen::Vector3f>{};
+}
+
+inline bool routeLookaheadPointFromCurve(
+    const WitnessParametricCurve &curve, const Eigen::Vector3f &position,
+    float minimum_t, float lookahead, Eigen::Vector3f &point);
+
 inline bool routeLookaheadPointFromT(
     const std::vector<Eigen::Vector3f> &route, const Eigen::Vector3f &position,
     float minimum_t, float lookahead, Eigen::Vector3f &point)
@@ -336,10 +377,20 @@ inline bool routeLookaheadPointFromT(
   if (!position.allFinite() || !std::isfinite(lookahead) || lookahead <= 0.0F) {
     return false;
   }
-  float current_t = minimum_t;
-  if (!routeProgressTAlongPath(route, position, minimum_t, current_t)) return false;
   const WitnessParametricCurve curve = WitnessParametricCurve::fit(route);
-  if (!curve.valid || curve.total_length < 1e-4F) return false;
+  return routeLookaheadPointFromCurve(curve, position, minimum_t, lookahead, point);
+}
+
+inline bool routeLookaheadPointFromCurve(
+    const WitnessParametricCurve &curve, const Eigen::Vector3f &position,
+    float minimum_t, float lookahead, Eigen::Vector3f &point)
+{
+  if (!position.allFinite() || !std::isfinite(lookahead) || lookahead <= 0.0F ||
+      !curve.valid || curve.total_length < 1e-4F) {
+    return false;
+  }
+  float current_t = minimum_t;
+  if (!routeProgressTAlongCurve(curve, position, minimum_t, current_t)) return false;
   const float delta_t = lookahead / curve.total_length;
   point = curve.evaluate(std::clamp(current_t + delta_t, current_t, 1.0F));
   return point.allFinite();
