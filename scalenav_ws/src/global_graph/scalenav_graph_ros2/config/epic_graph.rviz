@@ -28,6 +28,7 @@ Visualization Manager:
         epic_goal_label: true
         epic_local_goal: true
         epic_local_goal_label: true
+        epic_polynomial_witness_path: true
         epic_selected_witness_path: true
         epic_semantic_point_labels: true
         epic_semantic_points: true

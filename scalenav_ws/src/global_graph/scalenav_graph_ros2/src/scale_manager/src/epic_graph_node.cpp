@@ -90,6 +90,7 @@ struct Rgb
 constexpr Rgb kTopology{0.396078F, 0.474510F, 0.521569F};       // #657985
 constexpr Rgb kCandidate{0.709804F, 0.756863F, 0.784314F};      // #B5C1C8
 constexpr Rgb kSelectedPath{0.0F, 0.486275F, 0.513725F};        // #007C83
+constexpr Rgb kPolynomialPath{0.960784F, 0.647059F, 0.101961F}; // #F5A51A
 constexpr Rgb kUav{0.141176F, 0.203922F, 0.239216F};            // #24343D
 constexpr Rgb kMissionGoal{0.192157F, 0.368627F, 0.470588F};    // #315E78
 constexpr Rgb kFrontierGoal{0.835294F, 0.521569F, 0.141176F};   // #D58524
@@ -2507,6 +2508,20 @@ class EpicGraphNode final : public rclcpp::Node {
                      float lookahead_m, Eigen::Vector3f &next_goal,
                      float minimum_progress_t = 0.0F) const
   {
+    Eigen::Vector3f layer_goal = goal_;
+    if (graph_fixed_layer_) layer_goal.z() = static_cast<float>(graph_layer_z_);
+
+    // A consumed route can collapse to a single/empty witness while the
+    // vehicle is already at the mission endpoint.  In that terminal state,
+    // bypass witness validation and keep publishing the mission goal so the
+    // controller can finish instead of receiving a stop at its current pose.
+    const bool terminal_goal = have_goal_ && minimum_progress_t >= 0.99F &&
+      (position_ - layer_goal).norm() <= static_cast<float>(goal_connect_distance_m_);
+    if (terminal_goal) {
+      next_goal = layer_goal;
+      return next_goal.allFinite();
+    }
+
     if (!found || path.size() < 2) return false;
     if (graph_fixed_layer_) {
       const bool path_is_planar = std::all_of(
@@ -2515,8 +2530,6 @@ class EpicGraphNode final : public rclcpp::Node {
         });
       if (!path_is_planar) return false;
     }
-    Eigen::Vector3f layer_goal = goal_;
-    if (graph_fixed_layer_) layer_goal.z() = static_cast<float>(graph_layer_z_);
     if (have_goal_ &&
         (position_ - layer_goal).norm() <=
           static_cast<float>(goal_connect_distance_m_)) {
@@ -2822,6 +2835,34 @@ class EpicGraphNode final : public rclcpp::Node {
       selected_witness.points.push_back(toPoint(point));
     }
     graph.markers.push_back(selected_witness);
+
+    // Visualize the same cubic (or lower-order) fit used for monotonic
+    // progress and lookahead sampling.  Keep it separate from the executable
+    // witness so RViz makes fit error and endpoint overshoot visible.
+    visualization_msgs::msg::Marker polynomial_witness = path_marker;
+    polynomial_witness.ns = "epic_polynomial_witness_path";
+    polynomial_witness.id = 13;
+    polynomial_witness.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    polynomial_witness.scale.x = 0.075;
+    polynomial_witness.points.clear();
+    setColor(polynomial_witness.color, kPolynomialPath, found ? 0.95F : 0.25F);
+    if (selected_witness_path.size() >= 2) {
+      const auto curve = scalenav_graph::WitnessParametricCurve::fit(selected_witness_path);
+      if (curve.valid) {
+        constexpr int polynomial_samples = 96;
+        polynomial_witness.points.reserve(polynomial_samples + 1);
+        for (int sample = 0; sample <= polynomial_samples; ++sample) {
+          const float t = static_cast<float>(sample) /
+            static_cast<float>(polynomial_samples);
+          Eigen::Vector3f point = curve.evaluate(t);
+          if (graph_fixed_layer_) point.z() = static_cast<float>(graph_layer_z_);
+          if (point.allFinite()) polynomial_witness.points.push_back(toPoint(point));
+        }
+      }
+    }
+    polynomial_witness.action = polynomial_witness.points.size() >= 2 ?
+      visualization_msgs::msg::Marker::ADD : visualization_msgs::msg::Marker::DELETE;
+    graph.markers.push_back(polynomial_witness);
 
     Eigen::Vector3f computed_next_goal = position_;
     // Subgoal follows monotonic witness time only; YOPO handles lateral avoidance.

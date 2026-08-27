@@ -237,7 +237,7 @@ class YopoTrainer:
         costs["safety"] = costs["safety"] + costs["path_corridor"]
         total_names = (
             "smooth", "safety", "frontier", "acceleration",
-            "path_progress", "path_mse", "path_centerline",
+            "path_progress", "path_mse", "path_centerline", "path_tangent",
         )
         total_cost = torch.stack(tuple(costs[name] for name in total_names), dim=0).sum(dim=0)
         trajectory_loss = total_cost.mean()
@@ -390,6 +390,7 @@ class YopoTrainer:
                 "active_loss_terms": [
                     "smooth", "safety", "frontier", "acceleration",
                     "path_progress", "score_regression", "path_mse",
+                    "path_centerline", "path_tangent",
                 ],
                 "score_only": self.score_only,
             },
@@ -431,6 +432,7 @@ class YopoTrainer:
             "active_loss_terms": [
                 "smooth", "safety", "frontier", "acceleration",
                 "path_progress", "score_regression", "path_mse",
+                "path_centerline", "path_tangent",
             ],
             "score_only": self.score_only,
         }

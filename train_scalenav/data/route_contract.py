@@ -401,11 +401,14 @@ def sample_route_bubbles(
         )
     )
     for index in range(len(anchors)):
-        lower = min(float(boundaries[index]), length)
-        upper = min(float(boundaries[index + 1]), length)
-        interval = (cumulative >= lower - 1.0e-5) & (cumulative <= upper + 1.0e-5)
-        values = radii[interval]
-        sampled_radii[index] = float(np.min(values)) if len(values) else float(radii[-1])
+        # The sphere is certified at its own center.  Using the minimum radius
+        # over the whole interval creates an artificial narrow waist whenever
+        # a single dense path sample is close to an obstacle.  Keep the local
+        # ESDF radius at the interpolated center; neighboring spheres remain
+        # independently safe and their overlap is audited by the route gate.
+        sampled_radii[index] = float(np.interp(
+            min(float(sample_distances[index]), length), cumulative, radii
+        ))
     return centers, sampled_radii, mask.astype(np.float32), sample_distances
 
 

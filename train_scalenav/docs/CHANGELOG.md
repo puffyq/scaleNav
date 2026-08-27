@@ -30,6 +30,21 @@
 - 1479 条路线结果：平均最大走廊偏差由 `0.202 m` 降至 `0.126 m`，平均进度由 `5.635 m` 提升至 `6.348 m`；碰撞率为 `0.473%`。
 - 统一对比页面：`dataset/benchmark_004_esdf_001/comparison_025/viewer/index.html`。其中 Route-YOPO 与 YOPO-Simple 使用同一批输入和同一评测采样。
 
+<a id="chg-0019"></a>
+## CHG-0019 接入几何中心线与切向 loss
+
+- 修复两个漏接：`path_centerline`（轨迹到 witness 最近线段距离）和 `path_tangent`（终点速度方向与 witness 切向）此前虽计算但未加入总 loss。
+- 当前默认 `wcenterline=0.1`、`wtangent=0.25`，并保留 `wpath_mse=0.2`。
+- `YOPO_50` 复训后平均最大走廊偏差降至 `0.090 m`，平均进度 `6.603 m`，碰撞率 `0.473%`。
+- 统一对比 HTML：`dataset/benchmark_004_esdf_001/comparison_026/viewer/index.html`；单模型 HTML：`dataset/benchmark_004_esdf_001/evaluation_yopo50_viewer/index.html`。
+
+<a id="chg-0020"></a>
+## CHG-0020 消除 bubble 采样造成的人工窄腰
+
+- `sample_route_bubbles` 之前使用每个采样区间内的最小半径，单个局部低净空点会把整颗 bubble 缩小。
+- 改为使用 bubble 球心处的 ESDF 半径；每颗球仍独立满足安全净空，邻接重叠继续由路线质量门禁审计。
+- 该修改只改变模型输入 bubble 的半径表达，不平移 witness 中心线；需要在新输入下重新训练和评测。
+
 <a id="chg-0009"></a>
 ## CHG-0009 安全球融合 ESDF 场并只增加有序 path MSE
 
