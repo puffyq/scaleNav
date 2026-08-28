@@ -53,7 +53,7 @@ void crashSignalHandler(int signal)
 {
   void *frames[64];
   const int frame_count = ::backtrace(frames, 64);
-  static constexpr char message[] = "\nEPIC fatal signal stack:\n";
+  static constexpr char message[] = "\nScaleNav fatal signal stack:\n";
   const auto ignored = ::write(STDERR_FILENO, message, sizeof(message) - 1);
   (void)ignored;
   ::backtrace_symbols_fd(frames, frame_count, STDERR_FILENO);
@@ -110,10 +110,10 @@ void setColor(std_msgs::msg::ColorRGBA &color, const Rgb &rgb, float alpha = 1.0
 
 }  // namespace
 
-class EpicGraphNode final : public rclcpp::Node {
+class ScaleNavGraphNode final : public rclcpp::Node {
  public:
-  EpicGraphNode()
-  : Node("epic_graph_node"),
+  ScaleNavGraphNode()
+  : Node("scalenav_graph_node"),
     map_(std::make_shared<fast_planner::LIOInterface>()),
     astar_(std::make_shared<ParallelBubbleAstar>()),
     topo_(std::make_shared<TopoGraph>())
@@ -122,16 +122,16 @@ class EpicGraphNode final : public rclcpp::Node {
     free_ray_topic_ = declare_parameter<std::string>("free_ray_topic", "/depth/free_rays");
     odom_topic_ = declare_parameter<std::string>("odom_topic", "/sim/odom");
     goal_topic_ = declare_parameter<std::string>("goal_topic", "/goal");
-    next_goal_topic_ = declare_parameter<std::string>("next_goal_topic", "/epic/local_goal");
-    clearance_topic_ = declare_parameter<std::string>("clearance_topic", "/epic/clearance");
-    timing_topic_ = declare_parameter<std::string>("timing_topic", "/epic/timing");
+    next_goal_topic_ = declare_parameter<std::string>("next_goal_topic", "/scalenav/local_goal");
+    clearance_topic_ = declare_parameter<std::string>("clearance_topic", "/scalenav/clearance");
+    timing_topic_ = declare_parameter<std::string>("timing_topic", "/scalenav/timing");
     next_goal_frame_ = declare_parameter<std::string>("next_goal_frame", "world_enu");
     visualization_frame_ = declare_parameter<std::string>("visualization_frame", "odom");
     odom_twist_frame_ = declare_parameter<std::string>("odom_twist_frame", "world");
     flight_statistics_file_ = declare_parameter<std::string>(
-      "flight_statistics_file", "epic_flight_statistics.csv");
+      "flight_statistics_file", "scalenav_flight_statistics.csv");
     graph_log_file_ = declare_parameter<std::string>(
-      "graph_log_file", "epic_graph_snapshots.jsonl");
+      "graph_log_file", "scalenav_graph_snapshots.jsonl");
     trajectory_speed_color_max_mps_ = declare_parameter<double>(
       "trajectory_speed_color_max_mps", 6.0);
     trajectory_max_points_ = static_cast<std::size_t>(std::max(
@@ -153,13 +153,15 @@ class EpicGraphNode final : public rclcpp::Node {
       250, static_cast<int>(declare_parameter<int>("diagnostic_log_period_ms", 2000)));
     skeleton_rebuild_period_ms_ = declare_parameter<double>("skeleton_rebuild_period_ms", 100.0);
     local_goal_min_advance_m_ = declare_parameter<double>("local_goal_min_advance_m", 0.75);
-    local_goal_lookahead_m_ = declare_parameter<double>("local_goal_lookahead_m", 10.0);
+    local_goal_lookahead_m_ = declare_parameter<double>("local_goal_lookahead_m", 15.0);
+    frontier_replan_progress_ratio_ = std::clamp(
+      declare_parameter<double>("frontier_replan_progress_ratio", 0.40), 0.0, 1.0);
     // Kept as launch-API compatibility knobs.  Planning is intentionally
     // performed on every update tick; throttling it here made the graph and
     // subgoal stale while the vehicle was moving.
     route_plan_period_ms_ = declare_parameter<int>("route_plan_period_ms", 100);
     local_goal_reserve_m_ = declare_parameter<double>("local_goal_reserve_m", 0.0);
-    local_graph_radius_m_ = declare_parameter<double>("local_graph_radius_m", 35.0);
+    local_graph_radius_m_ = declare_parameter<double>("local_graph_radius_m", 45.0);
     frontier_goal_margin_m_ = declare_parameter<double>("frontier_goal_margin_m", 3.5);
     frontier_progress_loss_weight_ = declare_parameter<double>(
       "frontier_progress_loss_weight", 0.5);
@@ -170,7 +172,7 @@ class EpicGraphNode final : public rclcpp::Node {
     frontier_smoothness_loss_weight_ = declare_parameter<double>(
       "frontier_smoothness_loss_weight", 0.35);
     use_edge_witness_path_ = declare_parameter<bool>("use_edge_witness_path", true);
-    // EPIC already stores collision-checked witness paths on each edge.  A
+    // ScaleNav already stores collision-checked witness paths on each edge.  A
     // second clearance raycast over every published segment is not part of
     // the original planner and can consume most of the route-update period.
     goal_path_cost_weight_ = declare_parameter<double>("goal_path_cost_weight", 1.0);
@@ -262,10 +264,12 @@ class EpicGraphNode final : public rclcpp::Node {
       "bubble_topo/clearance_cost_weight", 2.0);
     clearance_target_m_ = declare_parameter<double>(
       "bubble_topo/clearance_target_m", 1.2);
+    semantic_point_influence_m_ = declare_parameter<double>(
+      "bubble_topo/semantic_point_influence_m", 5.0);
     declare_parameter<bool>("bubble_topo/planar_graph", graph_fixed_layer_);
     declare_parameter<double>("bubble_topo/planar_z", graph_layer_z_);
     declare_parameter<int>("max_update_region_num", 0);
-    // Odom reconnection is on the online update path. Keep the EPIC local
+    // Odom reconnection is on the online update path. Keep the ScaleNav local
     // connection search bounded; frontier_goal-to-mission_goal uses its separate budget.
     declare_parameter<double>("parallel_astar/update_connection_timeout", 0.003);
     declare_parameter<double>("parallel_astar/insert_node_timeout", 0.02);
@@ -287,7 +291,7 @@ class EpicGraphNode final : public rclcpp::Node {
 
     RCLCPP_INFO(
       get_logger(),
-      "EPIC Bubble/TopoGraph volume=3D; local goal layer=%s z=%.2f; "
+      "ScaleNav Bubble/TopoGraph volume=3D; local goal layer=%s z=%.2f; "
       "obstacle_min_z=%.2f; planner_tick=%.2f Hz lookahead=%.2f m "
       "local_graph_radius=%.1f m",
       graph_fixed_layer_ ? "fixed" : "3D", graph_layer_z_,
@@ -296,7 +300,7 @@ class EpicGraphNode final : public rclcpp::Node {
       local_goal_lookahead_m_, local_graph_radius_m_);
     RCLCPP_INFO(
       get_logger(),
-      "EPIC config: clearance_target=%.2f m clearance_weight=%.2f "
+      "ScaleNav config: clearance_target=%.2f m clearance_weight=%.2f "
       "geometry_map=%s reuse_previous_route=%d semantic_radius=%.2f m "
       "semantic_visual_max=%.2f baseline_q=%.2f "
       "diagnostic_period=%d ms",
@@ -306,13 +310,13 @@ class EpicGraphNode final : public rclcpp::Node {
       semantic_point_radius_m_, semantic_visualization_max_score_,
       semantic_baseline_quantile_,
       diagnostic_log_period_ms_);
-    RCLCPP_INFO(get_logger(), "EPIC graph snapshots: file=%s period=%d ms",
+    RCLCPP_INFO(get_logger(), "ScaleNav graph snapshots: file=%s period=%d ms",
       graph_log_file_.c_str(), diagnostic_log_period_ms_);
 
-    graph_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/epic/graph", 1);
-    bubble_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/epic/bubbles", 1);
-    path_pub_ = create_publisher<nav_msgs::msg::Path>("/epic/path", 1);
-    flight_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/epic/flight", 1);
+    graph_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/scalenav/graph", 1);
+    bubble_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/scalenav/bubbles", 1);
+    path_pub_ = create_publisher<nav_msgs::msg::Path>("/scalenav/path", 1);
+    flight_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/scalenav/flight", 1);
     next_goal_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(next_goal_topic_, 10);
     clearance_pub_ =
       create_publisher<geometry_msgs::msg::Vector3Stamped>(clearance_topic_, 10);
@@ -354,7 +358,7 @@ class EpicGraphNode final : public rclcpp::Node {
       [this]() { publishFlightTelemetry(); }, state_callback_group_);
   }
 
-  ~EpicGraphNode() override
+  ~ScaleNavGraphNode() override
   {
     shutting_down_.store(true);
     writeFlightStatistics(true);
@@ -459,7 +463,7 @@ class EpicGraphNode final : public rclcpp::Node {
       graph_layer_z_ = position_.z();
       graph_layer_initialized_ = true;
       if (map_) map_->setGraphObstacleMinZ(static_cast<float>(graph_layer_z_ - 1.0));
-      RCLCPP_INFO(get_logger(), "EPIC graph fixed layer z=%.2f obstacle_min_z=%.2f",
+      RCLCPP_INFO(get_logger(), "ScaleNav graph fixed layer z=%.2f obstacle_min_z=%.2f",
         graph_layer_z_, graph_layer_z_ - 1.0);
     }
     have_odom_ = true;
@@ -543,7 +547,7 @@ class EpicGraphNode final : public rclcpp::Node {
     visualization_msgs::msg::Marker trajectory;
     trajectory.header.frame_id = visualization_frame_;
     trajectory.header.stamp = now();
-    trajectory.ns = "epic_flight_trajectory";
+    trajectory.ns = "scalenav_flight_trajectory";
     trajectory.id = 0;
     trajectory.type = visualization_msgs::msg::Marker::LINE_STRIP;
     trajectory.action = visualization_msgs::msg::Marker::ADD;
@@ -564,7 +568,7 @@ class EpicGraphNode final : public rclcpp::Node {
     visualization_msgs::msg::Marker vehicle;
     vehicle.header.frame_id = visualization_frame_;
     vehicle.header.stamp = message.markers.front().header.stamp;
-    vehicle.ns = "epic_flight_vehicle";
+    vehicle.ns = "scalenav_flight_vehicle";
     vehicle.id = 2;
     vehicle.type = visualization_msgs::msg::Marker::ARROW;
     vehicle.action = visualization_msgs::msg::Marker::ADD;
@@ -581,7 +585,7 @@ class EpicGraphNode final : public rclcpp::Node {
     flight_pub_->publish(message);
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), 5000,
-      "[EPIC flight] path=%.2f m duration=%.2f s speed=%.2f/%.2f m/s "
+      "[ScaleNav flight] path=%.2f m duration=%.2f s speed=%.2f/%.2f m/s "
       "acc_max=%.2f m/s^2 jerk_rms=%.2f jerk_max=%.2f m/s^3",
       flight_path_length_m_, flight_duration_s_, static_cast<double>(speed_mps_),
       flight_max_speed_mps_, flight_max_acceleration_mps2_, rms_jerk,
@@ -615,7 +619,7 @@ class EpicGraphNode final : public rclcpp::Node {
     const auto wall_time = std::chrono::duration<double>(
       std::chrono::system_clock::now().time_since_epoch()).count();
     output << std::fixed << std::setprecision(6)
-      << wall_time << ",epic," << (final ? 1 : 0) << ","
+      << wall_time << ",scalenav," << (final ? 1 : 0) << ","
       << flight_path_length_m_ << "," << flight_duration_s_ << ","
       << speed_mps_ << "," << average_speed << "," << flight_max_speed_mps_ << ","
       << flight_max_acceleration_mps2_ << "," << rms_jerk << ","
@@ -718,7 +722,7 @@ class EpicGraphNode final : public rclcpp::Node {
     }
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), 1000,
-      "EPIC graph stats: nodes=%zu edges=%zu directed=%zu degree0=%zu "
+      "ScaleNav graph stats: nodes=%zu edges=%zu directed=%zu degree0=%zu "
       "route_anchors=%zu asymmetric=%zu dangling=%zu duplicate<0.25m=%zu",
       nodes.size(), edge_count, directed_edge_count, zero_degree_nodes,
       route_anchor_count, asymmetric_edge_count, dangling_neighbor_count,
@@ -984,7 +988,7 @@ class EpicGraphNode final : public rclcpp::Node {
     }
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), diagnostic_log_period_ms_,
-      "[EPIC semantic] image=%ux%u patches=%zux%zu points=%zu virtual_depth=%.2f m "
+      "[ScaleNav semantic] image=%ux%u patches=%zux%zu points=%zu virtual_depth=%.2f m "
       "raw=%.3f..%.3f baseline=%.3f risk=%.3f..%.3f pose_sync=%.1f ms",
       message->width, message->height, patch_cols, patch_rows,
       semantic_point_count, semantic_virtual_depth_m_, semantic_raw_min,
@@ -1053,6 +1057,7 @@ class EpicGraphNode final : public rclcpp::Node {
       // A new mission goal gets a new route, even when the existing topology
       // and its edge witness paths are reused.
       accepted_route_.clear();
+      mission_direct_goal_latched_ = false;
       polynomial_guide_path_.clear();
       polynomial_curve_ = scalenav_graph::WitnessParametricCurve();
       polynomial_curve_valid_ = false;
@@ -1099,7 +1104,7 @@ class EpicGraphNode final : public rclcpp::Node {
       ++goal_generation_;
     }
     RCLCPP_INFO(get_logger(),
-      "[EPIC goal] target=(%.2f,%.2f,%.2f) graph=%s reuse=%d bounds_expanded=%d "
+      "[ScaleNav goal] target=(%.2f,%.2f,%.2f) graph=%s reuse=%d bounds_expanded=%d "
       "semantic_memory=%zu",
       goal_.x(), goal_.y(), goal_.z(), goal_graph_mode.c_str(),
       static_cast<int>(reuse_graph_on_goal_), static_cast<int>(bounds_expanded),
@@ -1115,7 +1120,7 @@ class EpicGraphNode final : public rclcpp::Node {
     if (cloud_body.empty() || !have_odom_) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
-        "[EPIC input] dropped cloud: points=%zu have_odom=%d",
+        "[ScaleNav input] dropped cloud: points=%zu have_odom=%d",
         cloud_body.size(), static_cast<int>(have_odom_));
       return;
     }
@@ -1157,7 +1162,7 @@ class EpicGraphNode final : public rclcpp::Node {
     if (voxel_cloud->empty()) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
-        "[EPIC input] dropped cloud after voxel filtering: input=%zu leaf=%.3f m",
+        "[ScaleNav input] dropped cloud after voxel filtering: input=%zu leaf=%.3f m",
         cloud_body.size(), voxel_size);
       return;
     }
@@ -1196,7 +1201,7 @@ class EpicGraphNode final : public rclcpp::Node {
       << ",\"occupied_hits\":" << occupied_hits << '}';
     publishTiming(timing_json.str());
     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
-      "[EPIC timing][cloud] decode=%.3f ms transform=%.3f ms map_update=%.3f ms "
+      "[ScaleNav timing][cloud] decode=%.3f ms transform=%.3f ms map_update=%.3f ms "
       "voxel=%.3f ms total=%.3f ms pose_sync=%.3f ms input=%zu voxel_points=%zu "
       "map_points=%zu occupied_hits=%zu leaf=%.3f",
       decode_ms, transform_ms, map_ms, voxel_ms, total_ms, pose_sync_ms,
@@ -1376,7 +1381,7 @@ class EpicGraphNode final : public rclcpp::Node {
           double odom_ms = 0.0;
           TopoGraphUpdateTiming timing;
           {
-            // EPIC's updateSkeleton is an in-place V_remove/V_remain/V_insert
+            // ScaleNav's updateSkeleton is an in-place V_remove/V_remain/V_insert
             // diff. Keep readers out until that diff and odom reconnection are
             // complete; rebuilding a detached copy defeats the incremental
             // graph and allows readers to observe half-removed nodes.
@@ -1416,7 +1421,7 @@ class EpicGraphNode final : public rclcpp::Node {
           if (!incremental_update && (timing.bubbles == 0 || timing.new_nodes == 0)) {
             map_changed_.store(true);
             RCLCPP_WARN(get_logger(),
-              "EPIC rebuild rejected: no real Bubble topology (points=%zu bubbles=%zu nodes=%zu)",
+              "ScaleNav rebuild rejected: no real Bubble topology (points=%zu bubbles=%zu nodes=%zu)",
               accumulated.size(), timing.bubbles, timing.new_nodes);
             rebuild_running_.store(false);
             return;
@@ -1466,7 +1471,7 @@ class EpicGraphNode final : public rclcpp::Node {
             << '}';
           publishTiming(timing_json.str());
           RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
-            "[EPIC timing][background %s] points=%zu snapshot_kdtree=%.3f ms "
+            "[ScaleNav timing][background %s] points=%zu snapshot_kdtree=%.3f ms "
             "init=%.3f ms regions=%zu occupied_regions=%zu "
             "free_regions=%zu region_select=%.3f ms skeleton=%.3f ms "
             "odom_connect=%.3f ms "
@@ -1497,7 +1502,7 @@ class EpicGraphNode final : public rclcpp::Node {
             timing.duplicate_nodes_merged, timing.half_edges_removed,
             timing.semantic_restored_nodes, timing.semantic_memory_records);
         } catch (const std::exception &error) {
-          RCLCPP_ERROR(get_logger(), "EPIC background rebuild failed: %s", error.what());
+          RCLCPP_ERROR(get_logger(), "ScaleNav background rebuild failed: %s", error.what());
           map_changed_.store(true);
         }
         rebuild_running_.store(false);
@@ -1572,7 +1577,7 @@ class EpicGraphNode final : public rclcpp::Node {
       graph_odom_topo_ = active_topo;
       have_graph_odom_ = true;
     }
-    // EPIC publishes the rolling graph and local subgoal on every planner
+    // ScaleNav publishes the rolling graph and local subgoal on every planner
     // tick.  The graph search itself is already bounded by local_graph_radius;
     // throttling this block to a multi-second period makes both the graph and
     // subgoal stale while the vehicle keeps moving.  Keep the configured
@@ -1649,14 +1654,14 @@ class EpicGraphNode final : public rclcpp::Node {
       accepted_route_.witness_path, accepted_route_.frontier_goal_progress_t);
     const float accepted_route_remaining =
       scalenav_graph::routeLength(accepted_forward_route);
-    const bool frontier_half_consumed = accepted_route_.valid &&
-      std::isfinite(accepted_route_.frontier_goal_initial_route_length_m) &&
-      accepted_route_.frontier_goal_initial_route_length_m > 1e-3F &&
-      accepted_route_.frontier_goal_progress_m >=
-        0.5F * accepted_route_.frontier_goal_initial_route_length_m;
+    const bool frontier_progress_replan = accepted_route_.valid &&
+      scalenav_graph::routeProgressReachedFraction(
+        accepted_route_.frontier_goal_progress_m,
+        accepted_route_.frontier_goal_initial_route_length_m,
+        static_cast<float>(frontier_replan_progress_ratio_));
     const bool route_has_planning_horizon = accepted_route_.valid &&
       std::isfinite(accepted_route_.frontier_goal_initial_route_length_m) &&
-      !frontier_half_consumed;
+      !frontier_progress_replan;
     const std::int64_t active_virtual_semantic_stamp_ns =
       activeVirtualSemanticStampNs();
     // The accepted witness is a guide for YOPO, not a second local obstacle
@@ -1681,10 +1686,19 @@ class EpicGraphNode final : public rclcpp::Node {
     const bool frontier_route_exhausted = accepted_route_.valid &&
       (accepted_route_remaining <= 1.0F ||
        accepted_route_.frontier_goal_progress_t >= 0.99F);
-    const bool mission_terminal = have_goal_ && accepted_route_.valid &&
-      accepted_route_.frontier_goal_progress_t >= 0.99F &&
-      vehicle_to_goal <= static_cast<float>(goal_connect_distance_m_);
-    const bool frontier_extension_needed = accepted_witness_usable && !mission_terminal &&
+    if (!mission_direct_goal_latched_ && have_goal_ &&
+        scalenav_graph::missionGoalWithinDirectHorizon(
+          vehicle_to_goal, static_cast<float>(goal_connect_distance_m_),
+          effective_lookahead_m)) {
+      mission_direct_goal_latched_ = true;
+      RCLCPP_INFO(
+        get_logger(),
+        "[ScaleNav terminal] direct mission goal enabled at %.2f m; "
+        "frontier A* extension disabled",
+        static_cast<double>(vehicle_to_goal));
+    }
+    const bool mission_goal_direct = have_goal_ && mission_direct_goal_latched_;
+    const bool frontier_extension_needed = accepted_witness_usable && !mission_goal_direct &&
       (!route_has_planning_horizon || frontier_route_exhausted);
     const auto extension_clock = std::chrono::steady_clock::now();
     const double ms_since_last_extension = have_last_extension_search_ ?
@@ -1697,13 +1711,13 @@ class EpicGraphNode final : public rclcpp::Node {
     // in an ambiguous incumbent-reuse state between graph updates.
     const double extension_period_ms =
       std::max(0.0, frontier_extension_search_period_ms_);
-    // Local witness half consumed: re-search for the next frontier on a timer.
+    // Refresh the rolling frontier after the configured route progress fraction.
     const bool frontier_horizon_expired = frontier_extension_needed &&
       ms_since_last_extension >= extension_period_ms;
     const bool route_search_allowed =
       last_route_search_generation_ != topology_generation;
     const bool need_candidate_search =
-      (!mission_terminal && !accepted_witness_usable && route_search_allowed) ||
+      (!mission_goal_direct && !accepted_witness_usable && route_search_allowed) ||
       frontier_horizon_expired;
     if (need_candidate_search) {
       last_route_search_generation_ = topology_generation;
@@ -1738,7 +1752,7 @@ class EpicGraphNode final : public rclcpp::Node {
         candidate_nodes.clear();
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 1000,
-          "EPIC rejected topology search result without node path");
+          "ScaleNav rejected topology search result without node path");
       }
     }
     // Compare candidate against the accepted route; only switch on blockage,
@@ -1813,7 +1827,7 @@ class EpicGraphNode final : public rclcpp::Node {
             (candidate_frontier->center_ - layer_goal).norm();
           if (candidate_goal_dist + 0.5F < incumbent_goal_dist) {
             switch_route = true;
-            route_switch_reason = "FRONTIER_HALF";
+            route_switch_reason = "FRONTIER_PROGRESS";
           }
         }
       }
@@ -1867,7 +1881,7 @@ class EpicGraphNode final : public rclcpp::Node {
         if (!candidate_found) {
           RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 1000,
-          "[EPIC frontier extension] route horizon exhausted but no candidate topology; "
+          "[ScaleNav frontier extension] route horizon exhausted but no candidate topology; "
           "frontier_goal_id=%llu progress_t=%.3f remaining=%.2f m retry_in=%.0f ms",
             static_cast<unsigned long long>(accepted_route_.frontier_goal_id),
             static_cast<double>(accepted_route_.frontier_goal_progress_t),
@@ -1876,14 +1890,14 @@ class EpicGraphNode final : public rclcpp::Node {
         } else if (candidate_frontier_id == accepted_route_.frontier_goal_id) {
           RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 1000,
-            "[EPIC frontier extension] half consumed but search returned same "
+            "[ScaleNav frontier extension] progress threshold reached but search returned same "
             "frontier_goal_id=%llu; retry_in=%.0f ms",
             static_cast<unsigned long long>(candidate_frontier_id),
             extension_period_ms);
         } else {
           RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 1000,
-            "[EPIC frontier extension] half consumed but candidate "
+            "[ScaleNav frontier extension] progress threshold reached but candidate "
             "frontier_goal_id=%llu rejected (incumbent=%llu) retry_in=%.0f ms",
             static_cast<unsigned long long>(candidate_frontier_id),
             static_cast<unsigned long long>(accepted_route_.frontier_goal_id),
@@ -1896,7 +1910,7 @@ class EpicGraphNode final : public rclcpp::Node {
          active_topo->odom_node_->neighbors_.empty())) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "EPIC rejected route without a connected topology head: path_nodes=%zu odom_degree=%zu",
+        "ScaleNav rejected route without a connected topology head: path_nodes=%zu odom_degree=%zu",
         path_nodes.size(), active_topo->odom_node_ ?
           active_topo->odom_node_->neighbors_.size() : 0U);
       path_nodes.clear();
@@ -1969,7 +1983,7 @@ class EpicGraphNode final : public rclcpp::Node {
       }
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "[EPIC route rejected] final published witness failed collision check; "
+        "[ScaleNav route rejected] final published witness failed collision check; "
         "frontier goal state cleared for fresh search");
     }
     if (found && stats.witness_collision_free && !using_accepted_route) {
@@ -1994,7 +2008,7 @@ class EpicGraphNode final : public rclcpp::Node {
       }
       RCLCPP_INFO(
         get_logger(),
-        "[EPIC route switch] reason=%s old_frontier_goal_id=%llu new_frontier_goal_id=%llu "
+        "[ScaleNav route switch] reason=%s old_frontier_goal_id=%llu new_frontier_goal_id=%llu "
         "route_aligned=%d route_lateral_error=%.2f m compatible_extension=%d "
         "route_length=%.2f route_remaining=%.2f",
         route_switch_reason,
@@ -2007,7 +2021,7 @@ class EpicGraphNode final : public rclcpp::Node {
       if (new_route_anchors > 0) {
         RCLCPP_INFO(
           get_logger(),
-          "[EPIC corridor memory] added=%zu total=%zu (persists across goal changes)",
+          "[ScaleNav corridor memory] added=%zu total=%zu (persists across goal changes)",
           new_route_anchors, active_topo->routeAnchorCount());
       }
       if (frontier_goal_changed) {
@@ -2030,7 +2044,7 @@ class EpicGraphNode final : public rclcpp::Node {
     if (!found) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "EPIC rolling route has no reachable real Bubble topology: "
+        "ScaleNav rolling route has no reachable real Bubble topology: "
         "odom_degree=%zu skeleton_nodes=%zu edges=%zu",
         active_topo->odom_node_->neighbors_.size(), stats.skeleton_nodes, stats.edges);
     }
@@ -2080,6 +2094,10 @@ class EpicGraphNode final : public rclcpp::Node {
       << ",\"witness_points\":" << stats.witness_points
       << ",\"astar_expanded_nodes\":" << astar_expanded_nodes
       << ",\"astar_edge_evaluations\":" << astar_edge_evaluations
+      << ",\"frontier_progress_replan\":"
+      << (frontier_progress_replan ? "true" : "false")
+      << ",\"frontier_replan_ratio\":" << frontier_replan_progress_ratio_
+      << ",\"mission_goal_direct\":" << (mission_goal_direct ? "true" : "false")
       << ",\"frontier_progress_t\":"
       << static_cast<double>(accepted_route_.frontier_goal_progress_t)
       << '}';
@@ -2113,7 +2131,7 @@ class EpicGraphNode final : public rclcpp::Node {
     }
 
     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
-      "[EPIC timing][update] rebuild_running=%d odom_connect=%.3f ms "
+      "[ScaleNav timing][update] rebuild_running=%d odom_connect=%.3f ms "
       "astar=%.3f ms publish=%.3f ms total=%.3f ms cloud=%zu skeleton_updates=%zu "
       "bubbles=%zu nodes=%zu edges=%zu path_nodes=%zu witness_points=%zu->%zu "
       "route_memory_points=%zu "
@@ -2139,7 +2157,8 @@ class EpicGraphNode final : public rclcpp::Node {
       "path_cost=%.2f geometry=%.2f semantic=%.2f clearance=%.2f "
       "local_graph_radius=%.1f m "
       "route_aligned=%d route_lateral_error=%.2f m "
-      "horizon_ready=%d frontier_half_replan=%d "
+      "horizon_ready=%d frontier_progress_replan=%d frontier_replan_ratio=%.2f "
+      "mission_goal_direct=%d "
       "route_length=%.2f route_remaining=%.2f "
       "frontier_initial_route_length=%.2f frontier_progress=%.2f frontier_progress_t=%.4f "
       "route_risk=%.3f "
@@ -2191,7 +2210,8 @@ class EpicGraphNode final : public rclcpp::Node {
       local_graph_radius_m_,
       static_cast<int>(route_aligned), static_cast<double>(route_lateral_error),
       static_cast<int>(route_has_planning_horizon),
-      static_cast<int>(frontier_half_consumed),
+      static_cast<int>(frontier_progress_replan), frontier_replan_progress_ratio_,
+      static_cast<int>(mission_goal_direct),
       static_cast<double>(accepted_route_length),
       static_cast<double>(accepted_route_remaining),
       static_cast<double>(accepted_route_.frontier_goal_initial_route_length_m),
@@ -2346,7 +2366,7 @@ class EpicGraphNode final : public rclcpp::Node {
     }
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), diagnostic_log_period_ms_,
-      "[EPIC odom diagnosis] pos=(%.2f,%.2f,%.2f) clearance=%.2f candidates=%zu "
+      "[ScaleNav odom diagnosis] pos=(%.2f,%.2f,%.2f) clearance=%.2f candidates=%zu "
       "search=(%.2f,%.2f,%.2f) anchor=%d tested=%zu connected=%zu no_path=%zu start_fail=%zu end_fail=%zu timeout=%zu "
       "shorten_fail=%zu",
       query_position.x(), query_position.y(), query_position.z(),
@@ -2473,6 +2493,7 @@ class EpicGraphNode final : public rclcpp::Node {
     const float route_risk_before = semanticRiskAlongRoute(topo, accepted_route_.witness_path);
     std::size_t semantic_nodes_updated = 0;
     std::size_t semantic_candidates = 0;
+    std::size_t semantic_height_rejected = 0;
     std::size_t semantic_connected_nodes = 0;
     float semantic_min_range_m = std::numeric_limits<float>::infinity();
     float semantic_max_range_m = 0.0F;
@@ -2497,12 +2518,21 @@ class EpicGraphNode final : public rclcpp::Node {
       std::vector<float> semantic_scores;
       std::vector<float> semantic_confidences;
       const Eigen::Vector3f origin = frame->origin;
+      const float fixed_layer_influence_m = static_cast<float>(std::max(
+        std::max(0.0, semantic_route_influence_m_),
+        std::max(0.0, semantic_point_influence_m_)));
       for (const auto &ray : rays) {
         if (static_cast<int>(semantic_centers.size()) >=
             std::max(0, semantic_point_max_nodes_)) break;
         const Eigen::Vector3f chosen = ray.point;
         const float distance = (chosen - origin).norm();
         if (!std::isfinite(distance) || distance < 1.0F) continue;
+        if (graph_fixed_layer_ &&
+            !scalenav_graph::semanticPointCanInfluenceFixedLayer(
+              chosen.z(), static_cast<float>(graph_layer_z_), fixed_layer_influence_m)) {
+          ++semantic_height_rejected;
+          continue;
+        }
         if (!topo->lidar_map_interface_->IsInBox(chosen)) continue;
         bool duplicate = false;
         for (const auto &existing : semantic_centers) {
@@ -2542,7 +2572,7 @@ class EpicGraphNode final : public rclcpp::Node {
         if (!prune.removed_ids.empty()) {
           RCLCPP_INFO_THROTTLE(
             get_logger(), *get_clock(), diagnostic_log_period_ms_,
-            "[EPIC semantic prune] before=%zu removed_behind=%zu "
+            "[ScaleNav semantic prune] before=%zu removed_behind=%zu "
             "removed_capacity=%zu after=%zu backtrack_margin=%.1f m max_nodes=%d",
             prune.before, prune.removed_behind, prune.removed_capacity, prune.after,
             virtual_semantic_backtrack_margin_m_, virtual_semantic_max_nodes_);
@@ -2572,23 +2602,27 @@ class EpicGraphNode final : public rclcpp::Node {
     const bool semantic_reset_requested = semantic_route_replan_enabled_ &&
       has_route_memory && (frame_delta_trigger || accumulated_delta_trigger || high_risk_trigger);
     semantic_replan_requested_ = semantic_replan_requested_ || semantic_reset_requested;
-    if (semantic_nodes_updated > 0) {
+    if (semantic_nodes_updated > 0 || semantic_height_rejected > 0) {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
-        "[EPIC semantic route] node_updates=%zu candidates=%zu guide_points=%zu "
+        "[ScaleNav semantic route] node_updates=%zu candidates=%zu height_rejected=%zu "
+        "guide_points=%zu "
         "risk=%.3f->%.3f delta=%.3f reference=%.3f request=%d high_latched=%d",
-        semantic_nodes_updated, semantic_candidates, accepted_route_.witness_path.size(),
+        semantic_nodes_updated, semantic_candidates, semantic_height_rejected,
+        accepted_route_.witness_path.size(),
         route_risk_before, route_risk_after,
         std::abs(route_risk_after - route_risk_before),
         evaluated_route_risk_, static_cast<int>(semantic_replan_requested_),
         static_cast<int>(high_risk_evaluated_));
     }
-    if (semantic_nodes_updated > 0) {
+    if (semantic_nodes_updated > 0 || semantic_height_rejected > 0) {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
-        "[EPIC semantic graph] virtual_depth=%.2f m candidates=%zu "
+        "[ScaleNav semantic graph] virtual_depth=%.2f m candidates=%zu height_rejected=%zu "
         "inserted_or_updated=%zu connected=%zu range=%.2f..%.2f m "
         "mode=REPULSION route_risk=%.3f->%.3f replan_requested=%d",
-        semantic_virtual_depth_m_, semantic_candidates, semantic_nodes_updated,
-        semantic_connected_nodes, semantic_min_range_m,
+        semantic_virtual_depth_m_, semantic_candidates, semantic_height_rejected,
+        semantic_nodes_updated,
+        semantic_connected_nodes,
+        std::isfinite(semantic_min_range_m) ? semantic_min_range_m : 0.0F,
         semantic_max_range_m, route_risk_before, route_risk_after,
         static_cast<int>(semantic_replan_requested_));
     }
@@ -2643,21 +2677,14 @@ class EpicGraphNode final : public rclcpp::Node {
   bool selectNextGoal(const std::vector<Eigen::Vector3f> &path, bool found,
                      float lookahead_m, Eigen::Vector3f &next_goal,
                      float minimum_progress_t = 0.0F,
-                     float terminal_progress_t = -1.0F,
                      const scalenav_graph::WitnessParametricCurve *curve = nullptr) const
   {
     Eigen::Vector3f layer_goal = goal_;
     if (graph_fixed_layer_) layer_goal.z() = static_cast<float>(graph_layer_z_);
 
-    // A consumed route can collapse to a single/empty witness while the
-    // vehicle is already at the mission endpoint.  In that terminal state,
-    // bypass witness validation and keep publishing the mission goal so the
-    // controller can finish instead of receiving a stop at its current pose.
-    const float terminal_t = terminal_progress_t >= 0.0F ? terminal_progress_t :
-      minimum_progress_t;
-    const bool terminal_goal = have_goal_ && terminal_t >= 0.99F &&
-      (position_ - layer_goal).norm() <= static_cast<float>(goal_connect_distance_m_);
-    if (terminal_goal) {
+    // Once the mission goal enters the local YOPO horizon, stop extending the
+    // global frontier and keep publishing the actual endpoint.
+    if (have_goal_ && mission_direct_goal_latched_) {
       next_goal = layer_goal;
       return next_goal.allFinite();
     }
@@ -2735,7 +2762,7 @@ class EpicGraphNode final : public rclcpp::Node {
     visualization_msgs::msg::Marker skeleton_nodes;
     skeleton_nodes.header.frame_id = visualization_frame_;
     skeleton_nodes.header.stamp = now();
-    skeleton_nodes.ns = "epic_skeleton_nodes";
+    skeleton_nodes.ns = "scalenav_skeleton_nodes";
     skeleton_nodes.id = 0;
     skeleton_nodes.type = visualization_msgs::msg::Marker::SPHERE_LIST;
     skeleton_nodes.action = visualization_msgs::msg::Marker::ADD;
@@ -2746,7 +2773,7 @@ class EpicGraphNode final : public rclcpp::Node {
 
     visualization_msgs::msg::Marker semantic_nodes_marker;
     semantic_nodes_marker.header = skeleton_nodes.header;
-    semantic_nodes_marker.ns = "epic_semantic_points";
+    semantic_nodes_marker.ns = "scalenav_semantic_points";
     semantic_nodes_marker.id = 0;
     semantic_nodes_marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
     semantic_nodes_marker.action = visualization_msgs::msg::Marker::ADD;
@@ -2761,7 +2788,7 @@ class EpicGraphNode final : public rclcpp::Node {
     std::vector<TopoNode::Ptr> semantic_label_candidates;
 
     visualization_msgs::msg::Marker edges_marker = skeleton_nodes;
-    edges_marker.ns = "epic_skeleton_edges";
+    edges_marker.ns = "scalenav_skeleton_edges";
     edges_marker.id = 2;
     edges_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
     edges_marker.scale.x = 0.045;
@@ -2770,7 +2797,7 @@ class EpicGraphNode final : public rclcpp::Node {
     edges_marker.colors.clear();
 
     visualization_msgs::msg::Marker witness_edges = edges_marker;
-    witness_edges.ns = "epic_edge_witness_paths";
+    witness_edges.ns = "scalenav_edge_witness_paths";
     witness_edges.id = 3;
     witness_edges.scale.x = 0.025;
     setColor(witness_edges.color, kCandidate, 0.55F);
@@ -2840,7 +2867,7 @@ class EpicGraphNode final : public rclcpp::Node {
       const auto &node = semantic_label_candidates[index];
       visualization_msgs::msg::Marker label;
       label.header = skeleton_nodes.header;
-      label.ns = "epic_semantic_point_labels";
+      label.ns = "scalenav_semantic_point_labels";
       label.id = static_cast<int>(index);
       label.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
       label.action = visualization_msgs::msg::Marker::ADD;
@@ -2860,7 +2887,7 @@ class EpicGraphNode final : public rclcpp::Node {
          index < previous_semantic_label_count_; ++index) {
       visualization_msgs::msg::Marker stale_label;
       stale_label.header = skeleton_nodes.header;
-      stale_label.ns = "epic_semantic_point_labels";
+      stale_label.ns = "scalenav_semantic_point_labels";
       stale_label.id = static_cast<int>(index);
       stale_label.action = visualization_msgs::msg::Marker::DELETE;
       semantic_labels.markers.push_back(std::move(stale_label));
@@ -2878,7 +2905,7 @@ class EpicGraphNode final : public rclcpp::Node {
     graph.markers.push_back(witness_edges);
 
     visualization_msgs::msg::Marker path_marker = edges_marker;
-    path_marker.ns = "epic_astar_topology_path";
+    path_marker.ns = "scalenav_astar_topology_path";
     path_marker.id = 4;
     path_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
     path_marker.points.clear();
@@ -2943,7 +2970,7 @@ class EpicGraphNode final : public rclcpp::Node {
           stats.witness_collision_free = false;
           RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 1000,
-            "[EPIC route rejected] selected edge has no valid witness: "
+            "[ScaleNav route rejected] selected edge has no valid witness: "
             "from=%llu to=%llu",
             static_cast<unsigned long long>(from->persistent_id_),
             static_cast<unsigned long long>(to->persistent_id_));
@@ -3006,7 +3033,7 @@ class EpicGraphNode final : public rclcpp::Node {
             "BUBBLE_OVERLAP" : "INVALID_PATH";
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 1000,
-          "[EPIC candidate rejected] reason=%s witness_index=%zu/%zu point=(%.2f,%.2f,%.2f) "
+          "[ScaleNav candidate rejected] reason=%s witness_index=%zu/%zu point=(%.2f,%.2f,%.2f) "
           "clearance=%.3f radius=%.3f predecessor=%zu distance=%.3f predecessor_radius=%.3f",
           reason, witness_info.failed_index, selected_witness_path.size(),
           witness_info.failed_point.x(), witness_info.failed_point.y(),
@@ -3030,7 +3057,7 @@ class EpicGraphNode final : public rclcpp::Node {
     }
 
     visualization_msgs::msg::Marker selected_witness = path_marker;
-    selected_witness.ns = "epic_selected_witness_path";
+    selected_witness.ns = "scalenav_selected_witness_path";
     selected_witness.id = 5;
     selected_witness.scale.x = 0.14;
     setColor(selected_witness.color, kSelectedPath, found ? 1.0F : 0.25F);
@@ -3044,7 +3071,7 @@ class EpicGraphNode final : public rclcpp::Node {
     // progress and lookahead sampling.  Keep it separate from the executable
     // witness so RViz makes fit error and endpoint overshoot visible.
     visualization_msgs::msg::Marker polynomial_witness = path_marker;
-    polynomial_witness.ns = "epic_polynomial_witness_path";
+    polynomial_witness.ns = "scalenav_polynomial_witness_path";
     polynomial_witness.id = 13;
     polynomial_witness.type = visualization_msgs::msg::Marker::LINE_STRIP;
     polynomial_witness.scale.x = 0.075;
@@ -3077,15 +3104,13 @@ class EpicGraphNode final : public rclcpp::Node {
 
     Eigen::Vector3f computed_next_goal = position_;
     // Subgoal follows monotonic witness time only; YOPO handles lateral avoidance.
-    const float terminal_progress_t = accepted_route_.valid ?
-      accepted_route_.frontier_goal_progress_t : minimum_route_progress_t;
     const bool computed_has_next_goal = selectNextGoal(
       local_guide_path, found, effective_lookahead_m, computed_next_goal,
-      local_guide_progress_t, terminal_progress_t, active_curve);
+      local_guide_progress_t, active_curve);
     if (found && !selected_witness_path.empty() && !computed_has_next_goal) {
       RCLCPP_ERROR_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "EPIC found a topology route but rejected its local goal; "
+        "ScaleNav found a topology route but rejected its local goal; "
         "the witness path is not a valid fixed-height path");
     }
     const Eigen::Vector3f local_goal_offset = previous_local_goal_ - position_;
@@ -3102,7 +3127,7 @@ class EpicGraphNode final : public rclcpp::Node {
     const bool has_local_goal = computed_has_next_goal || hold_local_goal;
     const Eigen::Vector3f local_goal = hold_local_goal ? previous_local_goal_ : computed_next_goal;
     visualization_msgs::msg::Marker next_goal_marker = skeleton_nodes;
-    next_goal_marker.ns = "epic_local_goal";
+    next_goal_marker.ns = "scalenav_local_goal";
     next_goal_marker.id = 6;
     next_goal_marker.type = visualization_msgs::msg::Marker::SPHERE;
     next_goal_marker.points.clear();
@@ -3130,7 +3155,7 @@ class EpicGraphNode final : public rclcpp::Node {
       const Eigen::Vector3f topology_frontier_goal = found && !path_nodes.empty() ?
         path_nodes.back()->center_ : accepted_route_.frontier_goal;
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
-        "[EPIC goals] vehicle=(%.2f,%.2f,%.2f) mission_goal=(%.2f,%.2f,%.2f) "
+        "[ScaleNav goals] vehicle=(%.2f,%.2f,%.2f) mission_goal=(%.2f,%.2f,%.2f) "
         "topology_anchor=(%.2f,%.2f,%.2f) frontier_goal=(%.2f,%.2f,%.2f) "
         "local_goal=(%.2f,%.2f,%.2f) local_goal_distance=%.2f m "
         "local_goal_to_frontier=%.2f m vehicle_to_frontier=%.2f m "
@@ -3159,7 +3184,7 @@ class EpicGraphNode final : public rclcpp::Node {
     graph.markers.push_back(next_goal_marker);
 
     visualization_msgs::msg::Marker vehicle_marker = skeleton_nodes;
-    vehicle_marker.ns = "epic_vehicle_pose";
+    vehicle_marker.ns = "scalenav_vehicle_pose";
     vehicle_marker.id = 7;
     vehicle_marker.type = visualization_msgs::msg::Marker::ARROW;
     vehicle_marker.action = visualization_msgs::msg::Marker::ADD;
@@ -3177,7 +3202,7 @@ class EpicGraphNode final : public rclcpp::Node {
     graph.markers.push_back(vehicle_marker);
 
     visualization_msgs::msg::Marker goal_marker = skeleton_nodes;
-    goal_marker.ns = "epic_global_goal";
+    goal_marker.ns = "scalenav_global_goal";
     goal_marker.id = 8;
     goal_marker.type = visualization_msgs::msg::Marker::SPHERE;
     goal_marker.action = have_goal_ ? visualization_msgs::msg::Marker::ADD :
@@ -3195,7 +3220,7 @@ class EpicGraphNode final : public rclcpp::Node {
     // The rolling A* frontier goal is distinct from both the mission goal and
     // the short local execution goal. Make all three visible in RViz.
     visualization_msgs::msg::Marker frontier_goal_marker = goal_marker;
-    frontier_goal_marker.ns = "epic_frontier_goal";
+    frontier_goal_marker.ns = "scalenav_frontier_goal";
     frontier_goal_marker.id = 10;
     frontier_goal_marker.action = accepted_route_.valid ?
       visualization_msgs::msg::Marker::ADD : visualization_msgs::msg::Marker::DELETE;
@@ -3207,7 +3232,7 @@ class EpicGraphNode final : public rclcpp::Node {
     graph.markers.push_back(frontier_goal_marker);
 
     visualization_msgs::msg::Marker frontier_goal_label = goal_marker;
-    frontier_goal_label.ns = "epic_frontier_goal_label";
+    frontier_goal_label.ns = "scalenav_frontier_goal_label";
     frontier_goal_label.id = 11;
     frontier_goal_label.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
     frontier_goal_label.action = accepted_route_.valid ?
@@ -3221,7 +3246,7 @@ class EpicGraphNode final : public rclcpp::Node {
     graph.markers.push_back(frontier_goal_label);
 
     visualization_msgs::msg::Marker subgoal_label = goal_marker;
-    subgoal_label.ns = "epic_local_goal_label";
+    subgoal_label.ns = "scalenav_local_goal_label";
     subgoal_label.id = 12;
     subgoal_label.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
     subgoal_label.action = has_local_goal ?
@@ -3235,7 +3260,7 @@ class EpicGraphNode final : public rclcpp::Node {
     graph.markers.push_back(subgoal_label);
 
     visualization_msgs::msg::Marker vehicle_label = skeleton_nodes;
-    vehicle_label.ns = "epic_vehicle_label";
+    vehicle_label.ns = "scalenav_vehicle_label";
     vehicle_label.id = 9;
     vehicle_label.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
     vehicle_label.action = visualization_msgs::msg::Marker::ADD;
@@ -3250,7 +3275,7 @@ class EpicGraphNode final : public rclcpp::Node {
     graph.markers.push_back(vehicle_label);
 
     visualization_msgs::msg::Marker goal_label = vehicle_label;
-    goal_label.ns = "epic_goal_label";
+    goal_label.ns = "scalenav_goal_label";
     goal_label.id = 10;
     const Eigen::Vector3f goal_label_position =
       goal_ + Eigen::Vector3f(0.0F, 0.0F, 0.8F);
@@ -3266,7 +3291,7 @@ class EpicGraphNode final : public rclcpp::Node {
     visualization_msgs::msg::MarkerArray bubbles;
     visualization_msgs::msg::Marker delete_bubbles;
     delete_bubbles.header = skeleton_nodes.header;
-    delete_bubbles.ns = "epic_real_bubbles";
+    delete_bubbles.ns = "scalenav_real_bubbles";
     delete_bubbles.id = 0;
     delete_bubbles.action = visualization_msgs::msg::Marker::DELETEALL;
     bubbles.markers.push_back(delete_bubbles);
@@ -3274,7 +3299,7 @@ class EpicGraphNode final : public rclcpp::Node {
     stats.bubbles = bubble_snapshot.size();
     visualization_msgs::msg::Marker bubble_list;
     bubble_list.header = skeleton_nodes.header;
-    bubble_list.ns = "epic_real_bubbles";
+    bubble_list.ns = "scalenav_real_bubbles";
     bubble_list.id = 1;
     bubble_list.type = visualization_msgs::msg::Marker::SPHERE_LIST;
     bubble_list.action = visualization_msgs::msg::Marker::ADD;
@@ -3351,8 +3376,8 @@ class EpicGraphNode final : public rclcpp::Node {
     next_goal_frame_, clearance_topic_, timing_topic_;
   std::string visualization_frame_;
   std::string odom_twist_frame_ = "world";
-  std::string flight_statistics_file_ = "epic_flight_statistics.csv";
-  std::string graph_log_file_ = "epic_graph_snapshots.jsonl";
+  std::string flight_statistics_file_ = "scalenav_flight_statistics.csv";
+  std::string graph_log_file_ = "scalenav_graph_snapshots.jsonl";
   double trajectory_speed_color_max_mps_ = 6.0;
   std::size_t trajectory_max_points_ = 50000;
   double map_margin_ = 20.0;
@@ -3368,10 +3393,11 @@ class EpicGraphNode final : public rclcpp::Node {
   double skeleton_rebuild_period_ms_ = 200.0;
   int diagnostic_log_period_ms_ = 2000;
   double local_goal_min_advance_m_ = 0.75;
-  double local_goal_lookahead_m_ = 10.0;
+  double local_goal_lookahead_m_ = 15.0;
+  double frontier_replan_progress_ratio_ = 0.40;
   int route_plan_period_ms_ = 100;  // launch compatibility; see update()
   double local_goal_reserve_m_ = 0.0;  // launch compatibility; see update()
-  double local_graph_radius_m_ = 35.0;
+  double local_graph_radius_m_ = 45.0;
   double frontier_goal_margin_m_ = 3.5;
   double frontier_progress_loss_weight_ = 0.5;
   double frontier_direction_loss_weight_ = 0.35;
@@ -3387,6 +3413,7 @@ class EpicGraphNode final : public rclcpp::Node {
   double semantic_route_switch_risk_margin_ = 0.08;
   double semantic_route_switch_cost_ratio_ = 0.90;
   double semantic_route_influence_m_ = 5.0;
+  double semantic_point_influence_m_ = 5.0;
   double semantic_visualization_max_score_ = 0.4;
   double semantic_baseline_quantile_ = 0.25;
   double semantic_virtual_depth_m_ = 30.0;
@@ -3502,6 +3529,7 @@ class EpicGraphNode final : public rclcpp::Node {
   float graph_odom_yaw_ = 0.0F;
   bool have_odom_ = false;
   bool have_goal_ = false;
+  bool mission_direct_goal_latched_ = false;
   bool have_cloud_ = false;
   std::atomic<bool> graph_initialized_{false};
   std::atomic<bool> have_graph_odom_{false};
@@ -3524,7 +3552,7 @@ int main(int argc, char **argv)
   std::signal(SIGSEGV, crashSignalHandler);
   std::signal(SIGABRT, crashSignalHandler);
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<EpicGraphNode>();
+  auto node = std::make_shared<ScaleNavGraphNode>();
   rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
   executor.add_node(node);
   executor.spin();

@@ -6,13 +6,13 @@
 
 - 深度图：`depth/*.pgm`，16-bit PGM，单位毫米；不支持的编码保留为 `*.bin`。
 - 点云和 free-ray：`pointcloud/*.pcd`，PCD ASCII，支持按 stride 和最大点数抽样。
-- graph、bubbles、path：`graph/*.json`，保留 marker 类型、命名空间、颜色、姿态和点序列。
+- graph、bubbles、path：`graph/*.json`，保留 marker 类型、命名空间、颜色、姿态和点序列。完整 graph 默认以 2 Hz 记录，bubbles/path 保持源话题频率。
 - odometry、goal、semantic heatmap：结构化写入 `index.jsonl`。
 - trajectory control 使用 logger 接收时间，并记录 position、velocity、acceleration 和由连续命令计算的 jerk。
 - `mission` 记录每个新目标的开始，以及进入 0.5 m 目标域并降到 0.3 m/s 后的完成事件。
 - `/sim/collision` 的状态变化和累计碰撞标志记录为 `collision`；它是仿真碰撞标签，不由 clearance 推断。
-- `/epic/timing` 的每周期结构化计时记录为 `timing`，用于计算真实 mean/P99，而不是从节流文本日志采样。
-- 规划器净空：`/epic/clearance` 自动写为 `clearance` 事件，包含车辆净空、当前路径最小净空和平均净空；数值来自 Bubble A* 使用的同一障碍距离场。
+- `/scalenav/timing` 的每周期结构化计时记录为 `timing`，用于计算真实 mean/P99，而不是从节流文本日志采样。
+- 净空诊断：`/scalenav/clearance` 自动写为 `clearance` 事件。`vehicle_m` 是飞机当前位置的实际执行净空诊断；`global_witness_min_m` 和 `global_witness_mean_m` 只描述 ScaleNav 全局 witness 在当前障碍距离场中的参考净空。YOPO 会围绕该全局引导独立执行局部避障，因此 witness 净空不等于实际飞行净空，也不参与碰撞、成功或安全判定。旧日志中的同义字段为 `path_min_m` 和 `path_mean_m`。
 
 论文评测以第一个非平凡目标为单程任务：到达目标并停止后结束 trial，不把返程计入时间、里程或成功率。`analyze_flight_logs.py --mission-mode all` 仅用于诊断旧的多段日志。
 

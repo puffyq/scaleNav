@@ -60,187 +60,92 @@ for Vision-Based Aerial Navigation
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{abstract}
-A reactive flight policy can avoid nearby obstacles, but it cannot remember a
-detour around a long wall or use semantic evidence beyond valid depth.
-ScaleNav adds this missing route-level memory to a neural local planner.  A
-bounded graph stores collision-checked free-space bubbles and witness paths.
-A frozen open-vocabulary model provides sparse image-space risk observations.
-Measured observations update graph nodes, while depth-clipped observations
-become persistent far-field hypotheses.  Each hypothesis induces a continuous
-risk field on nearby witness paths, allowing an early branch decision without
-changing geometric validity.  The selected witness is stored in world
-coordinates and remapped after asynchronous graph updates, which preserves
-route identity without stale node pointers.
-
-The accepted witness is converted into an ordered local corridor.  A
-corridor-conditioned local policy receives this corridor together with depth,
-motion, and the frontier goal, then generates a dynamically feasible primitive
-inside the committed route.  The topological layer also publishes a 10-m local
-goal for execution.  Thus ScaleNav adds long-horizon memory and
-language-conditioned route preference without an occupancy grid or ESDF.  On
-an independent 1,800-route single-step offline benchmark, corridor conditioning
-reduces collision rate from $7.78\%$ to $0.33\%$ and corridor violation from $54.33\%$ to
-$8.67\%$, while average progress changes from $6.117$~m to $4.230$~m.
+A reactive flight policy cannot remember a detour around a long obstacle or
+use semantic evidence beyond valid depth.  ScaleNav adds route-level memory to
+a neural local planner through a bounded graph of collision-checked free-space
+bubbles and witness paths.  Depth-clipped open-vocabulary observations become
+persistent far-field hypotheses whose continuous risk fields rank nearby
+witnesses without changing geometric validity.  The selected world-frame
+witness is remapped after asynchronous graph updates and converted into an
+ordered corridor for dynamically feasible local execution.  ScaleNav therefore
+adds long-horizon, language-conditioned route preference without an occupancy
+grid or ESDF.  On an independent 1,800-route offline benchmark, corridor
+conditioning reduces collision from $7.78\%$ to $0.33\%$ and corridor violation
+from $54.33\%$ to $8.67\%$, while progress changes from $6.117$ to $4.230$~m.
 \end{abstract}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{INTRODUCTION}
-Autonomous flight in an unknown environment requires a quadrotor to solve two
-planning problems at once.  It must react to branches and narrow gaps in the
-current depth image.  It must also remember which side of a large obstacle
-leads toward a distant goal.  The first task calls for a fast local policy;
-the second calls for persistent spatial structure.
+Unknown-environment flight couples fast local avoidance with a slower route
+decision.  One-stage neural planners map depth, motion, and a relative goal to
+dynamically feasible trajectories \cite{yopo}, but their sensing horizon cannot
+resolve an early left--right choice around a long obstacle.  RGB may also
+recognize risk beyond valid depth, yet a reactive policy has nowhere to retain
+that evidence.
 
-One-stage neural planners map depth, motion state, and a relative goal to
-short, dynamically feasible trajectories \cite{yopo}.  Their planning horizon
-is bounded by the current sensing range.  A long wall can therefore force an
-early left-or-right
-decision whose consequence is invisible in one frame.  Open-vocabulary
-perception creates a second mismatch.  An RGB model may recognize a risky
-structure beyond valid depth, but a reactive policy has no persistent state in
-which to store or use that evidence.
-
-We present ScaleNav, a route-level system that resolves both mismatches.  Depth
-builds a persistent graph of free-space bubbles connected by
-collision-checked witness paths.  Open-vocabulary image evidence becomes a
-continuous risk field on those paths.  A depth-clipped semantic ray creates a
-far-field node at a fixed optical depth.  Its distance to each witness changes
-route cost before the risk enters the depth range.  The topological planner
-then commits an accepted witness and a frontier goal.  The witness is converted
-into a fixed number of safe corridor bubbles and passed to a corridor-
-conditioned local policy with depth, motion, and the frontier goal.  The topological
-planner selects the route; the local policy selects the executable primitive
-inside that route.
-
-The separation between semantics and geometry is deliberate.  ScaleNav does
-not label an edge safe or unsafe, and it does not feed a semantic heatmap
-directly to the policy.  Semantics only ranks collision-valid branches.
-Geometric collision checking remains the sole source of validity.  A semantic
-error may select a poor route, but it cannot certify an occupied edge as free.
-
-Route persistence is also independent of the current graph representation.
-The graph is rebuilt asynchronously as new depth arrives, so node addresses
-and local clusters may change while the physical corridor remains valid.
-ScaleNav stores the accepted witness in the world frame, remaps a forward
-window to the new graph, and applies a soft route prior.  Hysteresis suppresses
-unnecessary branch changes, while a risk-triggered release preserves the
-ability to replan when new evidence changes the route preference.
+ScaleNav resolves both mismatches.  Depth builds a persistent graph of
+free-space bubbles and collision-checked witness paths.  A depth-clipped
+semantic ray creates a far-field node at fixed optical depth, and its
+continuous field changes witness cost before the risk enters depth range.  The
+planner commits a world-frame witness, remaps it after asynchronous graph
+replacement, and supplies an ordered safe corridor to the local policy.
+Semantics only ranks collision-valid alternatives: it can select a poor route
+but cannot certify occupied space as free.
 
 The main contributions are:
 \begin{itemize}
+  \setlength\itemsep{0pt}
   \item \textbf{Semantic foresight on free-space topology.}
-  Open-vocabulary evidence is represented as a continuous risk field over
-  collision-checked witness paths, enabling early branch selection without
-  changing geometric validity.
+  Continuous open-vocabulary risk over collision-checked witnesses enables
+  early branch selection without changing validity.
   \item \textbf{Persistent far-field semantic nodes.}
-  Depth-clipped observations become bounded, graph-connected hypotheses at a
-  fixed optical depth and are promoted when measured bubbles reach them.
+  Depth-clipped observations persist as bounded hypotheses and are promoted
+  when measured bubbles reach them.
   \item \textbf{Route identity across graph replacement.}
-  A world-frame witness and hysteretic route gate preserve the incumbent route
-  across asynchronous topology updates without stale node pointers.
+  A world-frame witness and hysteretic gate preserve the route across
+  asynchronous updates without stale pointers.
   \item \textbf{Corridor-conditioned local execution.}
-  An accepted witness becomes an ordered corridor for a corridor-conditioned
-  local policy, which generates dynamics-aware primitives without an occupancy
-  grid or ESDF.
+  The accepted witness conditions dynamics-aware primitives without an
+  occupancy grid or ESDF.
 \end{itemize}
 
-We evaluate the complete route contract in paired simulation experiments and
-report the current offline corridor-conditioned benchmark.  The experiments
-separate
-topology, semantic foresight, route stability, local route adherence, and
-system cost.  All semantic results in this paper use PEARL; transfer to other
-vision--language front ends is outside the present evaluation.
+The evaluation separates system integration, local route adherence, and graph
+persistence.  All reported semantic observations use PEARL.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.98\textwidth]{pics/system_architecture_paper.pdf}
-\caption{ScaleNav system architecture. Depth builds Bubble topology and
-collision-checked edge witnesses. RGB and the text query produce patch scores
-that are projected at fixed optical depth into persistent graph-node semantic
-state; later Bubble overlap promotes an \texttt{Unknown} semantic node to
-\texttt{Verified}. Continuous witness risk enters rolling A* and the route
-gate, which maintain \texttt{frontier\_goal} and the accepted witness. A
-10-m lookahead on that witness produces \texttt{local\_goal}, while ordered
-witness corridor bubbles are extracted from the accepted witness and passed to
-a corridor-conditioned local policy. Semantics changes route cost but cannot create or
-validate an edge.}
+\caption{ScaleNav architecture.  Depth builds Bubble topology and checked
+witnesses; RGB and text produce persistent semantic state.  Witness risk enters
+rolling A* and the route gate.  The accepted witness provides the frontier and
+local goals and an ordered corridor for local execution.  Semantics changes
+cost, never edge validity.}
 \label{fig:architecture}
 \end{figure*}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{RELATED WORK}
-\subsection{Local Reactive Flight}
-Depth-based reactive planners trade global consistency for low latency.
-RAPPIDS partitions a single depth image into rectangular pyramids and tests
-candidate trajectories against them \cite{rappids}.
-NanoMap keeps a short history of raw range measurements and answers
-uncertainty-aware proximity queries without fusing a global map
-\cite{nanomap}.
-EGO-Planner removes the ESDF from the local optimization loop
-\cite{egoplanner}, and learned policies collapse sensing, search, and
-optimization into a single network pass \cite{yopo,loquercio}.
-Classical quadrotor systems combine kinodynamic search with online collision
-checking; Fast-Planner emphasizes efficient polynomial replanning in unknown
-3-D space \cite{fastplanner}, while FASTER separates a safe graph search from
-trajectory optimization under limited sensing \cite{faster}.  SUPER pushes this
-line further with dual trajectories over point-cloud corridors, demonstrating
-safety-assured flight above $20$~m/s in cluttered scenes \cite{super}.
-SUPER is therefore a strong geometric and dynamic baseline, but it does not
-formulate text-conditioned homotopy selection or preserve a semantic route
-identity across asynchronous graph replacement.  ScaleNav does not claim to
-replace SUPER's safety guarantees or match its demonstrated maximum speed;
-its contribution is the orthogonal route-memory and semantic-preference
-interface above a local planner.  These designs motivate our separation
-between a route-level witness and the local primitive.
-These methods optimize motion from the current observation or a short local
-history.  They do not expose a persistent route state that can remember which
-side of a distant wall was selected.  ScaleNav retains their fast reactive role
-and adds route memory and semantic preference at a separate layer.
+Reactive planners trade global consistency for latency: RAPPIDS queries a
+depth image \cite{rappids}, EGO-Planner avoids ESDF construction
+\cite{egoplanner}, and YOPO directly generates motion \cite{yopo}.  FASTER
+combines safe search with trajectory optimization \cite{faster}; SUPER advances
+this line with safety-assured point-cloud corridors above $20$~m/s
+\cite{super}.
+ScaleNav does not reproduce SUPER's guarantee or speed.  It adds the orthogonal
+interface of text-conditioned route memory above a local executor.
 
-\subsection{Persistent Free-Space Structure}
-A second line of work builds structure that outlives one sensor frame.
-The frontier formulation of Yamauchi \cite{yamauchi}, the incremental
-frontier structure in FUEL \cite{fuel}, and the hierarchical exploration
-roadmap of TARE \cite{tare} establish the route-level exploration
-view.  OctoMap stores probabilistic occupancy in an octree \cite{octomap},
-whereas Voxblox maintains distance-field representations for planning
-\cite{voxblox}.
-Bubble Planner extends receding safe corridors for
-high-speed flight \cite{bubble}.
-Prior bubble-graph methods cluster free-space spheres from point clouds into
-lightweight topologies for large-scale exploration \cite{epic}.
-These structures are geometric: their costs encode distance or information
-gain, so a text query such as ``avoid the crowd'' has no representation.
-ScaleNav uses the same lightweight free-space abstraction but solves a
-different problem.
-It performs goal-directed rolling search, preserves a selected witness
-route across asynchronous graph replacement, and lets edges carry
-open-vocabulary risk while geometric validity remains unchanged.
+Persistent maps include hierarchical roadmaps \cite{tare}, distance fields
+\cite{voxblox}, and receding or clustered free-space corridors
+\cite{bubble,epic}.  Their costs remain geometric.  ScaleNav instead preserves
+a selected witness across graph replacement and attaches open-vocabulary risk
+without changing collision validity.
 
-\subsection{Open-Vocabulary Perception and Semantic Navigation}
-Open-vocabulary models supply image evidence beyond a fixed label set.
-CLIP aligns image and text embeddings \cite{clip}, and PEARL produces
-training-free open-vocabulary segmentation aligned with image geometry
-\cite{pearl}.
-Language-driven segmentation provides dense text-conditioned masks
-\cite{lseg}, while Segment Anything supplies class-agnostic masks that can be
-associated with a query by a separate embedding model \cite{sam}.  Recent
-open-set 3-D systems such as ConceptFusion and OpenScene lift these signals
-into mapped scene representations \cite{conceptfusion,openscene}.
-On the planning side, VLFM builds vision-language value maps to select
-frontiers for object navigation \cite{vlfm}, RayFronts encodes open-set
-semantics on both mapped voxels and beyond-range rays for online
-exploration \cite{rayfronts}, and WildOS scores the frontier nodes of a
-sparse navigation graph with a vision-language module to search for
-open-vocabulary objects beyond the depth horizon \cite{wildos}.
-These systems bring semantics into the map or the frontier score, but the
-map itself is the product; how a route should bend around a risky region
-before the sensor reaches it is left to a separate decision layer.  WildOS
-attracts a robot toward a queried object; avoidance instead requires risk to
-repel a route, continuously along its length rather than only at its
-terminal.  ScaleNav targets exactly this interface: sparse image-space
-observations become persistent costs on free-space edges, including evidence
-whose depth is clipped, while collision validity remains purely geometric.
+Open-vocabulary models align text with image regions \cite{clip,pearl} and can
+be lifted into 3-D maps \cite{openscene}.  VLFM selects
+semantic frontiers, RayFronts retains beyond-range semantic rays, and WildOS
+scores sparse graph frontiers for object search \cite{vlfm,rayfronts,wildos}.
+ScaleNav addresses avoidance: risk repels a route continuously along its
+witness, including before depth reaches the observation.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{PROBLEM FORMULATION}
@@ -357,7 +262,7 @@ It prefers open routes but does not declare a narrow valid edge invalid.
 Geometric feasibility remains determined by the bubble graph and its witness
 checks.
 
-\begin{figure}[t]
+\begin{figure}[!t]
 \centering
 \includegraphics[width=\columnwidth]{pics/semantic_risk_field_paper.pdf}
 \caption{Real logged ScaleNav decision in Map2.  The left panel is the logged
@@ -596,34 +501,14 @@ growth $O(N_{\max}+V+E+M)$ independent of flight duration.  These bounds keep
 the slow route layer from competing with the fixed-rate local controller.
 
 \subsection{Corridor-Conditioned Local Policy}
-\begin{figure}[t]
-\centering
-\includegraphics[width=0.94\columnwidth]{pics/corridor_motivation_paper.pdf}
-\caption{When both homotopies are geometrically passable, the unconstrained
-policy shortcuts off-route and is forced into a large detour later, whereas
-the corridor-conditioned policy tracks the remembered witness.}
-\label{fig:corridor_motivation}
-\end{figure}
+A frontier goal communicates where to move but not which homotopy to preserve;
+an endpoint-conditioned policy can therefore shortcut away from the accepted
+witness.  ScaleNav publishes a 10-m local goal and conditions the policy on an
+ordered corridor extracted from the same witness.
 
-Figure~\ref{fig:corridor_motivation} exposes the central interface mismatch.
-At the illustrated fork, both homotopies are locally collision-free, so an
-endpoint-conditioned policy can prefer the apparently shorter left branch
-even though the slow graph layer has committed to the right-hand witness.
-After this shortcut leaves the selected homotopy, recovering the route
-requires a large detour.  A frontier goal communicates \emph{where} to move
-but not \emph{which route} to preserve; consequently, route identity can be
-lost exactly at the graph-to-policy boundary.  This failure motivates passing
-the remembered witness as an explicit corridor constraint.
-The graph publishes the accepted witness, and a 10-m lookahead on that
-witness produces the local goal $\vect{g}^{\mathrm{loc}}_t$.
-The same accepted witness is further processed into an ordered set of
-witness corridor bubbles that condition the local policy.
-
-The accepted witness is refined to a clearance-centered corridor: its vertices
-are adjusted with fixed endpoints and protected turning points, and moves are
-accepted only if every witness segment remains continuously safe and the
-bottleneck clearance improves.
-From the refined witness we sample ordered corridor bubbles
+The witness is refined with fixed endpoints and protected turns; an adjustment
+is accepted only when every segment stays safe and bottleneck clearance
+improves.  We then sample ordered bubbles
 \begin{equation}
  b_k=(\vect{c}_k,r_k),\quad
  r_k=\max\left(0,d(\vect{c}_k)-r_{\mathrm{rob}}-r_{\mathrm{safe}}\right),
@@ -637,10 +522,9 @@ fixed-$K$ ordered bubble list with a route mask:
  \qquad K=12,
 \label{eq:route_input}
 \end{equation}
-where $m_k\in\{0,1\}$ is the route mask.  The deployed contract also carries
-the route identifier, timestamp, frame identifier, remaining route length,
-quality flags, and validity bit.  Invalid or expired routes mask all bubbles
-and enter the explicit frontier-only fallback.
+where $m_k\in\{0,1\}$ is the route mask.  The contract also carries route
+identity, timestamp, frame, remaining length, quality, and validity.  Invalid
+routes mask all bubbles and recover the frontier-only input.
 Figure~\ref{fig:corridor_policy} summarizes the resulting local-policy
 interface and primitive selection.
 
@@ -657,39 +541,17 @@ obstacles.}
 \label{fig:corridor_policy}
 \end{figure}
 
-The network still predicts primitive terminal states and scores; the
-trajectory generator is unchanged.
-The score cost adds a route term that prefers staying inside the selected
-corridor while progressing along its arc length and aligning with the local
-witness tangent:
+The network and trajectory generator remain unchanged; the score adds a route
+term over sampled primitive points:
 \begin{equation}
  L_{\mathrm{cor}}=\frac{1}{N}\sum_{n=1}^{N}
  \min_k\max\left(0,\|\vect{p}_n-\vect{c}_k\|_2-r_k\right)^2.
 \label{eq:corridor_loss}
 \end{equation}
-There is no behavior cloning: the witness is a geometric corridor, not a
-timed expert trajectory.
-This gives a clear failure boundary: the graph chooses which corridor to
-follow, while the local policy decides the exact trajectory inside it.
-
-The real logged evidence-to-route event in Fig.~\ref{fig:risk_field} shows the
-same contract at system level: PEARL produces a sparse response, the response
-is retained as far-field state, and the next graph update recomputes witness
-exposure before selecting a route.  This is separate from local primitive
-selection.  The local policy still has all 15 alternatives at every update,
-while the accepted witness supplies the stable geometric target between graph
-updates.
-
-The training objective keeps YOPO's smoothness, acceleration, safety, and
-frontier terms.  We add the corridor penalty in (\ref{eq:corridor_loss}) on
-30 uniformly sampled points of each polynomial primitive.  A trajectory point
-is penalized only when it lies outside every valid bubble; the maximum
-pointwise violation is weighted in addition to the mean violation.  Auxiliary
-progress and tangent quantities are logged for diagnosis and route-quality
-analysis, while the released training objective uses the corridor term as the
-sole new route supervision.  This prevents the corridor from becoming a
-behavior-cloning target and preserves YOPO's ability to slow down or bend
-around newly observed obstacles.
+The witness is geometric, not a timed expert trajectory: the graph selects the
+corridor and the policy retains all 15 primitives within it.  Training keeps
+YOPO's original terms and adds (\ref{eq:corridor_loss}) over 30 samples, with
+extra weight on the maximum violation.  No behavior cloning is used.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{EXPERIMENTS}
@@ -806,8 +668,11 @@ the goal command until the vehicle enters the goal tolerance with admissible
 speed, and $\bar v=L/T$.  Raw $L$, $T$, and $\bar v$ are reported over
 successful trials; failures remain represented by success, collision,
 $\eta_{\rm SPL}$, and the fixed timeout.  This prevents early failures from
-appearing artificially short or fast.  Minimum clearance is retained as a
-secondary safety diagnostic.
+appearing artificially short or fast.  Minimum clearance at the executed
+vehicle position is retained as a secondary safety diagnostic.  Clearance of
+the ScaleNav global witness is reported only as a guide-quality diagnostic:
+YOPO performs local obstacle avoidance around that guide, so witness clearance
+is neither executed-flight clearance nor collision ground truth.
 
 The language comparison additionally reports the change in selected route,
 query compliance, decision distance, route-switch count, and semantic exposure
@@ -818,107 +683,55 @@ recall, task compliance, and stale-response rejection are reported only for
 the open-vocabulary front end.
 
 \subsubsection{Results}
-Closed-loop entries are reported only after all paired trials for a condition
-pass the same logging and validation protocol.  A dash denotes an unreported
-measurement, not a zero.
-Table~\ref{tab:main_results}
-reports closed-loop navigation performance across the selected scenario
-families.  A trial is successful only if the vehicle reaches the goal without
-collision or timeout while satisfying the common kinematic limits.  Path, time, and
-speed use successful trials, while $\eta_{\rm SPL}$ and success include every
-trial according to the definition above.
+Figure~\ref{fig:map2_speed_trajectories} visualizes one recorded Map2 run per
+method over a common point-cloud reconstruction.  EGO-Planner and SUPER are
+shown for runs that reach the same longitudinal wall region near $y=81.5$~m
+before collision.  Incomplete trajectories are retained rather than
+extrapolated to the goal.
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=0.72\columnwidth]{pics/experiments/map2_0_140_1p6/trajectory_speed_comparison.pdf}
+\vspace{-2pt}
+\caption{Recorded Map2 trajectories from $(0,0,1.6)$~m to
+$(0,140,1.6)$~m over the complete UE Map2 truth map, voxelized at 0.3~m
+with one-cell display dilation.  Color denotes executed speed; circles, stars,
+and crosses mark starts, completed goals, and incomplete collision endpoints,
+respectively.}
+\label{fig:map2_speed_trajectories}
+\end{figure}
+
+The current Map2 logs provide the single-run integration check in
+Table~\ref{tab:single_run_validation}.  These values verify the common
+simulator and logging pipeline only and do not support an aggregate ranking.
+All four runs use the same validated initial view.  EGO-Planner's observation
+ends at its first latched collision.  SUPER completes the mission using the
+released 5~m/s trajectory limit, with backup trajectories enabled and the
+ROS2 backup-penalty key synchronized to the released ROS1 configuration.  A
+separate 6~m/s-limit stress run collided and is not mixed with this row.
 
 \begin{table}[t]
-\caption{Closed-Loop Navigation Performance}
-\label{tab:main_results}
+\caption{Single-Run Map2 Pipeline Validation}
+\label{tab:single_run_validation}
 \centering
 \small
 \resizebox{\columnwidth}{!}{%
-\begin{tabular}{lcccccccc}
+\begin{tabular}{lccccccc}
 \toprule
-Method & Succ. (\%) & Safe (\%) & Coll. (\%) & $L$ (m) & $T$ (s) & $\bar v$ (m/s) & $\eta_{\rm SPL}$ (\%) & Plan mean (ms) \\
+Method & Goal & Coll. & $L_{\rm obs}$ (m) & $T_{\rm obs}$ (s) & $\bar v$ (m/s) & $v_{\max}$ (m/s) & Goal SPL (\%) \\
 \midrule
-YOPO              & \blank & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
-EGO-Planner       & \blank & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
-SUPER             & \blank & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
-ScaleNav (ours)   & \blank & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
+YOPO            & yes & \blank & 158.583 & 42.264 & 3.752 & 5.913 & 88.282 \\
+EGO-Planner     & no  & yes    & 12.488 & 4.552  & 2.743 & 4.325 & 0.000 \\
+SUPER (5 m/s limit) & yes & no  & 145.068 & 30.556 & 4.748 & 5.084 & 96.506 \\
+ScaleNav (ours) & yes & no & 156.489 & 30.765 & 5.087 & 5.996 & 89.463 \\
 \bottomrule
 \end{tabular}
 }
 \end{table}
 
-The language-condition comparison keeps the planner fixed and changes only
-the query.
-We compare geometric-only execution, known object queries, and an unseen
-power-line query in a scene containing power lines.  Table~\ref{tab:semantic_results}
-reports route change, query compliance, decision distance, and semantic
-exposure.
-
-\begin{table}[t]
-\caption{Open-Vocabulary Query Conditions}
-\label{tab:semantic_results}
-\centering
-\small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lccccc}
-\toprule
-Condition & Query & Route change (\%) & Compliance (\%) & Dec. dist. (m) & $E_{\rm sem}$ \\
-\midrule
-Geometric-only & none & \blank & \blank & \blank & \blank \\
-Known query   & buildings/trees & \blank & \blank & \blank & \blank \\
-Unseen query  & power lines & \blank & \blank & \blank & \blank \\
-\bottomrule
-\end{tabular}
-}
-\end{table}
-
-The component ablation removes one ScaleNav component at a time while keeping
-the scene, goal, local policy, and evaluation metrics fixed.  This design measures the
-incremental contribution of persistent route memory, corridor-conditioned
-execution, and semantic foresight.
-
-\begin{table}[t]
-\caption{ScaleNav Component Ablation}
-\label{tab:ablation_results}
-\centering
-\small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lccccc}
-\toprule
-Variant & Succ. (\%) & Coll. (\%) & $L$ (m) & $T$ (s) & $\bar v$ (m/s) \\
-\midrule
-ScaleNav w/o route memory       & \blank & \blank & \blank & \blank & \blank \\
-ScaleNav w/o corridor execution & \blank & \blank & \blank & \blank & \blank \\
-ScaleNav w/o semantic foresight & \blank & \blank & \blank & \blank & \blank \\
-ScaleNav (full)                 & \blank & \blank & \blank & \blank & \blank \\
-\bottomrule
-\end{tabular}
-}
-\end{table}
-
-Finally, Table~\ref{tab:runtime_results} decomposes end-to-end compute cost.
-For each module, we report mean and 99th-percentile latency, execution rate,
-and memory usage measured during the same closed-loop runs.
-
-\begin{table}[t]
-\caption{Runtime and Memory Cost}
-\label{tab:runtime_results}
-\centering
-\small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lcccc}
-\toprule
-Module & Mean (ms) & P99 (ms) & Rate (Hz) & Memory (MB) \\
-\midrule
-PEARL inference & \blank & \blank & \blank & \blank \\
-Graph update    & \blank & \blank & \blank & \blank \\
-Rolling A*      & \blank & \blank & \blank & \blank \\
-Local-policy inference & \blank & \blank & \blank & \blank \\
-Full system     & \blank & \blank & \blank & \blank \\
-\bottomrule
-\end{tabular}
-}
-\end{table}
+The final paired evaluation will use the same protocol for the external
+comparison, language conditions, component ablations, and runtime profiling;
+we do not present incomplete aggregate entries as results.
 
 \subsection{Offline Local-Policy Evaluation}
 \textit{Protocol.} The corridor-conditioned checkpoint is trained on $2{,}250$ routes and
@@ -1009,14 +822,9 @@ semantic-on/off replay defined above remains necessary.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{DISCUSSION AND LIMITATIONS}
 ScaleNav adds route-scale memory and semantic branch guidance around an
-existing local planner.  Route conditioning preserves the policy's dynamic-obstacle
-response and primitive generator; semantics remains a route preference, never
-a safety certificate.
-Far-field semantic nodes are deliberately optimistic geometry; a false
-positive causes a longer route, while a false negative falls back to geometric
-topology and local depth avoidance.
-The bounded Gaussian field, bounded node set, EMA updates, and confidence
-factors limit both spatial and temporal error growth.
+existing local planner.  Route conditioning preserves local dynamic-obstacle
+response, while semantics remains a preference rather than a safety certificate.
+Far-field nodes are hypotheses; geometric checks remain authoritative.
 
 The semantic parameters have distinct and monotone roles.  Increasing
 $\lambda_{\rm sem}$ strengthens preference for lower-risk routes without
@@ -1028,29 +836,15 @@ sensitivity protocol above is needed to establish how wide the stable
 operating range is; until those replay results are populated, robustness to
 these parameters should not be inferred from the nominal setting alone.
 
-SUPER and ScaleNav address different layers of the stack.  SUPER provides a
-geometric, safety-assured high-speed trajectory architecture; ScaleNav
-provides persistent, language-conditioned route choice and does not reproduce
-SUPER's safety guarantee.  The accepted witness/corridor contract could in
-principle condition a SUPER-like executor, but that composition is not
-evaluated here.
+SUPER and ScaleNav address different layers: SUPER provides geometric,
+safety-assured high-speed execution, whereas ScaleNav provides persistent,
+language-conditioned route choice.  Their composition is not evaluated here.
 
-The current experiments simplify topological search to a fixed-height layer,
-which isolates the left-right detour problem but does not evaluate vertical
-homotopy choices.
-The offline corridor-conditioned benchmark also uses zero initial motion and does not
-replace the online C++ M4 search.  A full closed-loop evaluation is therefore
-the next validation step.  Future work should evaluate the same witness-field
-cost on a fully 3-D graph and report the complete paired matrix.
-
-\subsection{Semantic-Front-End Generality}
-\label{sec:extensions}
-The current semantic front end and every reported semantic observation use
-PEARL.  The software boundary accepts a calibrated heatmap, so boxes, points,
-or masks from another model could be rasterized into the same representation
-without changing graph search.  However, no alternative vision--language
-model is evaluated in this paper.  We therefore claim interface modularity,
-not empirical transfer across semantic models.
+The current topological search uses a fixed-height layer, and the offline
+benchmark uses zero initial motion rather than the online C++ M4 search.  A
+fully 3-D closed-loop evaluation is future work.  The semantic interface is
+model-independent: boxes, points, or masks can be rasterized into the same
+heatmap contract, but no alternative model is evaluated here.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{CONCLUSION}
@@ -1080,27 +874,11 @@ N. Bucki, J. Lee, and M. W. Mueller,
 \emph{IEEE Robotics and Automation Letters}, vol. 5, no. 3,
 pp. 4626--4633, 2020.
 
-\bibitem{nanomap}
-P. R. Florence, J. Carter, J. Ware, and R. Tedrake,
-``NanoMap: Fast, Uncertainty-Aware Proximity Queries With Lazy Search of Local 3-D Data,''
-in \emph{Proc. IEEE Int. Conf. Robot. Autom.}, 2018, pp. 7631--7638.
-
 \bibitem{egoplanner}
 X. Zhou, Z. Wang, H. Ye, C. Xu, and F. Gao,
 ``EGO-Planner: An ESDF-Free Gradient-Based Local Planner for Quadrotors,''
 \emph{IEEE Robotics and Automation Letters}, vol. 6, no. 2,
 pp. 478--485, 2021.
-
-\bibitem{loquercio}
-A. Loquercio, E. Kaufmann, R. Ranftl, M. M\"uller, V. Koltun, and D. Scaramuzza,
-``Learning High-Speed Flight in the Wild,''
-\emph{Science Robotics}, vol. 6, no. 59, 2021.
-
-\bibitem{fuel}
-B. Zhou, Y. Zhang, X. Chen, and S. Shen,
-``FUEL: Fast UAV Exploration Using Incremental Frontier Structure and Hierarchical Planning,''
-\emph{IEEE Robotics and Automation Letters}, vol. 6, no. 2,
-pp. 779--786, 2021.
 
 \bibitem{bubble}
 Y. Ren, F. Zhu, W. Liu, Z. Wang, Y. Lin, F. Gao, and F. Zhang,
@@ -1149,47 +927,16 @@ H. Shah, E. Tevere, D. Atha, M. Kaufmann, S. Khattak, M. Patel, M. Hutter, J. Fr
 ``WildOS: Open-vocabulary object search in the wild,''
 \emph{arXiv preprint arXiv:2602.19308}, 2026.
 
-\bibitem{fastplanner}
-X. Zhou, J. Gao, C. Wang, Z. Wang, H. Ye, and F. Gao,
-``Fast-Planner: A Robust and Efficient Trajectory Planner for Autonomous
-Quadrotor Flight,'' in \emph{Proc. IEEE/RSJ Int. Conf. Intell. Robots Syst.},
-2019, pp. 8455--8461.
-
 \bibitem{faster}
 J. Tordesillas, B. T. Lopez, J. P. How, and L. Carlone,
 ``FASTER: A Robust Fast-Planner for Safe Autonomous Navigation in Unknown
 Environments,'' \emph{IEEE Trans. Robot.}, vol. 38, no. 2, pp. 1112--1131,
 2022.
 
-\bibitem{yamauchi}
-B. Yamauchi,
-``A Frontier-Based Approach for Autonomous Exploration,'' in \emph{Proc.
-IEEE Int. Symp. Comput. Intell. Robot. Autom.}, 1997, pp. 146--151.
-
-\bibitem{octomap}
-K. M. Wurm, A. Hornung, M. Bennewitz, C. Stachniss, and W. Burgard,
-``OctoMap: An Efficient Probabilistic 3D Mapping Framework Based on Octrees,''
-\emph{Autonomous Robots}, vol. 34, pp. 189--206, 2013.
-
 \bibitem{voxblox}
 H. Oleynikova, Z. Taylor, M. Fehr, R. Siegwart, and J. Nieto,
 ``Voxblox: Incremental 3D Euclidean Signed Distance Fields for On-Board MAV
 Planning,'' \emph{IEEE Auton. Robots}, vol. 41, pp. 1--16, 2017.
-
-\bibitem{lseg}
-B. Li, P. Weinzaepfel, and J. P. Vedaldi,
-``Language-Driven Semantic Segmentation,'' in \emph{Proc. Int. Conf. Learn.
-Representations}, 2022.
-
-\bibitem{sam}
-A. Kirillov et al.,
-``Segment Anything,'' in \emph{Proc. IEEE/CVF Int. Conf. Comput. Vis.},
-2023, pp. 4015--4026.
-
-\bibitem{conceptfusion}
-A. J. D. G. et al.,
-``ConceptFusion: Open-Set Multimodal 3D Mapping,'' in \emph{Proc. IEEE/CVF
-Conf. Comput. Vis. Pattern Recognit.}, 2023, pp. 4022--4032.
 
 \bibitem{openscene}
 S. Peng, K. Genova, C. Jiang, A. Tagliasacchi, M. Pollefeys, and T. Funkhouser,

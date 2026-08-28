@@ -173,22 +173,24 @@ public:
     pointcloud_max_points_ = static_cast<std::size_t>(std::max<std::int64_t>(1, declare_parameter<std::int64_t>("pointcloud_max_points", 200000)));
     pointcloud_stride_ = static_cast<std::size_t>(std::max<std::int64_t>(1, declare_parameter<std::int64_t>("pointcloud_stride", 1)));
     const int qos_depth = std::max(1, static_cast<int>(declare_parameter<int>("qos_depth", 10)));
+    graph_snapshot_period_ms_ = std::max(
+      0, static_cast<int>(declare_parameter<int>("graph_snapshot_period_ms", 500)));
 
     depth_topic_ = declare_parameter<std::string>("depth_topic", "/camera/depth/image");
     rgb_topic_ = declare_parameter<std::string>("rgb_topic", "/camera/color/image");
     pointcloud_topic_ = declare_parameter<std::string>("pointcloud_topic", "/depth/points");
     free_ray_topic_ = declare_parameter<std::string>("free_ray_topic", "/depth/free_rays");
-    graph_topic_ = declare_parameter<std::string>("graph_topic", "/epic/graph");
-    bubble_topic_ = declare_parameter<std::string>("bubble_topic", "/epic/bubbles");
-    path_topic_ = declare_parameter<std::string>("path_topic", "/epic/path");
+    graph_topic_ = declare_parameter<std::string>("graph_topic", "/scalenav/graph");
+    bubble_topic_ = declare_parameter<std::string>("bubble_topic", "/scalenav/bubbles");
+    path_topic_ = declare_parameter<std::string>("path_topic", "/scalenav/path");
     odom_topic_ = declare_parameter<std::string>("odom_topic", "/sim/odom");
     control_topic_ = declare_parameter<std::string>("control_topic", "/scalenav/trajectory_point");
     semantic_topic_ = declare_parameter<std::string>("semantic_topic", "/scalenav/text_heatmap_raw");
     goal_topic_ = declare_parameter<std::string>("goal_topic", "/goal_pose");
-    local_goal_topic_ = declare_parameter<std::string>("local_goal_topic", "/epic/local_goal");
-    clearance_topic_ = declare_parameter<std::string>("clearance_topic", "/epic/clearance");
+    local_goal_topic_ = declare_parameter<std::string>("local_goal_topic", "/scalenav/local_goal");
+    clearance_topic_ = declare_parameter<std::string>("clearance_topic", "/scalenav/clearance");
     collision_topic_ = declare_parameter<std::string>("collision_topic", "/sim/collision");
-    timing_topic_ = declare_parameter<std::string>("timing_topic", "/epic/timing");
+    timing_topic_ = declare_parameter<std::string>("timing_topic", "/scalenav/timing");
     mission_position_tolerance_m_ = declare_parameter<double>(
       "mission_position_tolerance_m", 0.5);
     mission_speed_tolerance_mps_ = declare_parameter<double>(
@@ -211,6 +213,7 @@ public:
       << ",\"timing\":" << jsonQuote(timing_topic_)
       << "},\"pointcloud_max_points\":" << pointcloud_max_points_
       << ",\"pointcloud_stride\":" << pointcloud_stride_
+      << ",\"graph_snapshot_period_ms\":" << graph_snapshot_period_ms_
       << ",\"evaluation\":{\"mission_position_tolerance_m\":"
       << jsonNumber(mission_position_tolerance_m_)
       << ",\"mission_speed_tolerance_mps\":"
@@ -227,7 +230,9 @@ public:
     free_ray_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(free_ray_topic_, sensor_qos,
       [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr message) { capturePointCloud(*message, "free_ray"); });
     graph_sub_ = create_subscription<visualization_msgs::msg::MarkerArray>(graph_topic_, qos_depth,
-      [this](visualization_msgs::msg::MarkerArray::ConstSharedPtr message) { captureMarkers(*message, "graph"); });
+      [this](visualization_msgs::msg::MarkerArray::ConstSharedPtr message) {
+        captureGraphSnapshot(*message);
+      });
     bubble_sub_ = create_subscription<visualization_msgs::msg::MarkerArray>(bubble_topic_, qos_depth,
       [this](visualization_msgs::msg::MarkerArray::ConstSharedPtr message) { captureMarkers(*message, "bubbles"); });
     path_sub_ = create_subscription<nav_msgs::msg::Path>(path_topic_, qos_depth,
@@ -403,6 +408,19 @@ private:
     return out.str();
   }
 
+  void captureGraphSnapshot(const visualization_msgs::msg::MarkerArray &message)
+  {
+    const auto current = std::chrono::steady_clock::now();
+    if (have_graph_snapshot_time_ && graph_snapshot_period_ms_ > 0) {
+      const double elapsed_ms = std::chrono::duration<double, std::milli>(
+        current - last_graph_snapshot_time_).count();
+      if (elapsed_ms < static_cast<double>(graph_snapshot_period_ms_)) return;
+    }
+    last_graph_snapshot_time_ = current;
+    have_graph_snapshot_time_ = true;
+    captureMarkers(message, "graph");
+  }
+
   void captureMarkers(const visualization_msgs::msg::MarkerArray &message, const std::string &kind)
   {
     std::ostringstream out;
@@ -536,8 +554,8 @@ private:
   {
     const auto extra = "{\"frame_id\":" + jsonQuote(message.header.frame_id) +
       ",\"vehicle_m\":" + jsonNumber(message.vector.x) +
-      ",\"path_min_m\":" + jsonNumber(message.vector.y) +
-      ",\"path_mean_m\":" + jsonNumber(message.vector.z) + "}";
+      ",\"global_witness_min_m\":" + jsonNumber(message.vector.y) +
+      ",\"global_witness_mean_m\":" + jsonNumber(message.vector.z) + "}";
     store_->record("clearance", stampNs(message.header.stamp), "", extra.size(), extra);
   }
 
@@ -569,6 +587,9 @@ private:
   std::unique_ptr<SlidingLogStore> store_;
   std::size_t pointcloud_max_points_ = 200000;
   std::size_t pointcloud_stride_ = 1;
+  int graph_snapshot_period_ms_ = 500;
+  std::chrono::steady_clock::time_point last_graph_snapshot_time_{};
+  bool have_graph_snapshot_time_ = false;
   std::uint64_t depth_seq_ = 0, rgb_seq_ = 0, pointcloud_seq_ = 0, graph_seq_ = 0, path_seq_ = 0;
   std::string depth_topic_, rgb_topic_, pointcloud_topic_, free_ray_topic_, graph_topic_,
     bubble_topic_, path_topic_, odom_topic_, control_topic_, semantic_topic_, goal_topic_,

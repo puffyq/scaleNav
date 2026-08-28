@@ -18,7 +18,7 @@ route-memory metrics for its own ablations.
 | Average speed | Valid | Use `L/T`, not the last instantaneous speed printed by EPIC. |
 | Path efficiency | Valid after definition | Use `eta_SPL = S L*/max(L,L*)` across all trials. Report raw `L`, `T`, and speed on successful trials; assign failures zero SPL instead of allowing early termination to look efficient. |
 | Planning latency | Valid in `scalenav_log.v2` | Use every `/epic/timing` planner event for mean/P99. For old logs, throttled ROS timing percentiles remain provisional. |
-| Minimum clearance | Secondary diagnostic | Use clearance at the vehicle position. Planned-witness clearance is not executed-flight clearance and is not collision ground truth. |
+| Minimum clearance | Secondary diagnostic | Report `vehicle_min_m`, the clearance at the executed vehicle position. `global_witness_min_m` (legacy `path_min_m`) describes only the ScaleNav global guide; YOPO performs local obstacle avoidance around that guide, so witness clearance is neither executed-flight clearance nor collision ground truth. |
 | Acceleration and jerk | Diagnostic with current log | Odom-derived filtered values are estimates. In `scalenav_log.v2`, timestamped `control` records also include commanded acceleration and finite-difference jerk. |
 | Route switches | ScaleNav ablation only | Count committed route generations/reasons from structured planner timing. Local-goal changes are not route switches. |
 | Semantic exposure and decision distance | ScaleNav ablation only | Require world-frame risk samples and scenario branch labels. The raw image heatmap alone is insufficient. |

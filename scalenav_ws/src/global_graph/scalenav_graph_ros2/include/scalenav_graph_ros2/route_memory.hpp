@@ -155,6 +155,35 @@ inline bool shouldSwitchRoute(
   return risk_better || cost_better;
 }
 
+inline bool routeProgressReachedFraction(
+  float progress_m, float initial_length_m, float fraction)
+{
+  if (!std::isfinite(progress_m) || !std::isfinite(initial_length_m) ||
+      !std::isfinite(fraction) || initial_length_m <= 1e-3F) {
+    return false;
+  }
+  return progress_m >= std::clamp(fraction, 0.0F, 1.0F) * initial_length_m;
+}
+
+inline bool missionGoalWithinDirectHorizon(
+  float vehicle_to_goal_m, float goal_connect_distance_m, float lookahead_m)
+{
+  if (!std::isfinite(vehicle_to_goal_m) || vehicle_to_goal_m < 0.0F) return false;
+  const float direct_horizon_m = std::max(
+    std::max(0.0F, goal_connect_distance_m), std::max(0.0F, lookahead_m));
+  return vehicle_to_goal_m <= direct_horizon_m;
+}
+
+inline bool semanticPointCanInfluenceFixedLayer(
+  float point_z, float layer_z, float influence_m)
+{
+  if (!std::isfinite(point_z) || !std::isfinite(layer_z) ||
+      !std::isfinite(influence_m)) {
+    return false;
+  }
+  return std::abs(point_z - layer_z) <= std::max(0.0F, influence_m);
+}
+
 inline bool edgeFollowsRoute(const Eigen::Vector3f &start,
                              const Eigen::Vector3f &end,
                              const std::vector<Eigen::Vector3f> &route,

@@ -44,21 +44,21 @@ target_include_directories(ikd_tree PUBLIC
 target_compile_definitions(ikd_tree PUBLIC PCL_NO_PRECOMPILE)
 target_link_libraries(ikd_tree PUBLIC ${PCL_LIBRARIES} pthread)
 
-add_executable(epic_graph_node
-  src/scale_manager/src/epic_graph_node.cpp
+add_executable(scalenav_graph_node
+  src/scale_manager/src/scalenav_graph_node.cpp
   ${TOPO_SOURCES}
 )
 
-target_include_directories(epic_graph_node PRIVATE
+target_include_directories(scalenav_graph_node PRIVATE
   include
   ${TOPO_ROOT}/include
   ${EIGEN3_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
 )
-target_compile_definitions(epic_graph_node PRIVATE PCL_NO_PRECOMPILE)
-ament_target_dependencies(epic_graph_node
+target_compile_definitions(scalenav_graph_node PRIVATE PCL_NO_PRECOMPILE)
+ament_target_dependencies(scalenav_graph_node
   geometry_msgs nav_msgs pcl_conversions rclcpp sensor_msgs std_msgs visualization_msgs)
-target_link_libraries(epic_graph_node ${PCL_LIBRARIES} OpenMP::OpenMP_CXX ikd_tree)
+target_link_libraries(scalenav_graph_node ${PCL_LIBRARIES} OpenMP::OpenMP_CXX ikd_tree)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -136,6 +136,8 @@ if(BUILD_TESTING)
       --html ${CMAKE_CURRENT_BINARY_DIR}/epic_online_sim_report.html)
 endif()
 
-install(TARGETS epic_graph_node DESTINATION lib/${PROJECT_NAME})
-install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+install(TARGETS scalenav_graph_node DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../config
+  DESTINATION share/${PROJECT_NAME})
 ament_package()

@@ -80,6 +80,13 @@ def test_route_dropout_keeps_frontier_but_masks_routes(synthetic_data: Path):
     assert torch.isfinite(sample["frontier_body"]).all()
 
 
+def test_validation_motion_is_deterministic_per_sample(synthetic_data: Path):
+    dataset = YOPODataset(
+        "valid", data_root=synthetic_data, route_dropout_probability=0.0, seed=42
+    )
+    torch.testing.assert_close(dataset[0]["motion_body"], dataset[0]["motion_body"])
+
+
 def test_same_depth_and_frontier_respond_to_different_witness_routes(synthetic_data: Path):
     dataset = YOPODataset("all", data_root=synthetic_data, route_dropout_probability=0.0)
     first = dataset[0]
@@ -148,3 +155,14 @@ def test_score_ranking_loss_orders_higher_cost_candidates() -> None:
 
     correctly_ordered = torch.tensor([[0.0, 0.2, 0.4]])
     assert YopoTrainer._score_ranking_loss(correctly_ordered, target).item() == 0.0
+
+
+def test_safety_ranking_uses_collision_barrier_threshold() -> None:
+    predicted = torch.tensor([[0.0, 0.0, 0.0]])
+    barrier = torch.tensor([[0.0, 0.01, 0.0]])
+    assert YopoTrainer._safety_binary_ranking_loss(predicted, barrier).item() > 0.0
+    correctly_ordered = torch.tensor([[0.0, 0.2, 0.0]])
+    assert (
+        YopoTrainer._safety_binary_ranking_loss(correctly_ordered, barrier).item()
+        == 0.0
+    )

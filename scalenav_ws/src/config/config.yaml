@@ -1,0 +1,13 @@
+scalenav_graph:
+  ros__parameters:
+    # Refresh the rolling frontier after this fraction of the route is flown.
+    frontier_replan_progress_ratio: 0.45
+
+    # Maximum radius of the local topology graph searched by frontier A*.
+    local_graph_radius_m: 45.0
+
+scalenav_online_planner:
+  ros__parameters:
+    # YOPO inference speed and hard trajectory cap. The trained 6 m/s contract
+    # is scaled using the original YOPO testing rule; no retraining is needed.
+    maximum_trajectory_speed_mps: 6.0

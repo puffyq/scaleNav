@@ -1,27 +1,32 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "config_file",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("scalenav_graph_ros2"), "config", "config.yaml"])),
         DeclareLaunchArgument("cloud_topic", default_value="/depth/points"),
         DeclareLaunchArgument("free_ray_topic", default_value="/depth/free_rays"),
         DeclareLaunchArgument("semantic_heatmap_topic", default_value="/scalenav/text_heatmap_raw"),
         DeclareLaunchArgument("odom_topic", default_value="/sim/odom"),
         DeclareLaunchArgument("goal_topic", default_value="/goal"),
-        DeclareLaunchArgument("next_goal_topic", default_value="/epic/local_goal"),
-        DeclareLaunchArgument("timing_topic", default_value="/epic/timing"),
+        DeclareLaunchArgument("next_goal_topic", default_value="/scalenav/local_goal"),
+        DeclareLaunchArgument("timing_topic", default_value="/scalenav/timing"),
         DeclareLaunchArgument("next_goal_frame", default_value="world_enu"),
         DeclareLaunchArgument("visualization_frame", default_value="odom"),
         DeclareLaunchArgument("odom_twist_frame", default_value="world"),
         DeclareLaunchArgument(
             "flight_statistics_file",
-            default_value="epic_flight_statistics.csv"),
+            default_value="scalenav_flight_statistics.csv"),
         DeclareLaunchArgument(
             "graph_log_file",
-            default_value="epic_graph_snapshots.jsonl"),
+            default_value="scalenav_graph_snapshots.jsonl"),
         DeclareLaunchArgument("trajectory_speed_color_max_mps", default_value="6.0"),
         DeclareLaunchArgument("trajectory_max_points", default_value="50000"),
         DeclareLaunchArgument("graph_fixed_layer", default_value="true"),
@@ -39,8 +44,7 @@ def generate_launch_description():
         DeclareLaunchArgument("update_period_ms", default_value="100"),
         DeclareLaunchArgument("skeleton_rebuild_period_ms", default_value="100.0"),
         DeclareLaunchArgument("local_goal_min_advance_m", default_value="0.75"),
-        DeclareLaunchArgument("local_goal_lookahead_m", default_value="10.0"),
-        DeclareLaunchArgument("local_graph_radius_m", default_value="35.0"),
+        DeclareLaunchArgument("local_goal_lookahead_m", default_value="15.0"),
         DeclareLaunchArgument("frontier_goal_margin_m", default_value="3.5"),
         DeclareLaunchArgument("max_update_region_num", default_value="0"),
         # Compatibility arguments; the planner publishes every update tick.
@@ -95,10 +99,10 @@ def generate_launch_description():
         DeclareLaunchArgument("semantic_patch_rows", default_value="3"),
         Node(
             package="scalenav_graph_ros2",
-            executable="epic_graph_node",
-            name="epic_graph",
+            executable="scalenav_graph_node",
+            name="scalenav_graph",
             output="screen",
-            parameters=[{
+            parameters=[LaunchConfiguration("config_file"), {
                 "cloud_topic": LaunchConfiguration("cloud_topic"),
                 "free_ray_topic": LaunchConfiguration("free_ray_topic"),
                 "semantic_heatmap_topic": LaunchConfiguration("semantic_heatmap_topic"),
@@ -127,7 +131,6 @@ def generate_launch_description():
                 "skeleton_rebuild_period_ms": LaunchConfiguration("skeleton_rebuild_period_ms"),
                 "local_goal_min_advance_m": LaunchConfiguration("local_goal_min_advance_m"),
                 "local_goal_lookahead_m": LaunchConfiguration("local_goal_lookahead_m"),
-                "local_graph_radius_m": LaunchConfiguration("local_graph_radius_m"),
                 "frontier_goal_margin_m": LaunchConfiguration("frontier_goal_margin_m"),
                 "max_update_region_num": LaunchConfiguration("max_update_region_num"),
                 "route_plan_period_ms": LaunchConfiguration("route_plan_period_ms"),

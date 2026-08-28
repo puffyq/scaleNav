@@ -205,6 +205,9 @@ private:
 
   void pose_command(const geometry_msgs::msg::PoseStamped::SharedPtr message)
   {
+    if (emergency_stop_latched_) {
+      return;
+    }
     const Eigen::Vector3d position(
       message->pose.position.x, message->pose.position.y, message->pose.position.z);
     if (!finite(position) || position.z() < minimum_altitude_) {
@@ -222,6 +225,9 @@ private:
   void trajectory_command(
     const trajectory_msgs::msg::MultiDOFJointTrajectoryPoint::SharedPtr message)
   {
+    if (emergency_stop_latched_) {
+      return;
+    }
     if (message->transforms.empty()) {
       RCLCPP_WARN(get_logger(), "Rejected trajectory point without transform");
       return;

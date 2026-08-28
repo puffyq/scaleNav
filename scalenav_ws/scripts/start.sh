@@ -9,6 +9,10 @@ GRAPH_FIXED_LAYER="${GRAPH_FIXED_LAYER:-true}"  # graph topology: true=single la
 DEVICE="cuda"
 RATE="2"                      # heatmap Hz
 SAVE_DEPTH=0
+IGNORE_COLLISION="${IGNORE_COLLISION:-false}"
+AIRSIM_RESET_ON_START="${AIRSIM_RESET_ON_START:-true}"
+AIRSIM_HOST="${AIRSIM_HOST:-127.0.0.1}"
+AIRSIM_PORT="${AIRSIM_PORT:-41451}"
 LOG_ROOT=""                   # empty → $SCALENAV_LOG_DIR or ws/../log_scalenav
 # ───────────────────────────────────────────────────────────────────────────
 
@@ -20,6 +24,7 @@ LOG_ROOT="${LOG_ROOT:-${SCALENAV_LOG_DIR:-$WS/../log_scalenav}}"
 
 PYTHON="$WS/../../YOPO-Rally/.venv/bin/python"
 MODEL="$SRC/models/original_yopo_simple/model.pt"
+CONFIG="$SRC/config/config.yaml"
 
 while (($#)); do
   case "$1" in
@@ -49,11 +54,22 @@ done
 [[ -f "$WS/install/setup.bash" ]] || { echo "run $SCRIPT_DIR/build.sh first" >&2; exit 1; }
 [[ -x "$PYTHON" ]] || { echo "Python not found: $PYTHON" >&2; exit 1; }
 [[ -f "$MODEL" ]] || { echo "model not found: $MODEL" >&2; exit 1; }
+[[ -f "$CONFIG" ]] || { echo "config not found: $CONFIG" >&2; exit 1; }
 
 source /opt/ros/humble/setup.bash
 source "$WS/install/setup.bash"
 set -u
 export PYTHONPATH="$SRC/scalenav:$SRC:$PYTHONPATH"
+MAXIMUM_TRAJECTORY_SPEED_MPS="$(
+  "$PYTHON" -c \
+    'import sys; from trajectory_timing import load_maximum_trajectory_speed; print(load_maximum_trajectory_speed(sys.argv[1]))' \
+    "$CONFIG"
+)"
+
+if [[ "$AIRSIM_RESET_ON_START" == "true" ]]; then
+  "$PYTHON" "$SCRIPT_DIR/reset_airsim.py" \
+    --host "$AIRSIM_HOST" --port "$AIRSIM_PORT"
+fi
 
 PIDS=""
 LAST_PID=""
@@ -72,14 +88,17 @@ stop() {
 trap stop EXIT INT TERM
 
 run ros2 launch scalenav_log scalenav_log.launch.py output_dir:="$LOG_ROOT"
-run ros2 launch airsim_renderer controller_airsim.launch.py
+run ros2 launch airsim_renderer controller_airsim.launch.py \
+  maximum_linear_speed:="$MAXIMUM_TRAJECTORY_SPEED_MPS" \
+  ignore_collision:="$IGNORE_COLLISION"
 run ros2 launch depth2points_ros2 depth_planar_to_pointcloud.launch.py
-run ros2 launch scalenav_graph_ros2 epic_graph.launch.py \
+run ros2 launch scalenav_graph_ros2 scalenav_graph.launch.py \
   graph_fixed_layer:="$GRAPH_FIXED_LAYER" \
-  goal_topic:=/goal_pose next_goal_topic:=/epic/local_goal \
+  goal_topic:=/goal_pose next_goal_topic:=/scalenav/local_goal \
   next_goal_frame:=world_enu visualization_frame:=world_enu \
   odom_twist_frame:=body semantic_heatmap_topic:=/scalenav/text_heatmap_raw \
   flight_statistics_file:=/dev/null graph_log_file:=/dev/null \
+  trajectory_speed_color_max_mps:="$MAXIMUM_TRAJECTORY_SPEED_MPS" \
   semantic_cost_weight:="$SEMANTIC_COST_WEIGHT"
 
 if ((SEMANTIC)); then
@@ -92,9 +111,11 @@ fi
 start_planner() {
   run "$PYTHON" "$SRC/scalenav/online_planner_ros2.py" \
     --model "$MODEL" --device "$DEVICE" \
-    --control --original-goal-input --goal-topic /epic/local_goal \
+    --config-file "$CONFIG" \
+    --control --original-goal-input --goal-topic /scalenav/local_goal \
     --mission-goal-topic /goal_pose --world-frame world_enu --odom-twist-frame body \
     --model-image-width 160 --model-image-height 96 --model-vertical-num 3 \
+    --trajectory-speed-color-max-mps "$MAXIMUM_TRAJECTORY_SPEED_MPS" \
     --fixed-altitude --plan-from-reference --disable-event-log "$@"
 }
 
@@ -104,5 +125,5 @@ else
   start_planner
 fi
 
-echo "started; goal=/goal_pose semantic=$SEMANTIC semantic_cost_weight=$SEMANTIC_COST_WEIGHT graph_fixed_layer=$GRAPH_FIXED_LAYER recorded_logs=$LOG_ROOT"
+echo "started; goal=/goal_pose semantic=$SEMANTIC semantic_cost_weight=$SEMANTIC_COST_WEIGHT graph_fixed_layer=$GRAPH_FIXED_LAYER maximum_trajectory_speed_mps=$MAXIMUM_TRAJECTORY_SPEED_MPS ignore_collision=$IGNORE_COLLISION airsim_reset=$AIRSIM_RESET_ON_START recorded_logs=$LOG_ROOT"
 wait -n $PIDS

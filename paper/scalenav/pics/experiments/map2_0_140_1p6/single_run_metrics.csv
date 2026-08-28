@@ -1,3 +1,5 @@
-method,n,success_percent,safe_percent,collision_percent,path_m,time_s,average_speed_mps,max_speed_mps,spl_percent,planning_mean_ms,planning_definition
+method,n,goal_complete_percent,safe_percent,collision_percent,recorded_path_m,recorded_duration_s,average_speed_mps,max_speed_mps,goal_spl_percent,planning_mean_ms,planning_definition
 YOPO,1,100,N/A,N/A,158.583,42.264,3.752,5.913,88.282,2.577,local-policy inference
-ScaleNav,1,100,N/A,N/A,158.210,38.434,4.116,5.681,88.490,21.517,rolling graph-planner update cycle
+EGO-Planner,1,0,N/A,100,12.488,4.552,2.743,4.325,0.000,N/A,not recorded
+SUPER,1,100,N/A,0,145.068,30.556,4.748,5.084,96.506,N/A,not recorded
+ScaleNav,1,100,N/A,0,156.489,30.765,5.087,5.996,89.463,24.604,rolling graph-planner update cycle

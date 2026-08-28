@@ -466,11 +466,12 @@ def load_path(session: Path, event: dict) -> np.ndarray:
         return np.asarray(json.load(stream)["poses"], dtype=float)
 
 
-def evidence_clearance(events: dict[str, list[dict]], stamp_ns: int) -> float | None:
+def evidence_witness_clearance(events: dict[str, list[dict]], stamp_ns: int) -> float | None:
     clearance_events = events.get("clearance", [])
     if not clearance_events:
         return None
-    value = nearest_event(clearance_events, stamp_ns)["data"].get("path_min_m")
+    data = nearest_event(clearance_events, stamp_ns)["data"]
+    value = data.get("global_witness_min_m", data.get("path_min_m"))
     return float(value) if value is not None and np.isfinite(value) else None
 
 
@@ -731,7 +732,7 @@ def draw_map_panel(
         detour = trajectory[detour_index]
         detour_u, detour_v = rayfronts_projection(detour[None, :])
         ax.annotate(
-            f"safe detour ({clearance:.2f} m)",
+            f"global witness ({clearance:.2f} m diagnostic)",
             xy=(detour_u[0], detour_v[0]), xytext=(14, -24), textcoords="offset points",
             fontsize=6.3, color=UAV, ha="left", va="top",
             bbox=LABEL_BOX,
@@ -877,7 +878,7 @@ def draw_scene_and_detour_panel(
     detour = trajectory[detour_index]
     if clearance is not None:
         ax_log.annotate(
-            f"safe detour\n{clearance:.2f} m clearance",
+            f"global witness\n{clearance:.2f} m diagnostic",
             xy=(detour[1], detour[0]), xytext=(29.0, -12.5),
             fontsize=6.8, color=UAV, ha="center", va="top",
             bbox=dict(boxstyle="round,pad=0.24", facecolor=BACKGROUND, edgecolor=CANDIDATE),
@@ -930,7 +931,7 @@ def main() -> None:
     final_markers = evidence_markers
     current_path = load_path(session, evidence_path_event)
     current_position = interpolated_odom_position(events["odom"], rgb_event["stamp_ns"])
-    clearance = evidence_clearance(events, rgb_event["stamp_ns"])
+    clearance = evidence_witness_clearance(events, rgb_event["stamp_ns"])
     cloud = aggregate_point_cloud(session, events, start_ns, end_ns)
 
     plt.rcParams.update({
@@ -974,7 +975,10 @@ def main() -> None:
     figure.savefig(args.out_prefix.with_suffix(".pdf"), dpi=300)
     figure.savefig(args.out_prefix.with_suffix(".png"), dpi=300)
     plt.close(figure)
-    suffix = f"clearance={clearance:.3f} m" if clearance is not None else "clearance=n/a"
+    suffix = (
+        f"global_witness_clearance={clearance:.3f} m"
+        if clearance is not None else "global_witness_clearance=n/a"
+    )
     deltas_ms = {
         kind: (nearest_event(events[kind], rgb_event["stamp_ns"])["stamp_ns"]
                - rgb_event["stamp_ns"]) / 1e6

@@ -41,6 +41,13 @@ from planner_continuity import (
     mission_goal_changed,
     project_goal_to_fixed_altitude,
 )
+from trajectory_timing import (
+    load_maximum_trajectory_speed,
+    sample_time_scaled_trajectory,
+    trajectory_peak_speed,
+    trajectory_time_scale,
+)
+from yopo_inference_scaling import YopoInferenceScaling
 from text_tracker.heatmap import goal_body_to_heatmap
 from graph import (
     CANDIDATE_TOPOLOGY_RGBA,
@@ -115,7 +122,17 @@ class OnlinePlanner(Node):
         self.direct_goal_distance = float(args.direct_goal_distance)
         self.max_depth = 20.0
         self.minimum_depth = 0.04
-        self.segment_time = 2.0 * float(cfg["radio_range"]) / float(cfg["vel_max_train"])
+        self.maximum_trajectory_speed_mps = args.maximum_trajectory_speed_mps
+        training_segment_time = (
+            2.0 * float(cfg["radio_range"]) / float(cfg["vel_max_train"])
+        )
+        self.inference_scaling = YopoInferenceScaling(
+            training_speed_mps=float(cfg["vel_max_train"]),
+            training_acceleration_mps2=float(cfg["acc_max_train"]),
+            inference_speed_mps=self.maximum_trajectory_speed_mps,
+            base_segment_time_s=training_segment_time,
+        )
+        self.segment_time = self.inference_scaling.segment_time_s
         self.lock = threading.Lock()
         self.flight_lock = threading.RLock()
         self.callback_group = ReentrantCallbackGroup()
@@ -144,6 +161,8 @@ class OnlinePlanner(Node):
         self.desired_acceleration_world = np.zeros(3, dtype=np.float64)
         self.polynomials: tuple[Poly5Solver, Poly5Solver, Poly5Solver] | None = None
         self.trajectory_started = 0.0
+        self.trajectory_time_scale = 1.0
+        self.trajectory_duration = self.segment_time
         self.planned_yaw = 0.0
         self.inference_count = 0
         self.inference_total_ms = 0.0
@@ -244,6 +263,15 @@ class OnlinePlanner(Node):
         self.flight_timer = self.create_timer(
             0.5, self.publish_flight_telemetry, callback_group=self.callback_group)
 
+        self.get_logger().info(
+            "YOPO inference speed: %.3f m/s (training %.3f m/s, ratio %.3f, segment %.3f s)"
+            % (
+                self.maximum_trajectory_speed_mps,
+                self.inference_scaling.training_speed_mps,
+                self.inference_scaling.speed_ratio,
+                self.segment_time,
+            )
+        )
         self.warm_up()
         self.emit_event(
             "startup",
@@ -264,6 +292,12 @@ class OnlinePlanner(Node):
                 "model_horizontal_fov_deg": args.model_horizontal_fov,
                 "model_vertical_fov_deg": args.model_vertical_fov,
                 "segment_time_s": self.segment_time,
+                "maximum_trajectory_speed_mps": self.maximum_trajectory_speed_mps,
+                "training_speed_mps": self.inference_scaling.training_speed_mps,
+                "inference_speed_ratio": self.inference_scaling.speed_ratio,
+                "inference_acceleration_mps2": (
+                    self.inference_scaling.inference_acceleration_mps2
+                ),
                 "odom_twist_frame": args.odom_twist_frame,
                 "plan_from_reference": bool(args.plan_from_reference),
                 "reference_reset_position_error_m": args.reference_reset_position_error,
@@ -370,7 +404,7 @@ class OnlinePlanner(Node):
         if self.args.original_goal_input:
             motion[:, 6] = self.args.search_distance
         with torch.inference_mode():
-            endstate, score = self.model(image, motion)
+            endstate, score = self.run_model(image, motion)
         if not torch.isfinite(endstate).all() or not torch.isfinite(score).all():
             raise FloatingPointError("model warm-up produced non-finite output")
         if self.args.original_goal_input:
@@ -390,6 +424,13 @@ class OnlinePlanner(Node):
                     f"YOPO-Simple output contract mismatch: endstate={tuple(endstate.shape)} "
                     f"score={tuple(score.shape)}, expected endstate={expected_output}"
                 )
+
+    def run_model(
+        self, image: torch.Tensor, observation: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        model_observation = self.inference_scaling.model_input(observation)
+        endstate, score = self.model(image, model_observation)
+        return self.inference_scaling.physical_endstate(endstate), score
 
     def on_odometry(self, message: Odometry) -> None:
         now = self.get_clock().now().nanoseconds * 1e-9
@@ -956,7 +997,7 @@ class OnlinePlanner(Node):
         )
 
         started = time.perf_counter()
-        endstate, score = self.model(image, motion)
+        endstate, score = self.run_model(image, motion)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         inference_ms = (time.perf_counter() - started) * 1000.0
@@ -1186,20 +1227,14 @@ class OnlinePlanner(Node):
         with self.lock:
             polynomials = self.polynomials
             started = self.trajectory_started
+            time_scale = self.trajectory_time_scale
             valid = self.trajectory_valid_for_control
         if self.args.plan_from_reference and polynomials is not None and valid:
-            sample_time = min(max(sample_clock - started, 0.0), self.segment_time)
-            position = np.array(
-                [polynomial.get_position(sample_time) for polynomial in polynomials],
-                dtype=np.float64,
-            )
-            velocity = np.array(
-                [polynomial.get_velocity(sample_time) for polynomial in polynomials],
-                dtype=np.float64,
-            )
-            acceleration = np.array(
-                [polynomial.get_acceleration(sample_time) for polynomial in polynomials],
-                dtype=np.float64,
+            position, velocity, acceleration, _ = sample_time_scaled_trajectory(
+                polynomials,
+                sample_clock - started,
+                self.segment_time,
+                time_scale,
             )
             measured_position = np.array(
                 [odom.pose.pose.position.x, odom.pose.pose.position.y, odom.pose.pose.position.z],
@@ -1285,10 +1320,25 @@ class OnlinePlanner(Node):
             )
         altitude_floor = self.args.minimum_trajectory_altitude + self.args.altitude_margin
         trajectory_valid = finite_trajectory and minimum_sampled_altitude >= altitude_floor
+        unscaled_peak_speed = (
+            trajectory_peak_speed(polynomials, self.segment_time)
+            if finite_trajectory
+            else float("nan")
+        )
+        time_scale = (
+            trajectory_time_scale(
+                unscaled_peak_speed, self.maximum_trajectory_speed_mps
+            )
+            if finite_trajectory
+            else 1.0
+        )
+        trajectory_duration = self.segment_time * time_scale
         if trajectory_valid:
             with self.lock:
                 self.polynomials = polynomials
                 self.trajectory_started = time.monotonic()
+                self.trajectory_time_scale = time_scale
+                self.trajectory_duration = trajectory_duration
                 self.trajectory_valid_for_control = True
                 planned_yaw = self.planned_yaw
             self.publish_path(polynomials)
@@ -1322,6 +1372,11 @@ class OnlinePlanner(Node):
                 "end_acceleration_world": self.vec(end_acceleration),
                 "minimum_sampled_altitude": minimum_sampled_altitude,
                 "altitude_floor": altitude_floor,
+                "maximum_trajectory_speed_mps": self.maximum_trajectory_speed_mps,
+                "unscaled_peak_speed_mps": unscaled_peak_speed,
+                "trajectory_time_scale": time_scale,
+                "scaled_peak_speed_mps": unscaled_peak_speed / time_scale,
+                "trajectory_duration_s": trajectory_duration,
                 "planned_yaw_deg": math.degrees(planned_yaw),
                 "valid": trajectory_valid,
                 "control_enabled": bool(self.args.control and trajectory_valid),
@@ -1348,6 +1403,7 @@ class OnlinePlanner(Node):
         with self.lock:
             polynomials = self.polynomials
             trajectory_started = self.trajectory_started
+            time_scale = self.trajectory_time_scale
             trajectory_valid = self.trajectory_valid_for_control
             goal_world = None if self.goal_world is None else self.goal_world.copy()
             last_yaw = self.planned_yaw
@@ -1357,18 +1413,13 @@ class OnlinePlanner(Node):
             or time.monotonic() - self.last_depth_time > self.args.depth_timeout
         ):
             return
-        sample_time = min(time.monotonic() - trajectory_started, self.segment_time)
-        desired_position = np.array(
-            [polynomial.get_position(sample_time) for polynomial in polynomials],
-            dtype=np.float64,
-        )
-        desired_velocity = np.array(
-            [polynomial.get_velocity(sample_time) for polynomial in polynomials],
-            dtype=np.float64,
-        )
-        desired_acceleration = np.array(
-            [polynomial.get_acceleration(sample_time) for polynomial in polynomials],
-            dtype=np.float64,
+        desired_position, desired_velocity, desired_acceleration, sample_time = (
+            sample_time_scaled_trajectory(
+                polynomials,
+                time.monotonic() - trajectory_started,
+                self.segment_time,
+                time_scale,
+            )
         )
         goal_direction = (
             desired_velocity if goal_world is None else goal_world - desired_position
@@ -1461,6 +1512,12 @@ class OnlinePlanner(Node):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OpenSeek ROS2 online local planner")
     parser.add_argument("--model", required=True)
+    parser.add_argument("--config-file")
+    parser.add_argument(
+        "--maximum-trajectory-speed-mps",
+        type=float,
+        help="Override the maximum 3D speed used to execute YOPO polynomials.",
+    )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--control", action="store_true")
     parser.add_argument(
@@ -1532,6 +1589,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-candidate-distance", type=float, default=5.0)
     parser.add_argument("--graph-robot-radius", type=float, default=0.6)
     args = parser.parse_args()
+    try:
+        args.maximum_trajectory_speed_mps = load_maximum_trajectory_speed(
+            args.config_file, args.maximum_trajectory_speed_mps
+        )
+    except ValueError as error:
+        parser.error(str(error))
     if not Path(args.model).is_file():
         parser.error(f"model not found: {args.model}")
     if args.search_distance <= 0.0 or args.heatmap_sigma <= 0.0:

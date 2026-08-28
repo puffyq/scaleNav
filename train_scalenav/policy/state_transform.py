@@ -220,5 +220,36 @@ def state_body2world(pos_w, rot_wb, pos_b, vel_b, acc_b):
     return pos_b, vel_b, acc_b
 
 
+def project_world_endstate_to_altitude(
+    position_world: torch.Tensor,
+    velocity_world: torch.Tensor,
+    acceleration_world: torch.Tensor,
+    altitude_world: torch.Tensor,
+    active: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Project Route-mode terminal state onto a fixed world-frame altitude."""
+    if (
+        position_world.shape != velocity_world.shape
+        or position_world.shape != acceleration_world.shape
+        or position_world.ndim != 2
+        or position_world.shape[1] != 3
+    ):
+        raise ValueError("world end states must all have shape [B, 3]")
+    if altitude_world.shape != position_world.shape[:1] or active.shape != altitude_world.shape:
+        raise ValueError("altitude and active mask must have shape [B]")
+    active = active.to(dtype=torch.bool)
+    position = position_world.clone()
+    velocity = velocity_world.clone()
+    acceleration = acceleration_world.clone()
+    position[:, 2] = torch.where(active, altitude_world, position_world[:, 2])
+    velocity[:, 2] = torch.where(active, torch.zeros_like(velocity_world[:, 2]), velocity_world[:, 2])
+    acceleration[:, 2] = torch.where(
+        active,
+        torch.zeros_like(acceleration_world[:, 2]),
+        acceleration_world[:, 2],
+    )
+    return position, velocity, acceleration
+
+
 if __name__ == '__main__':
     CoordTransform = StateTransform()

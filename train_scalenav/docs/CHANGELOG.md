@@ -3,6 +3,43 @@
 本文件按修改批次记录，不按日期聚合。每次代码更新新增一个独立变更编号；后续补充测试、
 数据生成和模型评测结果时更新对应记录，不把不同修改合并到同一天的章节中。
 
+<a id="chg-0030"></a>
+## CHG-0030 固定高度 Route 训练合同与可复现验证
+
+- 根因是原 3x5 lattice 的上下行锚点为 `+20/-20 deg`，单 primitive 只能修正
+  `+/-15 deg`，因此上下行不可能拟合水平 Route；原训练却对全部 15 条候选使用软 Route
+  loss，在线又直接执行未投影的三维终态。
+- Route-active 样本现在先将世界系终点投影到 Route local-subgoal 高度，并设置终端
+  `vz=az=0`，再计算 ESDF、Route 和 score target；Route dropout 样本保持原三维 YOPO。
+- 修复 safety ranking 错接总 safety/corridor cost 的问题，改用真实 collision barrier，
+  并采用 `safety_ranking_target_margin` 判定 unsafe。
+- validation motion 改为按 seed/scene/route 确定性生成，训练 seed 同时控制 frame-group
+  split；checkpoint/run metadata 补齐 `wpath_mse` 与固定高度投影合同。
+- 新增 `run_training_006.sh`，默认读取 `train_large_001`，从
+  `saved_large/YOPO_0/best.pth` 微调并启用 score/safety ranking。
+- 真实大数据 CPU 单 batch 冒烟训练通过；训练测试 `64 passed`。
+
+<a id="chg-0029"></a>
+## CHG-0029 扩充三场景训练数据并继续训练
+
+- 新增独立训练批次 `dataset/train_large_001`：`yopo_forest`、`yopo_real_forest`、`blocks`
+  三个场景，各 1000 帧、每帧 3 条真值 A* witness route，共 9000 条路线。
+- 发布校验通过；`YOPODataset` 实际得到 8100 条 train、900 条 valid 样本，三维路径点、
+  clearance、bubble 半径和拓扑字段完整。数据 viewer：
+  `dataset/train_large_001/viewer/index.html`。
+- 从 `saved_corrected/YOPO_5/best.pth` 以 `1e-5` 学习率、batch 32、GPU RTX 3090 继续训练
+  20 epoch；产物：`saved_large/YOPO_0/best.pth`（最佳 epoch 6），训练日志和每 5 epoch
+  checkpoint 同目录保存。
+- 新批次全量 9000 条路线：碰撞率 `0.589%` (53/9000)，平均中心线距离 `0.334 m`，
+  平均最大走廊越界 `0.105 m`，平均进度 `6.355 m`。评测 HTML：
+  `dataset/train_large_001/evaluation_large_best/index.html`。
+- 旧 `benchmark_004_esdf_001` 回归：碰撞率 `0.135%` (2/1479)，中心线距离 `0.319 m`，
+  平均进度 `6.502 m`。三模型对比 HTML：
+  `dataset/benchmark_004_esdf_001/comparison_large_best/viewer/index.html`。
+- 旧基准上的三方结果为：新模型 `0.135%/6.502 m`、上一版 `0.135%/6.794 m`、
+  YOPO-Simple `8.046%/6.225 m`（碰撞率/平均进度）。新大批次更难，不能只用旧基准
+  指标判断泛化；后续应按场景分别分析并继续补充 hard-negative route。
+
 <a id="chg-0016"></a>
 ## CHG-0016 加密安全轨迹时域采样
 

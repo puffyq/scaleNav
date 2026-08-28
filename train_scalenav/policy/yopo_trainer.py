@@ -12,7 +12,11 @@ from torch.utils.tensorboard.writer import SummaryWriter
 
 from config.config import cfg
 from loss.loss_function import YOPOLoss
-from policy.state_transform import rotate_body2world, state_body2world
+from policy.state_transform import (
+    project_world_endstate_to_altitude,
+    rotate_body2world,
+    state_body2world,
+)
 from policy.yopo_dataset import YOPODataset
 from policy.yopo_network import YopoNetwork
 
@@ -52,11 +56,13 @@ class YopoTrainer:
             mode="train",
             data_root=data_root,
             route_dropout_probability=route_dropout_probability,
+            seed=self.random_seed or 0,
         )
         self.valid_dataset = YOPODataset(
             mode="valid",
             data_root=data_root,
             route_dropout_probability=0.0,
+            seed=self.random_seed or 0,
         )
         loader_options = {
             "batch_size": self.batch_size,
@@ -203,11 +209,27 @@ class YopoTrainer:
             endstate_flat[:, 3:6],
             endstate_flat[:, 6:9],
         )
+        frontier_expanded = batch["frontier_world"].repeat_interleave(
+            self.traj_num, dim=0
+        )
+        route_active = (batch["dense_route_mask"] > 0.5).any(dim=1)
+        route_active_expanded = route_active.repeat_interleave(self.traj_num)
+        raw_route_altitude_error = torch.abs(
+            end_position_world[:, 2] - frontier_expanded[:, 2]
+        )
+        end_position_world, end_velocity_world, end_acceleration_world = (
+            project_world_endstate_to_altitude(
+                end_position_world,
+                end_velocity_world,
+                end_acceleration_world,
+                frontier_expanded[:, 2],
+                route_active_expanded,
+            )
+        )
         end_state_world = torch.stack(
             (end_position_world, end_velocity_world, end_acceleration_world), dim=1
         )
         start_state_expanded = start_state_world.repeat_interleave(self.traj_num, dim=0)
-        frontier_expanded = batch["frontier_world"].repeat_interleave(self.traj_num, dim=0)
         route_points_expanded = batch["dense_route_world"].repeat_interleave(
             self.traj_num, dim=0
         )
@@ -252,7 +274,7 @@ class YopoTrainer:
         if float(cfg["safety_ranking_weight"]) > 0.0:
             safety_score_loss = self._safety_binary_ranking_loss(
                 score_flat.view(batch_size, self.traj_num),
-                costs["safety"].detach().view(batch_size, self.traj_num),
+                costs["safety_barrier"].detach().view(batch_size, self.traj_num),
             )
         else:
             safety_score_loss = torch.zeros((), device=total_cost.device)
@@ -277,6 +299,11 @@ class YopoTrainer:
             "oracle_total_cost": float(oracle_cost.mean().detach()),
             "selection_regret": float((selected_cost - oracle_cost).mean().detach()),
             "top1": float((selected_index == oracle_index).float().mean().detach()),
+            "raw_route_altitude_error": float(
+                raw_route_altitude_error[route_active_expanded].mean().detach()
+            )
+            if torch.any(route_active_expanded)
+            else 0.0,
         }
         metrics.update({name: float(value.mean().detach()) for name, value in costs.items()})
         return total_loss, metrics
@@ -290,7 +317,7 @@ class YopoTrainer:
         The original detached total-cost regression remains responsible for
         progress and smoothness ordering.
         """
-        unsafe = barrier > 1.0e-5
+        unsafe = barrier > float(cfg["safety_ranking_target_margin"])
         margin = float(cfg["score_ranking_margin"])
         pair_losses: list[torch.Tensor] = []
         for left in range(predicted.shape[1]):
@@ -381,10 +408,11 @@ class YopoTrainer:
                 "route_bubble_count": int(cfg["route_bubble_count"]),
                 "route_anchor_distances_m": list(cfg["route_anchor_distances_m"]),
                 "local_subgoal_distance_m": float(cfg["local_subgoal_distance_m"]),
+                "fixed_route_altitude_projection": True,
                 "loss_weights": {
                     name: float(cfg[name])
                     for name in (
-                        "ws", "wc", "wa", "wg", "wp", "wprogress",
+                        "ws", "wc", "wa", "wg", "wp", "wpath_mse", "wprogress",
                         "wprogress_floor", "wtangent", "wcenterline", "score_ranking_weight",
                         "score_ranking_margin", "score_ranking_target_margin",
                         "safety_ranking_weight", "safety_ranking_target_margin",
@@ -401,6 +429,17 @@ class YopoTrainer:
                     "smooth", "safety", "frontier", "acceleration",
                     "path_progress", "score_regression", "path_mse",
                     "path_centerline", "path_tangent",
+                    "fixed_route_altitude_projection",
+                    *(
+                        ["score_ranking"]
+                        if float(cfg["score_ranking_weight"]) > 0.0
+                        else []
+                    ),
+                    *(
+                        ["safety_ranking"]
+                        if float(cfg["safety_ranking_weight"]) > 0.0
+                        else []
+                    ),
                 ],
                 "score_only": self.score_only,
             },
@@ -421,10 +460,11 @@ class YopoTrainer:
             "route_dropout_probability": self.train_dataset.route_dropout_probability,
             "route_dataset_version": int(cfg["route_dataset_version"]),
             "local_subgoal_distance_m": float(cfg["local_subgoal_distance_m"]),
+            "fixed_route_altitude_projection": True,
             "loss_weights": {
                 name: float(cfg[name])
                 for name in (
-                    "ws", "wc", "wa", "wg", "wp", "wprogress",
+                    "ws", "wc", "wa", "wg", "wp", "wpath_mse", "wprogress",
                     "wprogress_floor", "wtangent", "wcenterline", "score_ranking_weight",
                     "score_ranking_margin", "score_ranking_target_margin",
                     "safety_ranking_weight", "safety_ranking_target_margin",
@@ -443,6 +483,17 @@ class YopoTrainer:
                 "smooth", "safety", "frontier", "acceleration",
                 "path_progress", "score_regression", "path_mse",
                 "path_centerline", "path_tangent",
+                "fixed_route_altitude_projection",
+                *(
+                    ["score_ranking"]
+                    if float(cfg["score_ranking_weight"]) > 0.0
+                    else []
+                ),
+                *(
+                    ["safety_ranking"]
+                    if float(cfg["safety_ranking_weight"]) > 0.0
+                    else []
+                ),
             ],
             "score_only": self.score_only,
         }

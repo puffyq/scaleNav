@@ -203,7 +203,14 @@ class YOPODataset(Dataset):
         depth = self._read_depth(scene.path / "Textures" / str(frame["depthFileName"]), frame)
         position = np.asarray(frame["posStart"], dtype=np.float32)
         rotation = _rotation_wxyz(frame["orientationWxyz"])
-        motion = self._random_motion()
+        motion_rng = (
+            np.random
+            if self.mode == "train"
+            else np.random.default_rng(
+                np.random.SeedSequence((self.seed, scene_index, route_index))
+            )
+        )
+        motion = self._random_motion(motion_rng)
         goal_field = (
             "local_subgoal_world"
             if "local_subgoal_world" in arrays
@@ -266,17 +273,19 @@ class YOPODataset(Dataset):
         depth = np.nan_to_num(depth, nan=maximum, posinf=maximum, neginf=0.0)
         return np.expand_dims(np.clip(depth, 0.0, maximum) / maximum, axis=0).astype(np.float32)
 
-    def _random_motion(self) -> np.ndarray:
+    def _random_motion(self, rng: Any = np.random) -> np.ndarray:
         while True:
-            velocity = self.vel_max * (self.v_mean + self.v_std * np.random.randn(3))
-            forward = self.vel_max * np.random.lognormal(
+            velocity = self.vel_max * (self.v_mean + self.v_std * rng.standard_normal(3))
+            forward = self.vel_max * rng.lognormal(
                 mean=self.vx_lognorm_mean, sigma=self.vx_lognorm_sigma
             )
             velocity[0] = -forward + 1.2 * self.vel_max
             if np.linalg.norm(velocity) < 1.2 * self.vel_max:
                 break
         while True:
-            acceleration = self.acc_max * (self.a_mean + self.a_std * np.random.randn(3))
+            acceleration = self.acc_max * (
+                self.a_mean + self.a_std * rng.standard_normal(3)
+            )
             if np.linalg.norm(acceleration) < 1.2 * self.acc_max:
                 break
         return np.concatenate((velocity, acceleration)).astype(np.float32)

@@ -20,11 +20,20 @@ def generate_launch_description():
             default_value=default_output_dir,
             description="Root directory for append-only recorded sessions",
         ),
+        DeclareLaunchArgument(
+            "graph_snapshot_period_ms",
+            default_value="500",
+            description="Minimum interval between full graph snapshots",
+        ),
         Node(
             package="scalenav_log",
             executable="scalenav_log_node",
             name="scalenav_log_node",
             output="screen",
-            parameters=[{"output_dir": LaunchConfiguration("output_dir")}],
+            parameters=[{
+                "output_dir": LaunchConfiguration("output_dir"),
+                "graph_snapshot_period_ms": LaunchConfiguration(
+                    "graph_snapshot_period_ms"),
+            }],
         ),
     ])

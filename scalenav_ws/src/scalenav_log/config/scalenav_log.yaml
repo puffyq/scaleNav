@@ -5,19 +5,20 @@ scalenav_log_node:
     rgb_topic: "/camera/color/image"
     pointcloud_topic: "/depth/points"
     free_ray_topic: "/depth/free_rays"
-    graph_topic: "/epic/graph"
-    bubble_topic: "/epic/bubbles"
-    path_topic: "/epic/path"
+    graph_topic: "/scalenav/graph"
+    bubble_topic: "/scalenav/bubbles"
+    path_topic: "/scalenav/path"
     odom_topic: "/sim/odom"
     control_topic: "/scalenav/trajectory_point"
     semantic_topic: "/scalenav/text_heatmap_raw"
     goal_topic: "/goal_pose"
-    local_goal_topic: "/epic/local_goal"
-    clearance_topic: "/epic/clearance"
+    local_goal_topic: "/scalenav/local_goal"
+    clearance_topic: "/scalenav/clearance"
     collision_topic: "/sim/collision"
-    timing_topic: "/epic/timing"
+    timing_topic: "/scalenav/timing"
     mission_position_tolerance_m: 0.5
     mission_speed_tolerance_mps: 0.3
     pointcloud_max_points: 200000
     pointcloud_stride: 1
+    graph_snapshot_period_ms: 500
     qos_depth: 10

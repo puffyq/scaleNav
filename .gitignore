@@ -70,6 +70,7 @@ paper/**/*.fdb_latexmk
 paper/**/*.synctex.gz
 paper/**/page-*.png
 paper/scalenav/tmp/
+paper/scalenav/pics/experiments/**/history/
 
 # Workspace migration backups and generated ROS/colcon outputs.
 bc/
@@ -82,3 +83,5 @@ scalenav_ws/src/**/build/
 scalenav_ws/src/**/install/
 scalenav_ws/src/**/log/
 train_scalenav/saved_corrected/
+train_scalenav/saved_large/
+scalenav_ws/src/aut_test/results/

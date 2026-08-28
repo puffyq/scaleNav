@@ -195,6 +195,65 @@ stateDiagram-v2
 每次状态转换记录 `route_id`、stamp、flags、复用状态、候选 loss 分解和 reason code。
 模型输出非有限、route 过期或输入坐标不一致时进入明确降级状态，不继续使用不可审计轨迹。
 
+### 3.1 在线控制入口
+
+`scripts/start_route_yopo.sh` 是 Route-Conditioned YOPO 的独立控制入口，不调用也不修改
+`scripts/start.sh`。默认入口启动仿真、深度适配、EPIC、语义感知和 Route-YOPO 控制节点；
+已有 EPIC 会话使用 `--attach`，但必须先停止旧 planner，避免两个控制器竞争。
+
+```mermaid
+flowchart LR
+    P[/epic/path/] --> A[兼容聚合器]
+    F[/epic/graph frontier/] --> A
+    C[/epic/clearance/] --> A
+    O[/sim/odom/] --> A
+    D[/camera/depth/image/] --> A
+    A --> Y[YOPO_5 best.pth]
+    Y --> S[15 primitive score 排序]
+    S --> G[101 点 Poly5 连续安全门]
+    G --> SP[/route_yopo/planned_path/]
+    G --> CT[50 Hz 轨迹控制器]
+    CT --> CMD[/scalenav/trajectory_point/]
+    G --> ST[/route_yopo/status/]
+    G --> MK[/route_yopo/candidates/]
+```
+
+当前 EPIC 尚未发布带 source `route_id`、frontier、witness centers 和真实半径的原子消息。
+兼容聚合器在同一锁内读取 path、frontier 和 path 安全空间统计，并要求三个 source stamp
+差值不超过 `0.20 s`；状态和诊断统一标记 `route_source=epic_compat_non_atomic`。本地
+`route_id` 只用于当前控制日志单调编号，不替代将来的 EPIC source `route_id`。
+
+`/epic/bubbles` 只有可视化球心和固定显示尺寸，不能构成模型安全球半径。兼容入口使用
+`/epic/clearance.vector.y - robot_radius - safety_margin` 作为整条 accepted witness 的
+保守安全半径，并在诊断中写明 `radius_source=epic_path_min_clearance_broadcast`。该输入只供
+模型条件使用；最终安全权威仍是当前 DepthPlanar 帧上的扫掠球检查。
+
+模型 score 从低到高检查。每条 primitive 用当前世界系 `p/v/a` 和模型 body-FLU 终态重建
+`1.6667 s` Poly5，并至少采样 101 个 XYZ 点；每个相邻点段执行当前深度帧扫掠球检查。
+首个 `CERTIFIED` 候选进入执行轨迹。score 最优候选碰撞时允许选择下一安全候选；
+FOV 外、未知比例超限、低于最低高度、非有限或碰撞的候选不得发布。15 条均无法认证时
+输出 `SAFETY_HOLD`，清除旧执行轨迹，并以 50 Hz 发布当前里程计位置和零速度保持命令。
+
+控制器对通过安全门的 Poly5 同时保存 101 个位置、速度和加速度状态，在相邻采样间按时间
+插值，向 `/scalenav/trajectory_point` 发布 `MultiDOFJointTrajectoryPoint`。深度超过
+`0.5 s`、里程计超过 `0.5 s`、轨迹超过 `1.6667 s` 或模型 tick 失败时不得继续执行旧轨迹。
+检测到控制话题 publisher 数量大于 1 时，节点清除轨迹并停止发布，状态 reason 为
+`control_publisher_conflict`；冲突解除后仍需等待下一条重新认证的轨迹。
+
+发布话题为：
+
+| 话题 | 类型 | 内容 |
+|---|---|---|
+| `/scalenav/route_yopo/planned_path` | `nav_msgs/Path` | 当前 tick 首条通过安全门的 Poly5 |
+| `/scalenav/route_yopo/candidates` | `visualization_msgs/MarkerArray` | 15 条候选及认证状态 |
+| `/scalenav/route_yopo/status` | `std_msgs/String` JSON | 模式、reason、route id、score、安全结果、推理耗时/P95 |
+| `/scalenav/route_yopo/route_condition` | `std_msgs/String` JSON | 兼容 RouteCondition、来源和非原子标记 |
+| `/scalenav/trajectory_point` | `trajectory_msgs/MultiDOFJointTrajectoryPoint` | 50 Hz 执行状态或安全保持状态 |
+
+checkpoint 固定为 `train_scalenav/saved_corrected/YOPO_5/best.pth`，加载时校验 feature order、
+12 个 route bubbles 和 anchor 数组。当前由普通 PyTorch checkpoint 在线控制；TorchScript
+导出仍属于部署优化项。原子 route 消息、真实障碍场 P95 和闭环飞行仍需继续验收。
+
 ## 4. 函数设计索引
 
 | 子模块 | 函数/类 | 输入 | 输出 | 失败行为 |
@@ -221,15 +280,15 @@ stateDiagram-v2
 
 | 层级 | 编号 | 数量 | 当前覆盖表达 |
 |---|---|---:|---|
-| 单元测试 | `UT-RC-001` - `UT-RC-041` | 41 | 有测试代码或测试设计；以逐项状态为准 |
+| 单元测试 | `UT-RC-001` - `UT-RC-055` | 55 | 在线控制新增 14 项已执行；其余以逐项状态为准 |
 | 模块测试 | `MT-RC-001` - `MT-RC-008` | 8 | 多数有代码，仍需数据/场景复核 |
 | 集成测试 | `IT-RC-001` - `IT-RC-008` | 8 | 单 batch/标注器部分已有；在线闭环待执行 |
 | 性能测试 | `PERF-RC-001` - `PERF-RC-005` | 5 | 测试设计已定义 |
-| 合计 |  | 62 | 不计入在线 151 项统计 |
+| 合计 |  | 76 | 不计入在线 M1-M6 统计 |
 
 “已有测试代码”只表示仓库存在入口；“已执行通过”必须有命令输出、报告或可追溯批次。
 训练侧 CHG-0003 记录当前 `train_scalenav/tests` 为 `45 passed`，但该汇总不自动把所有
-62 项场景和性能用例标为通过。
+76 项场景和性能用例标为通过。
 
 ### 5.2 单元测试用例
 
@@ -276,6 +335,20 @@ stateDiagram-v2
 | UT-RC-039 | 人员近似点 | 姿态/包围盒 -> 点集 | 动态物体合并 | 坐标、点数、有限性正确 | 10 组 | P1 | 已有代码：`test_snapshot_dataset.py` |
 | UT-RC-040 | 人员点合并 | tree/人员点 -> 合并点云 | 地图导出 | 原点保留、追加格式正确 | 5 组 | P1 | 已有代码：`test_snapshot_dataset.py` |
 | UT-RC-041 | binary PLY 拒绝 | binary PLY -> 校验错误 | 地图校验 | 不静默误读坐标 | 3 组 | P1 | 已有代码：`test_snapshot_dataset.py` |
+| UT-RC-042 | `decide_route_mode` | route/frontier 新鲜度、stamp 一致性、合法性 -> 模式 | 每个 depth tick | 严格输出 ROUTE/FRONTIER_ONLY/SAFETY_HOLD 和 reason | 3 状态 | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-043 | `LocalRouteId.observe` | 相同/变化/回到旧 route signature -> id | route 更新 | 相同复用；每次实质变化单调递增，不回退 | 4 次 | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-044 | `build_route_features` | world centers/radius/mask/anchor -> `[12,4]` | 每个 ROUTE tick | body-FLU、anchor/radius 归一化正确；masked 项清零 | 2 个 Bubble | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-045 | `quaternion_xyzw_to_matrix` | 90 度 yaw 与 z 轴 -> 旋转矩阵 | 每个 odom | x 转到 y，z 保留，完整三维旋转 | 2 个轴 | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-046 | `sample_poly5_candidates` | 世界系起始 p/v/a、body 终态 -> XYZ 轨迹 | 每个模型 tick | 101 点、首末边界正确、z 未压平 | 1 条 x 101 点 | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-047 | `select_first_certified` 安全后备 | score `[0.1,0.2,0.3]`、第一条碰撞 -> index | 每个模型 tick | 跳过 score 最优碰撞项，选择第二条安全项 | 3 候选 | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-048 | `select_first_certified` 全失败 | 碰撞/未知/NaN 候选 -> index | 每个模型 tick | 返回空选择，上层进入 SAFETY_HOLD | 3 候选 | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-049 | DepthPlanar 连续安全门 | 20 m 自由深度/2 m 障碍 + 5 m Poly5 -> 状态 | 每候选 101 点 | 自由路径 CERTIFIED，穿过 2 m 障碍 INVALID | 2 个深度场 | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-050 | 控制发布边界 | 控制节点源码 -> publisher 集合 | 每次入口修改 | 使用既有 trajectory topic，不导入旧 planner | 1 次源码审计 | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-051 | `_safety_depth` | 高分辨率远深度、2 m 近障碍和 NaN -> 固定安全网格 | 每个 depth tick | 每块保留最小深度；块内未知不变成已知自由空间 | 2 类块 | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-052 | `sample_poly5_candidate_states` | 起终 p/v/a -> 101 点控制状态 | 每个模型 tick | 首末位置、速度、加速度满足 Poly5 边界 | 1 条 x 101 点 | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-053 | `publish_control` 正常执行 | 已认证 p/v/a 轨迹 -> 控制消息 | 50 Hz | 发布有限位置、速度、加速度和限速 yaw | 1 tick | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-054 | `publish_control` 安全保持 | 无认证轨迹 + 新鲜 odom -> 控制消息 | 50 Hz | 发布当前位置和三轴零速度 | 1 tick | P0 | 已执行通过：`test_route_yopo_control.py` |
+| UT-RC-055 | `publish_control` publisher 冲突 | 同一控制话题 2 个 publisher -> 抑制 | 50 Hz | 不发布命令、清除轨迹、reason 可审计 | 1 tick | P0 | 已执行通过：`test_route_yopo_control.py` |
 
 ### 5.3 模块测试用例
 
@@ -309,9 +382,9 @@ stateDiagram-v2
 |---|---|---|---|---|---:|---|---|
 | PERF-RC-001 | ESDF/tile 内存 | 点云/0.2 m/tile -> 字节/误差 | 场景版本 | 不载入超预算全图、边界误差受限 | 2 场景 x 3 | P0 | 测试设计已定义 |
 | PERF-RC-002 | Dataset RSS | batch 1/8/32、K 8/12/16 -> RSS/时间 | 训练版本 | 内存增长可解释、无 route 全量复制 | 每组 5 次 | P1 | 测试设计已定义 |
-| PERF-RC-003 | YOPO latency | 固定 batch -> P50/P95/max | 模型发布 | P95 `<=` 控制周期 25% | 1000 tick | P0 | 测试设计已定义 |
+| PERF-RC-003 | YOPO latency | 固定 batch -> P50/P95/max | 模型发布 | P95 `<=` 控制周期 25% | 1000 tick | P0 | 基准通过：RTX 3090 纯模型 P50/P95/max `1.743/2.935/4.785 ms`；真实在线分布待复核 |
 | PERF-RC-004 | RouteLoss 资源 | primitive/M -> 时间/显存/梯度 | 训练版本 | M 增长无失控、dropout 可完成 | 每组 100 batch | P1 | 测试设计已定义 |
-| PERF-RC-005 | 在线 route 预处理 | K/切换/过期 -> 延迟/字节/状态 | ROS2 tick | 不阻塞控制、超时明确降级 | 1000 tick | P0 | 测试设计已定义 |
+| PERF-RC-005 | 在线 route 预处理 | K/切换/过期 -> 延迟/字节/状态 | ROS2 tick | 不阻塞控制、超时明确降级 | 1000 tick | P0 | 部分通过：合成自由深度 100 tick 完整 P50/P95/max `36.139/64.460/68.883 ms`；真实场景和 1000 tick 待执行 |
 
 性能记录必须包含场景、route 数、点云点数、CPU/GPU、峰值内存以及 P50/P95/最大值；
 功能正确不能替代性能通过。
@@ -331,6 +404,11 @@ stateDiagram-v2
 3. 所有 P0 数据契约、质量门、前向反向传播和在线原子接口用例通过。
 4. 闭环场景无左右振荡、无碰撞，并最终到达 mission goal。
 5. 推理和在线预处理满足控制周期预算；离线单步指标不得替代闭环验收。
+
+在线控制入口定向报告见
+[TEST_REPORT_2026-08-28_ROUTE_YOPO_CONTROL.md](test_reports/TEST_REPORT_2026-08-28_ROUTE_YOPO_CONTROL.md)。
+其中 14 项函数测试和 RTX 3090 合成输入性能基准已经通过；ROS2 实际输入同步、真实深度
+分布 P95 和完整闭环飞行仍需执行。
 
 ## 7. 来源与追溯
 

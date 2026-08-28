@@ -185,7 +185,7 @@ function calculateFlightEvaluation(index){
     else if(record.kind==='path')pathUpdates++;
     else if(record.kind==='control'&&record.data?.position&&latestOdom?.data?.position){const error=distance(record.data.position,latestOdom.data.position);trackingSquared+=error*error;trackingCount++;}
     else if(record.kind==='clearance'){
-      vehicleClearances.push(record.data?.vehicle_m);pathMinimumClearances.push(record.data?.path_min_m);pathMeanClearances.push(record.data?.path_mean_m);
+      vehicleClearances.push(record.data?.vehicle_m);pathMinimumClearances.push(record.data?.global_witness_min_m??record.data?.path_min_m);pathMeanClearances.push(record.data?.global_witness_mean_m??record.data?.path_mean_m);
     }
   }
   if(!odoms.length)return {...mission,odomCount:0,missionCount:segments.length,reachedMissions};
@@ -237,8 +237,8 @@ function updateFlightEvaluation(index){
     evaluationMetric('平均障碍物距离',result.vehicleClearance?fixed(result.vehicleClearance.mean,2,' m'):'未记录','车辆当前位置到规划器障碍距离场最近点的样本均值'),
     evaluationMetric('净空 5% 分位',result.vehicleClearance?fixed(result.vehicleClearance.p05,2,' m'):'未记录','车辆净空样本的第 5 百分位，比单帧最小值更抗异常点'),
     evaluationMetric('最小障碍物距离',result.vehicleClearance?fixed(result.vehicleClearance.min,2,' m'):'未记录','车辆当前位置的最小规划器净空'),
-    evaluationMetric('平均路径净空',result.pathMeanClearance?fixed(result.pathMeanClearance.mean,2,' m'):'未记录','每次规划路径的沿线平均净空，再对任务段取均值'),
-    evaluationMetric('最小路径净空',result.pathMinimumClearance?fixed(result.pathMinimumClearance.min,2,' m'):'未记录','任务段所有已发布路径的沿线最小净空'),
+    evaluationMetric('全局 witness 平均净空',result.pathMeanClearance?fixed(result.pathMeanClearance.mean,2,' m'):'未记录','仅描述 ScaleNav 全局引导，不是 YOPO 实际执行轨迹净空'),
+    evaluationMetric('全局 witness 最小净空',result.pathMinimumClearance?fixed(result.pathMinimumClearance.min,2,' m'):'未记录','引导质量诊断；不用于碰撞、成功或安全判定'),
     evaluationMetric('平均加速度',fixed(result.averageAcceleration,2,' m/s²')),
     evaluationMetric('最大加速度',fixed(result.maxAcceleration,2,' m/s²')),
     evaluationMetric('Jerk RMS',fixed(result.jerkRms,2,' m/s³')),
@@ -248,7 +248,7 @@ function updateFlightEvaluation(index){
     evaluationMetric('碰撞次数','未记录','当前系统没有独立、可信的碰撞事件源')
   );
   const clearanceNote=result.vehicleClearance?`clearance=${result.vehicleClearance.count}`:'该 session 没有 clearance 事件（需用新版本重新采集）';
-  note.textContent=`任务段 ${result.number} · target=[${result.goal.map(value=>value.toFixed(1)).join(', ')}] · odom=${result.odomCount} · ${clearanceNote}。到达判据为目标误差 ≤ 1 m；净空来自规划器使用的地面过滤障碍距离场，不等同于全局占据地图真值。`;
+  note.textContent=`任务段 ${result.number} · target=[${result.goal.map(value=>value.toFixed(1)).join(', ')}] · odom=${result.odomCount} · ${clearanceNote}。到达判据为目标误差 ≤ 1 m；vehicle clearance 描述实际机位，global witness clearance 只描述全局引导，YOPO 负责局部避障。`;
 }
 
 function quat(value) {

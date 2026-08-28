@@ -258,6 +258,7 @@ M5 单元测试执行明细和在线证据见
 | IT-ROS-005 | 发布 120 帧固定 5x3 热力图并同步发布匀速 odom，采集 graph snapshot | 节点数、id、z、score 时序 | semantic 2 Hz、odom 100 Hz | 节点增长非逐帧 15 个；重叠观测 id 连续；每列三行 z/score 对应稳定 | 20 次 x 60 s | P0 | 测试设计已定义 |
 | IT-ROS-006 | ROS2 闭环测试节点跟随 `/epic/local_goal` 更新 odom，并注入 235 个局部语义节点 | `/epic/path`、frontier、完整 loss、local goal、到达事件 | odom 100 Hz、planner 10 Hz、semantic 2 Hz | 统一 loss 下 frontier 不长期停滞，允许短期偏离，最终收敛到 mission goal 并在超时前发布到达状态 | 20 次任务 | P0 | 测试设计已定义 |
 | IT-ROS-007 | 闭环注入单行/多行风险及地面误检 | 路线 risk/loss、local goal、切换次数、任务状态 | odom 100 Hz、planner 10 Hz、semantic 2 Hz | local goal 连续；路线不因单帧、单行或地面误检左右振荡；最终完成任务 | 20 次任务 | P0 | 测试设计已定义 |
+| IT-ROS-008 | 独立启动 Route-YOPO 控制，注入同步及超时的 odom/depth/path/frontier/clearance，并注入第二控制 publisher | status、route_condition、15 候选、planned path 和 `/scalenav/trajectory_point` | odom 100 Hz、depth/EPIC 10 Hz、模型 5 Hz、控制 50 Hz | 兼容输入标记 `compat_non_atomic`；三级降级正确；仅执行安全候选；无安全候选时位置保持；第二 publisher 出现时停止发布 | 每状态 100 tick、10 次启动 | P0 | 部分通过：14 项函数测试和 RTX 3090 合成 P95 通过；尚未执行真实 DDS 输入同步和闭环飞行 |
 
 ### 4.2 飞行场景集成
 
@@ -269,7 +270,7 @@ M5 单元测试执行明细和在线证据见
 | IT-FLT-004 | graph rebuild 时无人机越过 witness 首点 | 连续 accepted route/local goal | rebuild 10 Hz、planner 10 Hz | 无 discontinuous rejection，terminal id 可恢复 | 100 次 rebuild | P0 | 已测试失败（最新日志）：出现 8 次 `discontinuous witness` 拒绝，并有 stale terminal/无可达真实安全球告警；受控 100 次场景尚未执行 |
 | IT-FLT-005 | 5x3 高风险 patch，measured depth 小于 30 m | 15 个固定 optical Z 语义投影 | semantic 2 Hz | 每有效帧 points>0，中心/边缘 optical Z 都为 30 m | 100 帧 | P0 | 已有测试，待场景复核 |
 | IT-FLT-006 | 候选搜索连续超时 300 ms，旧 witness 安全 | incumbent 和短时 local goal | planner 10 Hz | hold 窗内继续安全路线；超过 400 ms 无安全输出则停止保底 | 30 次 | P0 | 测试设计已定义 |
-| IT-FLT-007 | EPIC 输出接入 YOPO 和控制器，含窄门与转弯 | 飞行轨迹与控制状态 | 全链路额定频率 | local goal 坐标系/层高正确；控制连续；无碰撞和 emergency stop | 10 次路线 | P0 | 测试设计已定义 |
+| IT-FLT-007 | EPIC 输出接入 Route-YOPO 控制器，含窄门与转弯 | 飞行轨迹、候选安全状态和 50 Hz 控制状态 | 全链路额定频率 | RouteCondition 坐标系/层高正确；控制连续；无碰撞和 emergency stop；失效时位置保持 | 10 次路线 | P0 | 部分通过：入口、模型、安全门和控制函数已有自动化测试；10 次闭环路线待执行 |
 | IT-FLT-008 | 长航线持续输入上/中/下分层语义目标及地面响应 | graph snapshot、row/FOV/地面/时间置信度、路线 loss | 全链路额定频率 | 三行空间信息保留；地面响应被抑制；不同 row 对路线 loss 的影响稳定、可重复，单行高风险仍有效 | 10 次 x 5 min | P0 | 测试设计已定义 |
 | IT-FLT-009 | 复现未到终点会话的地图、语义密度和代价比例 | 完整飞行轨迹、frontier 序列、loss 分解、任务完成事件 | 全链路额定频率 | 不复现 frontier 停滞/循环并按时到达；每次切换由总 loss 改善或物理失效解释，不要求一定是前向延伸 | 10 次完整任务 | P0 | 测试设计已定义 |
 | IT-FLT-010 | 同一进程执行 `(0,0) -> (0,140) -> (0,0)`；去程建立 graph，回程不清空 graph/semantic memory | goal graph 状态、background `inserted/remained`、route switch、update/rebuild 时延、完成时间、odom 轨迹长度、障碍密度热图及高风险语义距离 | depth/planner 10 Hz、semantic 2 Hz、odom 100 Hz | 回程必须复用 graph 且 `inserted/rebuild` 至少下降 30%；10 次往返中回程时间中位数至少降低 5%，轨迹和 update/rebuild P95 不得回退超过 5%，切换次数不增加；语义影响须以相同日志、语义权重开/关 A/B 区分于几何避障 | 10 次完整往返 | P1 | 部分通过（2 次日志实验）：graph 复用、几何新增量和切换次数通过；轮次 2 回程平均/P90 障碍密度下降 8.2%/28.6%，高风险语义 5 m 内暴露从 8.7% 降至 0%；但回程计算未加速、轨迹更长，且尚无语义权重 A/B 因果证据；见 [往返复用实验报告](test_reports/TEST_REPORT_2026-08-28_ROUND_TRIP_GRAPH_REUSE.md) |

@@ -2,6 +2,59 @@
 
 本文件按修改批次记录，不按日期聚合。每次代码更新新增一个独立变更编号；后续补充验证结果时更新对应记录，不把不同修改合并到同一天的章节中。
 
+<a id="chg-0034"></a>
+## CHG-0034 Route-YOPO 固定高度执行合同
+
+- Route 合同新增固定高度校验：path 高度跨度超过 `0.05 m` 时不进入 ROUTE 模式。
+- ROUTE 模式把全部 YOPO 终点投影到 Route 中位高度并令终端 `vz=az=0`，投影后再执行
+  Poly5 重建和深度安全认证；FRONTIER_ONLY 仍保留三维 YOPO 行为。
+- 整段轨迹必须位于 Route 高度 `+/-0.25 m`，否则标记 `ROUTE_ALTITUDE`；没有同时通过
+  高度带与深度门的候选时保持 SAFETY_HOLD。
+- `log_scalenav/session_20260828_190205_247` 回放中，`+3/+10/+15 s` 分别保留
+  `13/15/15` 条认证候选，固定终点为 `1.5995 m`，整段最大误差低于 `4 mm`；`+1 s`
+  深度无安全解，保持 HOLD。
+- Route-YOPO 控制定向测试 `20 passed`。
+
+<a id="chg-0033"></a>
+## CHG-0033 Route-Conditioned YOPO 独立控制入口
+
+- 记录时间：2026-08-28
+- 状态：独立入口、checkpoint smoke、14 项定向测试和 RTX 3090 合成基准完成；真实 DDS 输入、真实场景 P95 与闭环飞行待执行
+- 测试记录：[TEST_REPORT_2026-08-28_ROUTE_YOPO_CONTROL.md](test_reports/TEST_REPORT_2026-08-28_ROUTE_YOPO_CONTROL.md)
+
+修改内容：
+
+- 新增 `scripts/start_route_yopo.sh`，默认启动完整控制链，`--attach` 接入已有 EPIC 会话；
+  未修改、调用或替换 `scripts/start.sh`，且完整模式不启动旧 planner。
+- 新增 Route-YOPO ROS2 控制节点，加载
+  `train_scalenav/saved_corrected/YOPO_5/best.pth`，输出 planned path、15 候选、状态、
+  RouteCondition 诊断和 50 Hz `/scalenav/trajectory_point` 控制命令。
+- 在 EPIC 原子 route 消息完成前，聚合 `/epic/path`、`/epic/graph` 和
+  `/epic/clearance`，要求 source stamp 相近并明确标记 `epic_compat_non_atomic`；本地
+  route id 不冒充 EPIC source id。
+- 15 个 primitive 按 score 排序后逐条重建 101 点三维 Poly5，并执行当前 DepthPlanar
+  扫掠球安全检查；score 最优项不安全时尝试下一项，全部无法认证时进入 SAFETY_HOLD。
+- 安全门使用每块最小深度把高分辨率输入保守缩减到固定网格；块内近障碍保留，任一未知
+  射线使对应块保持未知。101 点间以半个最大采样间距扩张安全球，连续覆盖 Poly5 且不重复
+  检查每段两端。
+- 状态实现 ROUTE、FRONTIER_ONLY、SAFETY_HOLD；路径/目标过期、非有限、stamp 不一致、
+  安全空间不足和无安全 primitive 均保留 reason code。
+- 通过安全门的 Poly5 保存 101 个位置、速度和加速度状态供 50 Hz 插值执行；无安全轨迹、
+  深度/里程计超时或轨迹过期时发布当前位置零速度保持。检测到第二控制 publisher 时停止
+  发布并清除旧轨迹，冲突解除后必须等待新轨迹重新认证。
+
+验证结果：
+
+- checkpoint feature order、12 个 route anchors、15 primitive 输出 shape 和有限性通过。
+- `test_route_yopo_control.py` 为 `14 passed`，覆盖 Poly5 导数、正常控制、安全保持和双
+  publisher 冲突；Bash 语法、Python 编译和 diff whitespace 检查通过。
+- `start_route_yopo.sh --attach --device cuda` 实际启动后，ROS 图确认
+  `/scalenav/trajectory_point` 为 `MultiDOFJointTrajectoryPoint`，publisher count 为 1，
+  唯一 publisher 是 `scalenav_route_yopo_controller`。
+- RTX 3090 上纯模型 1000 tick 的 P50/P95/max 为 `1.743/2.935/4.785 ms`；包含前处理、
+  GPU 传输、Poly5 和 15 候选安全门的合成自由深度 100 tick 为
+  `36.139/64.460/68.883 ms`，峰值显存 `192.03 MiB`。
+
 <a id="doc-test-2026-08-28-round-trip-graph-reuse"></a>
 ## DOC-TEST-2026-08-28 去程建图与回程效率实验
 

@@ -73,6 +73,14 @@ def percentile(values: Sequence[float], probability: float) -> float | None:
     return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
+def finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def describe(values: Iterable[float]) -> dict[str, float | int | None]:
     finite = [float(value) for value in values if math.isfinite(float(value))]
     if not finite:
@@ -345,6 +353,14 @@ def analyze_session(
         index = min(bisect.bisect_left(seqs, goal.seq), len(odom) - 1)
         mapped_goals.append((goal, index))
 
+    latched_collisions = sorted(
+        (
+            record for record in timed["collision"]
+            if bool(record.data.get("latched", record.data.get("active", False)))
+        ),
+        key=lambda record: record.seq,
+    )
+
     legs: list[dict[str, Any]] = []
     ranges: list[tuple[int, int]] = []
     for goal_index, (goal, start_index) in enumerate(mapped_goals):
@@ -356,6 +372,18 @@ def analyze_session(
             if goal_index + 1 < len(mapped_goals)
             else len(odom) - 1
         )
+        terminal_collision = next(
+            (
+                record for record in latched_collisions
+                if odom[start_index].seq <= record.seq <= odom[search_end].seq
+            ),
+            None,
+        )
+        if terminal_collision is not None:
+            search_end = min(
+                search_end,
+                max(start_index + 1, bisect.bisect_left(seqs, terminal_collision.seq)),
+            )
         spatial_index: int | None = None
         settled_index: int | None = None
         for index in range(start_index, search_end + 1):
@@ -387,6 +415,9 @@ def analyze_session(
             "average_speed_mps": path_m / duration_s if duration_s > 0 else None,
             "path_efficiency_pct": 100.0 * progress_m / path_m if path_m > 0 else None,
             "final_goal_error_m": final_error,
+            "terminal_reason": "collision" if terminal_collision is not None else (
+                "goal" if settled_index is not None else "log_end"
+            ),
         })
         ranges.append((start_index, end_index))
         if args.mission_mode == "first":
@@ -421,8 +452,20 @@ def analyze_session(
         success = goal_complete and safe and not timeout
 
     clearance_records = [record for record in timed["clearance"] if in_intervals(record.stamp_ns, intervals)]
-    vehicle_clearance = [float(record.data["vehicle_m"]) for record in clearance_records if math.isfinite(float(record.data.get("vehicle_m", math.nan)))]
-    path_min_clearance = [float(record.data["path_min_m"]) for record in clearance_records if math.isfinite(float(record.data.get("path_min_m", math.nan)))]
+    vehicle_clearance = [
+        number
+        for record in clearance_records
+        if (number := finite_number(record.data.get("vehicle_m"))) is not None
+    ]
+    global_witness_clearance = [
+        number
+        for record in clearance_records
+        if (
+            number := finite_number(
+                record.data.get("global_witness_min_m", record.data.get("path_min_m"))
+            )
+        ) is not None
+    ]
 
     structured_runtime = parse_structured_runtime(timed["timing"], intervals)
     ros_log = None if structured_runtime is not None else find_ros_log(manifest, explicit_ros_log)
@@ -482,7 +525,11 @@ def analyze_session(
             "vehicle_min_m": min(vehicle_clearance) if vehicle_clearance else None,
             "vehicle_p05_m": percentile(vehicle_clearance, 0.05),
             "vehicle_mean_m": statistics.fmean(vehicle_clearance) if vehicle_clearance else None,
-            "planned_path_min_m": min(path_min_clearance) if path_min_clearance else None,
+            # Diagnostic only: YOPO executes and locally avoids obstacles
+            # around this global witness; this is not executed-flight clearance.
+            "global_witness_min_clearance_m": (
+                min(global_witness_clearance) if global_witness_clearance else None
+            ),
         },
         "rates": {
             kind: publish_stats(timed[kind], intervals, total_duration)

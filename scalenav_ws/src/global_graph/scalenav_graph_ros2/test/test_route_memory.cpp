@@ -96,6 +96,32 @@ TEST(RouteMemoryM5Contract, TcM5006SwitchUsesAggregateLossHysteresisAndHardFailu
   }
 }
 
+TEST(RouteMemoryM5Contract, TcM5019SemanticHeightUsesTheFullInfluenceRadius)
+{
+  EXPECT_TRUE(scalenav_graph::semanticPointCanInfluenceFixedLayer(6.6F, 1.6F, 5.0F));
+  EXPECT_TRUE(scalenav_graph::semanticPointCanInfluenceFixedLayer(-3.4F, 1.6F, 5.0F));
+  EXPECT_FALSE(scalenav_graph::semanticPointCanInfluenceFixedLayer(6.61F, 1.6F, 5.0F));
+  EXPECT_FALSE(scalenav_graph::semanticPointCanInfluenceFixedLayer(
+    std::numeric_limits<float>::quiet_NaN(), 1.6F, 5.0F));
+}
+
+TEST(RouteMemoryM5Contract, TcM5020FrontierRefreshUsesConfiguredProgressFraction)
+{
+  EXPECT_FALSE(scalenav_graph::routeProgressReachedFraction(7.99F, 20.0F, 0.40F));
+  EXPECT_TRUE(scalenav_graph::routeProgressReachedFraction(8.0F, 20.0F, 0.40F));
+  EXPECT_TRUE(scalenav_graph::routeProgressReachedFraction(8.01F, 20.0F, 0.40F));
+  EXPECT_FALSE(scalenav_graph::routeProgressReachedFraction(8.0F, 0.0F, 0.40F));
+}
+
+TEST(RouteMemoryM5Contract, TcM5021MissionGoalUsesTheLargerDirectHorizon)
+{
+  EXPECT_TRUE(scalenav_graph::missionGoalWithinDirectHorizon(15.0F, 6.0F, 15.0F));
+  EXPECT_FALSE(scalenav_graph::missionGoalWithinDirectHorizon(15.01F, 6.0F, 15.0F));
+  EXPECT_TRUE(scalenav_graph::missionGoalWithinDirectHorizon(8.0F, 8.0F, 5.0F));
+  EXPECT_FALSE(scalenav_graph::missionGoalWithinDirectHorizon(
+    std::numeric_limits<float>::quiet_NaN(), 6.0F, 15.0F));
+}
+
 TEST(RouteMemoryM5Contract, TcM5007EdgeFollowsRouteChecksEndpointsAndMidpoint)
 {
   const std::vector<Eigen::Vector3f> straight{point(0.0F), point(10.0F)};
