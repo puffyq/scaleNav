@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>YOPO Candidate Diagnostic</title>
+  <style>
+    :root { color-scheme: dark; --bg:#101315; --panel:#171b1e; --line:#2b3237; --muted:#9aa4aa; --text:#eef2f2; --red:#ef514b; --cyan:#58b8d7; --green:#55c990; --amber:#e7b85c; }
+    * { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--text); font:13px/1.4 system-ui,sans-serif }
+    header { padding:18px 22px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:20px; flex-wrap:wrap }
+    h1 { margin:0 0 3px; font-size:20px } .path { color:var(--muted); font-size:11px; word-break:break-all }
+    .summary { display:flex; gap:18px; color:var(--muted) } .summary strong { display:block; color:var(--text); font-size:17px }
+    main { display:grid; grid-template-columns:290px minmax(0,1fr); min-height:calc(100vh - 80px) }
+    aside { border-right:1px solid var(--line); padding:16px; background:#131719 } section { margin-bottom:18px }
+    h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 9px }
+    label { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:8px 0; color:var(--muted) }
+    select,input[type=number] { width:145px; background:#0f1214; color:var(--text); border:1px solid var(--line); padding:6px 7px; border-radius:4px }
+    input[type=checkbox] { accent-color:var(--green) } button { background:#20272b; border:1px solid #3b464d; color:var(--text); border-radius:4px; padding:6px 9px; cursor:pointer } button:hover { border-color:var(--green) }
+    .nav { display:flex; gap:6px; align-items:center } .nav input { flex:1 } .nav button { font-size:18px; width:34px; padding:3px }
+    .workspace { padding:18px; min-width:0 } .grid { display:grid; grid-template-columns:minmax(450px,1fr) minmax(350px,480px); gap:14px }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:6px; overflow:hidden } .panel h2 { padding:12px 14px; margin:0; border-bottom:1px solid var(--line) }
+    canvas { display:block; width:100%; aspect-ratio:1/1; background:#e7e9e8 } .stage { position:relative }
+    .metrics { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:12px }
+    .metric { border:1px solid var(--line); padding:8px; border-radius:4px } .metric strong { display:block; font-size:16px } .metric span { color:var(--muted); font-size:11px }
+    .table-wrap { max-height:calc(100vh - 400px); overflow:auto } table { width:100%; border-collapse:collapse; font-size:11px } th,td { padding:7px 8px; border-bottom:1px solid var(--line); text-align:right; white-space:nowrap } th:first-child,td:first-child { text-align:left } th { color:var(--muted); position:sticky; top:0; background:var(--panel) } tr.selected { background:#26362e } tr.oracle { outline:1px solid var(--amber) } tr.bad { color:#f27c78 }
+    .swatch { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px } .hint { color:var(--muted); padding:10px 12px; border-top:1px solid var(--line); font-size:11px }
+    @media(max-width:900px) { main { grid-template-columns:1fr } aside { border-right:0; border-bottom:1px solid var(--line) } .grid { grid-template-columns:1fr } .table-wrap { max-height:none } }
+  </style>
+</head>
+<body>
+  <script src="dataset.js"></script>
+  <header><div><h1>YOPO 15-Primitive Candidate Diagnostic</h1><div class="path" id="datasetPath"></div></div><div class="summary"><div><strong id="routeCount">-</strong>routes</div><div><strong id="candidateCount">15</strong>candidates</div><div><strong id="matchRate">-</strong>score/oracle match</div></div></header>
+  <main>
+    <aside>
+      <section><h2>Selection</h2><label>Scene <select id="scene"></select></label><label>Frame <input id="frame" type="number" min="0" value="0"></label><div class="nav"><button id="prev">&#8592;</button><input id="frameRange" type="range" min="0" max="0" value="0"><button id="next">&#8594;</button></div><label>Route <select id="route"></select></label></section>
+      <section><h2>Display</h2><label>Witness <input id="witness" type="checkbox" checked></label><label>All 15 candidates <input id="all" type="checkbox" checked></label><label>Safe candidates only <input id="safe" type="checkbox"></label><label>Bubble corridor <input id="bubbles" type="checkbox" checked></label></section>
+      <section><h2>Selected vs oracle</h2><div class="metrics"><div class="metric"><strong id="selectedIndex">-</strong><span>score selected</span></div><div class="metric"><strong id="oracleIndex">-</strong><span>centerline oracle</span></div><div class="metric"><strong id="selectedCenter">-</strong><span>selected centerline / m</span></div><div class="metric"><strong id="oracleCenter">-</strong><span>oracle centerline / m</span></div><div class="metric"><strong id="gap">-</strong><span>selection gap / m</span></div><div class="metric"><strong id="selectedScore">-</strong><span>selected score</span></div></div></section>
+    </aside>
+    <div class="workspace"><div class="grid"><section class="panel"><h2 id="title">Witness and candidates</h2><div class="stage"><canvas id="canvas"></canvas></div><div class="hint">Orange = score-selected · amber = centerline oracle · thin colored lines = other primitives</div></section><section class="panel"><h2>Candidate metrics</h2><div class="table-wrap"><table><thead><tr><th>primitive</th><th>score</th><th>centerline m</th><th>max m</th><th>corridor m</th><th>progress m</th><th>clearance m</th><th>state</th></tr></thead><tbody id="rows"></tbody></table></div></section></div></div>
+  </main>
+  <script>
+  (() => {
+    const data=window.SCALENAV_DATASET, state={scene:0,frame:0,route:0}; const $=id=>document.getElementById(id); const fixed=(v,n=3)=>Number(v).toFixed(n); const palette=['#6baed6','#74c476','#9e9ac8','#fd8d3c','#e6550d','#31a354','#756bb1','#636363','#e41a1c','#3182bd','#969696','#9ecae1','#a1d99b','#bcbddc','#fdae6b'];
+    const scene=()=>data.scenes[state.scene], frame=()=>scene().frames[state.frame], route=()=>frame().routes[state.route], pred=()=>route().prediction, candidates=()=>pred()?.candidates||[];
+    function bounds(){ const s=scene().bounds,r=route(), pts=(r.path||[]).concat(...candidates().filter((x,i)=>$('all').checked||x.selected||x.centerlineOracle).map(x=>x.path)); if(!pts.length)return s; const xs=pts.map(p=>p[0]),ys=pts.map(p=>p[1]); let x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys),span=Math.max(x1-x0,y1-y0,6),pad=Math.max(2,.2*span),cx=(x0+x1)/2,cy=(y0+y1)/2,h=span/2+pad; return [Math.max(s[0],cx-h),Math.min(s[1],cx+h),Math.max(s[2],cy-h),Math.min(s[3],cy+h)] }
+    function point(p,b,w,h){return [(p[0]-b[0])/(b[1]-b[0])*w,(b[3]-p[1])/(b[3]-b[2])*h]}
+    function line(ctx,path,b,w,h,color,width,dash=[]){if(!path||path.length<2)return;ctx.save();ctx.strokeStyle=color;ctx.lineWidth=width;ctx.globalAlpha=1;ctx.setLineDash(dash);ctx.lineCap='round';ctx.lineJoin='round';ctx.beginPath();path.forEach((p,i)=>{const q=point(p,b,w,h);i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1])});ctx.stroke();ctx.restore()}
+    function draw(){const c=$('canvas'),r=c.getBoundingClientRect(),scale=devicePixelRatio||1,w=Math.max(1,r.width*scale),h=Math.max(1,r.height*scale);c.width=w;c.height=h;const ctx=c.getContext('2d'),b=bounds(),s=scene(),routeNow=route();ctx.clearRect(0,0,w,h);const img=new Image();img.onload=()=>{const sb=s.bounds,sx=(b[0]-sb[0])/(sb[1]-sb[0])*img.naturalWidth,sy=(sb[3]-b[3])/(sb[3]-sb[2])*img.naturalHeight,sw=(b[1]-b[0])/(sb[1]-sb[0])*img.naturalWidth,sh=(b[3]-b[2])/(sb[3]-sb[2])*img.naturalHeight;ctx.drawImage(img,sx,sy,sw,sh,0,0,w,h);renderLines(ctx,b,w,h,routeNow)};img.src=s.mapImage;if(img.complete&&img.naturalWidth)renderLines(ctx,b,w,h,routeNow)}
+    function renderLines(ctx,b,w,h,r){const x=w/(b[1]-b[0]);if($('bubbles').checked){ctx.fillStyle='rgba(88,184,215,.08)';ctx.strokeStyle='rgba(88,184,215,.24)';r.path.forEach((p,i)=>{const q=point(p,b,w,h);ctx.beginPath();ctx.arc(q[0],q[1],Math.max(1,(r.radii[i]||0)*x),0,Math.PI*2);ctx.fill();ctx.stroke()})}if($('witness').checked)line(ctx,r.path,b,w,h,'#ef514b',4,[9*devicePixelRatio,6*devicePixelRatio]);const list=candidates();list.forEach((item,i)=>{if($('safe').checked&&item.collision)return;if(!$('all').checked&&!item.selected&&!item.centerlineOracle)return;const color=item.selected?'#ff8a18':item.centerlineOracle?'#e7b85c':palette[i%palette.length];line(ctx,item.path,b,w,h,color,item.selected||item.centerlineOracle?6:2,[])});if(r.frontierGoal){const q=point(r.frontierGoal,b,w,h);ctx.fillStyle='#55c990';ctx.beginPath();ctx.arc(q[0],q[1],6*devicePixelRatio,0,Math.PI*2);ctx.fill()} }
+    function populate(){ $('scene').innerHTML='';data.scenes.forEach((s,i)=>{const o=document.createElement('option');o.value=i;o.textContent=s.name+' · '+s.frameCount+' frames';$('scene').appendChild(o)}); $('routeCount').textContent=data.routeCount.toLocaleString();$('matchRate').textContent=data.evaluationReport.selectionOracleMatchRate!==undefined?(100*data.evaluationReport.selectionOracleMatchRate).toFixed(1)+'%':'-';setScene(0)}
+    function setScene(i){state.scene=+i||0;state.frame=0;state.route=0;$('scene').value=state.scene;$('frameRange').max=Math.max(0,scene().frames.length-1);$('frame').max=$('frameRange').max;render()}
+    function setFrame(i){state.frame=Math.max(0,Math.min(scene().frames.length-1,+i||0));state.route=0;render()}
+    function setRoute(i){state.route=Math.max(0,Math.min(frame().routes.length-1,+i||0));render()}
+    function render(){const f=frame();$('frame').value=state.frame;$('frameRange').value=state.frame;$('route').innerHTML='';f.routes.forEach((r,i)=>{const o=document.createElement('option');o.value=i;o.textContent='R'+(i+1)+' · '+r.routeIndex;$('route').appendChild(o)});$('route').value=state.route;const p=pred(),cs=candidates();$('selectedIndex').textContent=p?'P'+(p.selectedIndex+1):'-';$('oracleIndex').textContent=p?'P'+(p.oracleCenterlineIndex+1):'-';$('selectedCenter').textContent=p?fixed(p.meanCenterlineDistanceM):'-';$('oracleCenter').textContent=p&&cs[p.oracleCenterlineIndex]?fixed(cs[p.oracleCenterlineIndex].meanCenterlineDistanceM):'-';$('gap').textContent=p?fixed(p.selectionCenterlineGapM):'-';$('selectedScore').textContent=p?fixed(p.score,5):'-';$('rows').innerHTML='';cs.forEach((x,i)=>{const tr=document.createElement('tr');if(x.selected)tr.classList.add('selected');if(x.centerlineOracle)tr.classList.add('oracle');if(x.collision)tr.classList.add('bad');const stateText=x.selected?'selected':x.centerlineOracle?'oracle':x.collision?'collision':'safe';tr.innerHTML='<td><span class="swatch" style="background:'+palette[i%palette.length]+'"></span>P'+(i+1)+'</td><td>'+fixed(x.score,5)+'</td><td>'+fixed(x.meanCenterlineDistanceM)+'</td><td>'+fixed(x.maximumCenterlineDistanceM)+'</td><td>'+fixed(x.maximumCorridorViolationM)+'</td><td>'+fixed(x.routeProgressM)+'</td><td>'+fixed(x.minimumClearanceM)+'</td><td>'+stateText+'</td>';$('rows').appendChild(tr)});draw()}
+    $('scene').onchange=e=>setScene(e.target.value);$('frame').onchange=e=>setFrame(e.target.value);$('frameRange').oninput=e=>setFrame(e.target.value);$('route').onchange=e=>setRoute(e.target.value);$('prev').onclick=()=>setFrame(state.frame-1);$('next').onclick=()=>setFrame(state.frame+1);['witness','all','safe','bubbles'].forEach(id=>$(id).onchange=draw);window.onresize=draw;populate();
+  })();
+  </script>
+</body>
+</html>

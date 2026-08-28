@@ -1616,7 +1616,10 @@ class EpicGraphNode final : public rclcpp::Node {
     const bool frontier_route_exhausted = accepted_route_.valid &&
       (accepted_route_remaining <= 1.0F ||
        accepted_route_.frontier_goal_progress_t >= 0.99F);
-    const bool frontier_extension_needed = accepted_witness_usable &&
+    const bool mission_terminal = have_goal_ && accepted_route_.valid &&
+      accepted_route_.frontier_goal_progress_t >= 0.99F &&
+      vehicle_to_goal <= static_cast<float>(goal_connect_distance_m_);
+    const bool frontier_extension_needed = accepted_witness_usable && !mission_terminal &&
       (!route_has_planning_horizon || frontier_route_exhausted);
     const auto extension_clock = std::chrono::steady_clock::now();
     const double ms_since_last_extension = have_last_extension_search_ ?
@@ -1635,7 +1638,7 @@ class EpicGraphNode final : public rclcpp::Node {
     const bool route_search_allowed =
       last_route_search_generation_ != topology_generation;
     const bool need_candidate_search =
-      (!accepted_witness_usable && route_search_allowed) ||
+      (!mission_terminal && !accepted_witness_usable && route_search_allowed) ||
       frontier_horizon_expired;
     if (need_candidate_search) {
       last_route_search_generation_ = topology_generation;
@@ -2594,7 +2597,10 @@ class EpicGraphNode final : public rclcpp::Node {
       polynomial_curve_valid_ = false;
       return;
     }
-    polynomial_curve_ = scalenav_graph::WitnessParametricCurve::fit(polynomial_guide_path_);
+    Eigen::Vector3f initial_velocity = world_velocity_;
+    if (graph_fixed_layer_) initial_velocity.z() = 0.0F;
+    polynomial_curve_ = scalenav_graph::WitnessParametricCurve::fitWithInitialVelocity(
+      polynomial_guide_path_, initial_velocity);
     polynomial_curve_valid_ = polynomial_curve_.valid;
   }
 
@@ -2924,9 +2930,11 @@ class EpicGraphNode final : public rclcpp::Node {
 
     Eigen::Vector3f computed_next_goal = position_;
     // Subgoal follows monotonic witness time only; YOPO handles lateral avoidance.
+    const float terminal_progress_t = accepted_route_.valid ?
+      accepted_route_.frontier_goal_progress_t : minimum_route_progress_t;
     const bool computed_has_next_goal = selectNextGoal(
       local_guide_path, found, effective_lookahead_m, computed_next_goal,
-      local_guide_progress_t, minimum_route_progress_t, active_curve);
+      local_guide_progress_t, terminal_progress_t, active_curve);
     if (found && !selected_witness_path.empty() && !computed_has_next_goal) {
       RCLCPP_ERROR_THROTTLE(
         get_logger(), *get_clock(), 1000,

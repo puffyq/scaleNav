@@ -15,6 +15,7 @@ runs/
 *.egg-info/
 *.html
 !train_scalenav/tools/dataset_viewer.html
+!train_scalenav/tools/candidate_diagnostic.html
 !tools/*.html
 !scalenav_ws/src/scalenav_log/web/index.html
 *.engine

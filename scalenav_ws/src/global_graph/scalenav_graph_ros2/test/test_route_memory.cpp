@@ -388,4 +388,25 @@ TEST(RouteMemory, PolynomialGuideSnapsVelocityBoundaryToLayer)
   EXPECT_NEAR(guide.front().y(), 2.0F, 1e-3F);
 }
 
+TEST(RouteMemory, ConstrainedPolynomialUsesExactReplanState)
+{
+  const Eigen::Vector3f start(2.0F, 3.0F, 1.6F);
+  const Eigen::Vector3f velocity(4.0F, 1.0F, 0.0F);
+  const std::vector<Eigen::Vector3f> guide{
+    start,
+    start + 0.2F * velocity,
+    Eigen::Vector3f(5.0F, 8.0F, 1.6F),
+    Eigen::Vector3f(4.0F, 16.0F, 1.6F)};
+
+  const auto curve =
+    scalenav_graph::WitnessParametricCurve::fitWithInitialVelocity(guide, velocity);
+
+  ASSERT_TRUE(curve.valid);
+  EXPECT_TRUE(curve.evaluate(0.0F).isApprox(start, 1e-5F));
+  EXPECT_TRUE(curve.evaluate(1.0F).isApprox(guide.back(), 1e-4F));
+  const Eigen::Vector3f physical_initial_velocity =
+    curve.derivative(0.0F) * (velocity.norm() / curve.total_length);
+  EXPECT_TRUE(physical_initial_velocity.isApprox(velocity, 1e-4F));
+}
+
 }  // namespace

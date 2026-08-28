@@ -50,7 +50,10 @@ class YopoNetwork(nn.Module):
                 "depth feature grid does not match the configured primitive grid: "
                 f"{depth_features.shape[-2:]} vs {observation_features.shape[-2:]}"
             )
-        features = torch.cat((depth_features, observation_features, route_features), dim=1)
+        # Preserve the original YOPO-Simple head contract: observation
+        # channels first, depth channels second.  Route channels are appended
+        # after the legacy 73 channels so old checkpoints remain compatible.
+        features = torch.cat((observation_features, depth_features, route_features), dim=1)
         output = self.yopo_head(features)
         endstate_prediction = torch.tanh(output[:, :9])
         score = torch.nn.functional.softplus(output[:, 9])
@@ -69,8 +72,11 @@ class YopoNetwork(nn.Module):
                     target.copy_(value)
                     continue
                 if name == "yopo_head.model.0.weight" and value.ndim == 4:
-                    # Old channel order is depth(64), velocity, acceleration, goal.
-                    # New route channels are appended and retain their small init.
-                    channels = min(value.shape[1], target.shape[1])
-                    target[:, :channels].copy_(value[:, :channels])
+                    # YOPO-Simple concatenates observation(9) then depth(64).
+                    # Route channels are appended after these legacy channels.
+                    if value.shape[1] == 73 and target.shape[1] >= 73:
+                        target[:, :73].copy_(value)
+                    else:
+                        channels = min(value.shape[1], target.shape[1])
+                        target[:, :channels].copy_(value[:, :channels])
         self.load_state_dict(current)

@@ -249,6 +249,75 @@ struct WitnessParametricCurve
     return curve;
   }
 
+  // Fit P(t) while enforcing the replanning state exactly. Here t is the
+  // normalized traversal time and T=route_length/|velocity|, so
+  // P'(0)=velocity*T is equivalent to the physical boundary dP/dtime=velocity.
+  // P(1) is also fixed at the witness endpoint; only the remaining cubic
+  // shape coefficient is least-squares fitted to the interior witness points.
+  static WitnessParametricCurve fitWithInitialVelocity(
+      const std::vector<Eigen::Vector3f> &route,
+      const Eigen::Vector3f &initial_velocity)
+  {
+    WitnessParametricCurve curve;
+    if (route.size() < 2 || !route.front().allFinite() ||
+        !route.back().allFinite()) {
+      return curve;
+    }
+
+    float total_length = 0.0F;
+    std::vector<float> arc(route.size(), 0.0F);
+    for (std::size_t i = 1; i < route.size(); ++i) {
+      const float length = (route[i] - route[i - 1]).norm();
+      if (!std::isfinite(length)) return curve;
+      total_length += length;
+      arc[i] = total_length;
+    }
+    if (!std::isfinite(total_length) || total_length < 1e-4F) return curve;
+
+    Eigen::Vector3f start_tangent = Eigen::Vector3f::Zero();
+    const float speed = initial_velocity.norm();
+    if (initial_velocity.allFinite() && std::isfinite(speed) && speed > 0.1F) {
+      start_tangent = initial_velocity * (total_length / speed);
+    } else {
+      for (std::size_t i = 1; i < route.size(); ++i) {
+        const Eigen::Vector3f segment = route[i] - route.front();
+        const float distance = segment.norm();
+        if (std::isfinite(distance) && distance > 1e-4F) {
+          start_tangent = segment * (total_length / distance);
+          break;
+        }
+      }
+    }
+    if (!start_tangent.allFinite() || start_tangent.norm() < 1e-4F) return curve;
+
+    const Eigen::Vector3f start = route.front();
+    const Eigen::Vector3f endpoint_remainder = route.back() - start - start_tangent;
+    Eigen::Vector3f fitted_quadratic = Eigen::Vector3f::Zero();
+    float basis_energy = 0.0F;
+    for (std::size_t i = 1; i + 1 < route.size(); ++i) {
+      const float t = arc[i] / total_length;
+      const float t2 = t * t;
+      const float t3 = t2 * t;
+      const float basis = t2 - t3;
+      const Eigen::Vector3f residual = route[i] - start - start_tangent * t -
+        endpoint_remainder * t3;
+      fitted_quadratic += basis * residual;
+      basis_energy += basis * basis;
+    }
+    if (basis_energy > 1e-8F) fitted_quadratic /= basis_energy;
+
+    curve.degree = 3;
+    curve.total_length = total_length;
+    curve.coefficients.resize(4, 3);
+    curve.coefficients.row(0) = start.transpose();
+    curve.coefficients.row(1) = start_tangent.transpose();
+    curve.coefficients.row(2) = fitted_quadratic.transpose();
+    curve.coefficients.row(3) =
+      (endpoint_remainder - fitted_quadratic).transpose();
+    curve.valid = curve.coefficients.allFinite();
+    return curve;
+  }
+
   Eigen::Vector3f evaluate(float t) const
   {
     if (!valid) {
@@ -262,6 +331,22 @@ struct WitnessParametricCurve
       power *= clamped;
     }
     return (powers.transpose() * coefficients).transpose();
+  }
+
+  Eigen::Vector3f derivative(float t) const
+  {
+    if (!valid) {
+      return Eigen::Vector3f::Constant(std::numeric_limits<float>::quiet_NaN());
+    }
+    const float clamped = std::clamp(t, 0.0F, 1.0F);
+    Eigen::Vector3f result = Eigen::Vector3f::Zero();
+    float power = 1.0F;
+    for (int column = 1; column <= degree; ++column) {
+      result += static_cast<float>(column) * power *
+        coefficients.row(column).transpose();
+      power *= clamped;
+    }
+    return result;
   }
 };
 
@@ -337,9 +422,9 @@ inline std::vector<Eigen::Vector3f> forwardRouteFromT(
 }
 
 // Build the polynomial guide used for monotonic progress and subgoal sampling.
-// The witness suffix is truncated at the vehicle projection; the vehicle pose
-// (and optional velocity tangent) anchor t=0.  All points are snapped to
-// layer_z when it is finite so fixed-height validation stays consistent.
+// The vehicle pose and optional velocity tangent anchor t=0; the ordered
+// witness supplies the remaining samples. All points are snapped to layer_z
+// when it is finite so fixed-height validation stays consistent.
 inline std::vector<Eigen::Vector3f> buildPolynomialGuidePath(
     const std::vector<Eigen::Vector3f> &witness,
     const Eigen::Vector3f &position, const Eigen::Vector3f &velocity,

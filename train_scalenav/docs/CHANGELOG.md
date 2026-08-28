@@ -78,6 +78,21 @@
 - `YOPO_54`：平均中心线距离 `0.220 m`、平均最大中心线距离 `0.609 m`、平均最大走廊偏差 `0.057 m`、碰撞率 `0.203%`。
 - 对比页面：`dataset/benchmark_004_esdf_001/comparison_029/viewer/index.html`。
 
+<a id="chg-0025"></a>
+## CHG-0025 更新 Batch 004 训练报告
+
+- 新增 [TRAINING_REPORT_004.md](TRAINING_REPORT_004.md)，记录 `YOPO_54` 的中心线拟合训练、3D 中心线距离定义和原版 YOPO-Simple 配对结果。
+- 文档中的所有 checkpoint、HTML 和 JSON 路径均对应当前实际产物；测试规模固定为 1479 条路线。
+
+<a id="chg-0026"></a>
+## CHG-0026 15-Primitive 候选诊断
+
+- 新增 `evaluate_candidates.py`，保存每条路线全部 15 个 YOPO primitive 的 101 点轨迹和逐候选指标。
+- 新增候选诊断 viewer：`dataset/benchmark_004_esdf_001/candidate_diagnostic_002/viewer/index.html`。
+- `YOPO_54` 在 1479 条路线上的 score-selected 与安全中心线 oracle 匹配率为 `17.2%`（254/1479）；selected 平均中心线距离 `0.220 m`，oracle `0.131 m`。
+- 该结果表明候选集中存在更贴中心线的安全轨迹，下一步应优先诊断/训练 score head，而不是继续单纯增大中心线 trajectory loss。
+- 使用说明：[CANDIDATE_DIAGNOSTIC.md](CANDIDATE_DIAGNOSTIC.md)。
+
 <a id="chg-0009"></a>
 ## CHG-0009 安全球融合 ESDF 场并只增加有序 path MSE
 

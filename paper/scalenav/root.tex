@@ -671,15 +671,14 @@ around newly observed obstacles.
 \section{EXPERIMENTS}
 \label{sec:experiments}
 \subsection{Evaluation Protocol}
-We organize the evaluation into four groups.  Experiment A is the main
+We organize the evaluation into three groups.  Experiment A is the main
 cross-scale comparison on empty space, trees, forests, long walls, buildings,
 and mixed-scale scenes.  Experiment B is a memory-bandwidth ablation that
 compares a direct goal, a rolling waypoint, and the ordered corridor under the
-same local-policy architecture.  Experiment C sweeps sensing corruption and
-measures the degradation in success and speed.  Experiment D changes only the
-open-vocabulary query (e.g., ``avoid buildings,'' ``avoid trees,'' and ``avoid
-power lines'') and measures the resulting route changes without retraining the
-local policy.  Runtime and memory are reported separately for every group.
+same local-policy architecture.  Experiment C changes only the open-vocabulary
+query (e.g., ``avoid buildings,'' ``avoid trees,'' and ``avoid power lines'')
+and measures the resulting route changes without retraining the local policy.
+Runtime and memory are reported separately for every group.
 
 This organization follows the intended failure boundaries: the graph supplies
 route memory, the corridor supplies the local constraint, and open-vocabulary
@@ -696,25 +695,28 @@ Failures remain in safety and success metrics and are not silently removed
 from path-efficiency statistics.
 
 \subsection{Comparison and Ablation Matrix}
-The main comparison includes the following methods:
+The main comparison evaluates the complete ScaleNav system against the
+following published planners:
 \begin{itemize}
   \item \textbf{YOPO}: the original local policy with the frontier goal and no
   persistent route constraint.
   \item \textbf{EGO-Planner}: an ESDF-free geometric local planner
   \cite{egoplanner}.
-  \item \textbf{Geometry}: the persistent graph and rolling goal with
-  semantic weights set to zero, isolating the contribution of semantic
-  foresight.
+  \item \textbf{SUPER}: a safety-assured high-speed planner using dual
+  trajectories and point-cloud corridors \cite{super}.
   \item \textbf{ScaleNav}: persistent topology, semantic foresight, route
   memory, and corridor-conditioned local execution.
 \end{itemize}
 
-The component study uses three matched variants: ``YOPO'' receives only the
-frontier goal; ``Corridor-Conditioned YOPO'' additionally receives the ordered
-witness corridor, with semantic weights set to zero; and ``ScaleNav'' adds the
-open-vocabulary risk field.  All three use the same primitive generator and
-local state.  The semantic front end is PEARL; a Qwen3-VL adapter can be
-substituted through the same observation contract.
+Internal variants are reported only in the component ablation.  It uses four
+matched stages: ``YOPO'' receives only the frontier goal; ``Rolling-Goal YOPO''
+adds the persistent graph and its rolling waypoint; ``Corridor-Conditioned
+YOPO'' additionally receives the ordered witness corridor; and ``ScaleNav''
+adds the open-vocabulary risk field.  Semantic weights are zero in the two
+geometric variants.  These stages isolate route memory, corridor conditioning,
+and semantic foresight, respectively.  All four use the same primitive
+generator and local state.  The semantic front end is PEARL; a Qwen3-VL adapter
+can be substituted through the same observation contract.
 
 ScaleNav variants use the same graph, route, and policy configuration.  The
 main online settings are listed in Table~\ref{tab:params}.
@@ -747,10 +749,9 @@ Route bubbles $K$ & 12 & Route mask & binary \\
 \subsection{Scenarios}
 The cross-scale benchmark contains empty space, isolated trees, dense forests,
 long walls, buildings, building clusters, and a mixed-scale continuous flight
-that combines forests and buildings without mode markers.  Corruption trials
-add dropout, depth noise, and synthetic smoke at increasing severity.  The
-open-vocabulary trials use matched scenes with queries for buildings, trees,
-and power lines, together with hard-negative queries.
+that combines forests and buildings without mode markers.  The open-vocabulary
+trials use matched scenes with queries for buildings, trees, and power lines,
+together with hard-negative queries.
 
 \subsection{Metrics}
 We report path length, average speed, minimum and average obstacle distance,
@@ -791,7 +792,7 @@ Method & Succ. (\%) & Coll. (\%) & $L$ (m) & $d_{\min}$ (m) & Prog. (m) \\
 \midrule
 YOPO              & \blank & \blank & \blank & \blank & \blank \\
 EGO-Planner       & \blank & \blank & \blank & \blank & \blank \\
-Geometry          & \blank & \blank & \blank & \blank & \blank \\
+SUPER             & \blank & \blank & \blank & \blank & \blank \\
 ScaleNav (ours)   & \blank & \blank & \blank & \blank & \blank \\
 \bottomrule
 \end{tabular}
@@ -799,9 +800,10 @@ ScaleNav (ours)   & \blank & \blank & \blank & \blank & \blank \\
 \end{table}
 
 \subsection{Route Constraint and Open-Vocabulary Ablation}
-The ablation isolates the two additions to the local baseline: route
-conditioning and open-vocabulary route ranking.  Table~\ref{tab:semantic_results}
-reports branch selection, route stability, and semantic exposure.
+The ablation incrementally adds route-level memory, corridor conditioning, and
+open-vocabulary route ranking to the local baseline.
+Table~\ref{tab:semantic_results} reports branch selection, route stability, and
+semantic exposure.
 
 \begin{table}[t]
 \caption{Route Constraint and Open-Vocabulary Ablations}
@@ -814,6 +816,7 @@ reports branch selection, route stability, and semantic exposure.
 Method & Branch (\%) & Dec. dist. (m) & Switches & $E_{\rm sem}$ \\
 \midrule
 YOPO                 & \blank & \blank & \blank & \blank \\
+Rolling-Goal YOPO    & \blank & \blank & \blank & \blank \\
 Corridor-Conditioned YOPO & \blank & \blank & \blank & \blank \\
 ScaleNav            & \blank & \blank & \blank & \blank \\
 \bottomrule
