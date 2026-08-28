@@ -42,7 +42,7 @@ The canonical workspace entry points are under `scalenav_ws/scripts`:
 ```bash
 bash scalenav_ws/scripts/build.sh   # build ROS2 packages
 bash scalenav_ws/scripts/start.sh   # start AirSim + EPIC + YOPO
-bash scalenav_ws/scripts/goal.sh -80 0 1.6
+bash scalenav_ws/scripts/goal.sh  # one-way paper goal: (0, 140, 1.6)
 bash scalenav_ws/scripts/rviz.sh
 ```
 

@@ -164,6 +164,7 @@ void TopoGraph::copyPersistentNodesFrom(const TopoGraph &source) {
             !copied.emplace(node, nullptr).second) continue;
         auto clone = std::make_shared<TopoNode>();
         clone->persistent_id_ = node->persistent_id_;
+        clone->is_route_anchor_ = node->is_route_anchor_;
         clone->role_ = node->role_;
         clone->geometry_state_ = node->geometry_state_;
         clone->geometry_miss_count_ = node->geometry_miss_count_;
@@ -520,6 +521,129 @@ size_t TopoGraph::semanticMemorySize() const {
   return semantic_memory_.size();
 }
 
+size_t TopoGraph::protectRouteGeometry(const vector<TopoNode::Ptr> &nodes) {
+  size_t newly_protected = 0;
+  for (const auto &node : nodes) {
+    if (!node || node->is_viewpoint_ || node->role_ != TopoNodeRole::Geometric ||
+        node->geometry_state_ != TopoGeometryState::Verified) {
+      continue;
+    }
+    if (!node->is_route_anchor_) {
+      node->is_route_anchor_ = true;
+      ++newly_protected;
+    }
+  }
+  return newly_protected;
+}
+
+size_t TopoGraph::routeAnchorCount() const {
+  size_t count = 0;
+  unordered_set<TopoNode::Ptr> seen;
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second) continue;
+    for (const auto &node : entry.second->topo_nodes_) {
+      if (node && node->is_route_anchor_ && seen.insert(node).second) ++count;
+    }
+  }
+  return count;
+}
+
+VirtualSemanticPruneResult TopoGraph::pruneVirtualSemanticNodes(
+    const Eigen::Vector3f &position,
+    const Eigen::Vector3f &forward_direction,
+    float backtrack_margin_m,
+    size_t maximum_nodes,
+    std::int64_t active_stamp_ns,
+    const unordered_set<std::uint64_t> &protected_ids) {
+  VirtualSemanticPruneResult result;
+  vector<TopoNode::Ptr> virtual_nodes;
+  unordered_set<TopoNode::Ptr> seen;
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second) continue;
+    for (const auto &node : entry.second->topo_nodes_) {
+      if (!node || node->geometry_state_ != TopoGeometryState::Unknown ||
+          node->semantic_observations_ == 0 || !seen.insert(node).second) {
+        continue;
+      }
+      virtual_nodes.push_back(node);
+    }
+  }
+  result.before = virtual_nodes.size();
+  if (virtual_nodes.empty()) return result;
+
+  const float margin = std::max(0.0F, backtrack_margin_m);
+  Eigen::Vector3f forward = forward_direction;
+  const bool have_forward = forward.allFinite() && forward.norm() > 1e-3F;
+  if (have_forward) forward.normalize();
+  auto protected_node = [&](const TopoNode::Ptr &node) {
+    return node &&
+      ((node->persistent_id_ != 0 && protected_ids.count(node->persistent_id_) != 0) ||
+       (active_stamp_ns != 0 && node->semantic_stamp_ns_ == active_stamp_ns));
+  };
+
+  unordered_set<TopoNode::Ptr> remove_set;
+  if (have_forward && position.allFinite()) {
+    for (const auto &node : virtual_nodes) {
+      if (protected_node(node)) continue;
+      const float longitudinal = (node->center_ - position).dot(forward);
+      if (std::isfinite(longitudinal) && longitudinal < -margin) {
+        remove_set.insert(node);
+        ++result.removed_behind;
+      }
+    }
+  }
+
+  const size_t remaining_after_behind = virtual_nodes.size() - remove_set.size();
+  if (maximum_nodes > 0 && remaining_after_behind > maximum_nodes) {
+    vector<TopoNode::Ptr> capacity_candidates;
+    capacity_candidates.reserve(remaining_after_behind);
+    for (const auto &node : virtual_nodes) {
+      if (!remove_set.count(node) && !protected_node(node)) {
+        capacity_candidates.push_back(node);
+      }
+    }
+    // Remove the least useful history first. Current-frame and accepted-route
+    // identities are protected above. Nearby, repeatedly observed, high-risk
+    // evidence is retained ahead of weak or distant one-shot observations.
+    std::sort(capacity_candidates.begin(), capacity_candidates.end(),
+      [&](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
+        const float left_utility = std::clamp(
+          left->semantic_score_ * left->semantic_confidence_, 0.0F, 1.0F);
+        const float right_utility = std::clamp(
+          right->semantic_score_ * right->semantic_confidence_, 0.0F, 1.0F);
+        if (std::abs(left_utility - right_utility) > 1e-5F)
+          return left_utility < right_utility;
+        if (left->semantic_observations_ != right->semantic_observations_)
+          return left->semantic_observations_ < right->semantic_observations_;
+        if (left->semantic_stamp_ns_ != right->semantic_stamp_ns_)
+          return left->semantic_stamp_ns_ < right->semantic_stamp_ns_;
+        return (left->center_ - position).squaredNorm() >
+          (right->center_ - position).squaredNorm();
+      });
+    size_t excess = remaining_after_behind - maximum_nodes;
+    for (const auto &node : capacity_candidates) {
+      if (excess == 0) break;
+      if (remove_set.insert(node).second) {
+        --excess;
+        ++result.removed_capacity;
+      }
+    }
+  }
+
+  result.removed_ids.reserve(remove_set.size());
+  for (auto &node : virtual_nodes) {
+    if (!remove_set.count(node)) continue;
+    if (node->persistent_id_ != 0) result.removed_ids.push_back(node->persistent_id_);
+    removeNode(node);
+  }
+  if (!result.removed_ids.empty()) {
+    std::lock_guard<std::mutex> lock(semantic_memory_mutex_);
+    for (const auto id : result.removed_ids) semantic_memory_.erase(id);
+  }
+  result.after = result.before - remove_set.size();
+  return result;
+}
+
 size_t TopoGraph::restoreNodeSemanticMemory(
     vector<TopoNode::Ptr> &nodes,
     const unordered_set<std::uint64_t> &unavailable_ids) {
@@ -744,7 +868,8 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
     for (auto &neighbor : cur_node->neighbors_) {
       // if (!neighbor->reachable_)
       //   continue;
-      if (!within_search_radius(neighbor) || close_set.find(neighbor) != close_set.end())
+      if (!within_search_radius(neighbor) || close_set.find(neighbor) != close_set.end() ||
+          neighbor->geometry_state_ != TopoGeometryState::Verified)
         continue;
       if (search_stats) ++search_stats->edge_evaluations;
 
@@ -980,7 +1105,8 @@ bool TopoGraph::goalDirectedSearch(
     }
 
     for (const auto &neighbor : entry.node->neighbors_) {
-      if (!within_search_radius(neighbor)) continue;
+      if (!within_search_radius(neighbor) ||
+          neighbor->geometry_state_ != TopoGeometryState::Verified) continue;
       const auto weight_it = entry.node->weight_.find(neighbor);
       if (weight_it == entry.node->weight_.end() || !std::isfinite(weight_it->second))
         continue;
@@ -1810,57 +1936,14 @@ size_t TopoGraph::insertSemanticNodes(
     updateNodeSemantic(node, score, 1.0F, stamp_ns, confidence);
     created.emplace_back(std::move(node));
   }
-  // Semantic points are part of the persistent graph. A later observation can
-  // update them, and a measured Bubble can promote them to verified geometry.
+  // Semantic points persist as continuous risk anchors. They intentionally do
+  // not create topology edges: edgeSemanticRisk() queries their spatial field,
+  // while only measured Bubble geometry is allowed to define connectivity.
   if (created.empty()) return influenced_existing + updated_semantic;
-
-  // Attach each semantic candidate through the same TopoGraph insertion API
-  // used by ordinary nodes. Use EPIC's one-shot raycast mode for the witness;
-  // this is the cheap path used by insertNodes(..., true), and avoids a
-  // second full A* search or a separate semantic connection mechanism.
   size_t accepted = 0;
   for (auto &node : created) {
-    vector<TopoNode::Ptr> nearby;
-    if (odom_node_ && odom_node_ != node) {
-      nearby.emplace_back(odom_node_);
-    }
-    for (const auto &entry : reg_map_idx2ptr_) {
-      if (!entry.second) continue;
-      for (const auto &candidate : entry.second->topo_nodes_) {
-        if (!candidate || candidate == node || candidate->is_viewpoint_) continue;
-        const float distance = (candidate->center_ - node->center_).norm();
-        if (distance <= std::max(4.0F, 6.0F * node->bubble_radius_))
-          nearby.emplace_back(candidate);
-      }
-    }
-    std::sort(nearby.begin(), nearby.end(),
-      [&node](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
-        return (left->center_ - node->center_).squaredNorm() <
-               (right->center_ - node->center_).squaredNorm();
-    });
-    const size_t limit = std::min<size_t>(nearby.size(), 4);
     vector<TopoNode::Ptr> neighbors;
     vector<vector<Eigen::Vector3f>> paths;
-    neighbors.reserve(limit);
-    paths.reserve(limit);
-    for (size_t i = 0; i < limit; ++i) {
-      const auto &neighbor = nearby[i];
-      const Eigen::Vector3f delta = neighbor->center_ - node->center_;
-      const float length = delta.norm();
-      if (!std::isfinite(length) || length <= 1e-3F) continue;
-      vector<Eigen::Vector3f> path;
-      const int result = parallel_bubble_astar_->search(
-        node->center_, neighbor->center_, path, insert_node_timeout,
-        false, true);
-      // The one-shot raycast validates its own stepping points, but not every
-      // point between two steps. Run the same continuous edge check used by
-      // ordinary geometry edges before attaching a semantic node.
-      if (result == ParallelBubbleAstar::REACH_END && path.size() >= 2 &&
-          parallel_bubble_astar_->collisionCheck_shortenPath(path)) {
-        neighbors.push_back(neighbor);
-        paths.push_back(std::move(path));
-      }
-    }
     insertNode(node, neighbors, paths);
     ++accepted;
   }
@@ -2195,6 +2278,11 @@ void TopoGraph::updateSkeleton() {
   confirmed_removals.reserve(nodes2remove.size());
   for (const auto &node : nodes2remove) {
     if (!node) continue;
+    if (node->is_route_anchor_) {
+      node->geometry_miss_count_ = 0;
+      deferred_removals.push_back(node);
+      continue;
+    }
     node->geometry_miss_count_ = static_cast<std::uint8_t>(
       std::min<int>(255, static_cast<int>(node->geometry_miss_count_) + 1));
     if (retainGeometryAfterMiss(node->geometry_miss_count_, kGeometryMissGrace)) {
@@ -2389,6 +2477,8 @@ size_t TopoGraph::deduplicateNearbyNodes(float tolerance_m) {
   }
 
   auto preferred = [](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
+    if (left->is_route_anchor_ != right->is_route_anchor_)
+      return left->is_route_anchor_;
     const bool left_verified = left->geometry_state_ == TopoGeometryState::Verified;
     const bool right_verified = right->geometry_state_ == TopoGeometryState::Verified;
     if (left_verified != right_verified) return left_verified;
@@ -2429,6 +2519,8 @@ size_t TopoGraph::deduplicateNearbyNodes(float tolerance_m) {
     for (const auto index : members) {
       const auto duplicate = nodes[index];
       if (duplicate == canonical) continue;
+      canonical->is_route_anchor_ =
+        canonical->is_route_anchor_ || duplicate->is_route_anchor_;
       canonical->bubble_radius_ = std::max(canonical->bubble_radius_, duplicate->bubble_radius_);
       if (duplicate->semantic_observations_ > canonical->semantic_observations_ ||
           (duplicate->semantic_observations_ == canonical->semantic_observations_ &&

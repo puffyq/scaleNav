@@ -37,3 +37,19 @@ YOPO_54 相比 YOPO-Simple 的平均中心线距离降低约 47%，平均最大�
 
 这是单步离线评测；单次 primitive 的平均轨迹长度约 `6.61 m`，不能直接等同于完整 witness 的
 10--30 m 路径长度。
+
+## 通道顺序修正后的独立训练
+
+旧 Route-YOPO 的首层曾按 `[depth, observation, route]` 解释输入。修正为原版 YOPO-Simple
+的 `[observation, depth, route]` 后，从原版 `epoch50.pth` 独立初始化并训练，产物位于
+`saved_corrected/YOPO_0..2`。`YOPO_2` 的全量结果为碰撞 `1.623%`、中心线距离 `0.368 m`、
+进度 `7.020 m`。15 候选诊断显示安全 oracle 碰撞为 `0%`，但 selected 仍为 `1.623%`，
+因此后续应专门改进 score target/ranking，不能再归因于 3D 坐标。
+
+## 迁移已训练 Route 模型的回归结果
+
+为区分“从原版冷启动”与“已有 route 行为”，将 `YOPO_54` 的旧首层权重做确定性通道
+置换后微调 10 epoch，得到 `saved_corrected/YOPO_5/best.pth`。结果：碰撞 `0.135%`、
+平均中心线距离 `0.309 m`、平均进度 `6.794 m`。这是当前 corrected feature contract 下
+最稳定的 checkpoint；对应全候选 3D HTML 为
+`dataset/benchmark_004_esdf_001/candidate_diagnostic_corrected_migrated54/viewer/index.html`。

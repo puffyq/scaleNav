@@ -85,13 +85,57 @@
 - 文档中的所有 checkpoint、HTML 和 JSON 路径均对应当前实际产物；测试规模固定为 1479 条路线。
 
 <a id="chg-0026"></a>
-## CHG-0026 15-Primitive 候选诊断
+## CHG-0026 双模型 15-Primitive 三维对拍
 
-- 新增 `evaluate_candidates.py`，保存每条路线全部 15 个 YOPO primitive 的 101 点轨迹和逐候选指标。
-- 新增候选诊断 viewer：`dataset/benchmark_004_esdf_001/candidate_diagnostic_002/viewer/index.html`。
-- `YOPO_54` 在 1479 条路线上的 score-selected 与安全中心线 oracle 匹配率为 `17.2%`（254/1479）；selected 平均中心线距离 `0.220 m`，oracle `0.131 m`。
-- 该结果表明候选集中存在更贴中心线的安全轨迹，下一步应优先诊断/训练 score head，而不是继续单纯增大中心线 trajectory loss。
+- `evaluate_candidates.py` 现对同一 depth、motion、10 m goal 和 pose 同时保存
+  Route-YOPO 与 YOPO-Simple 各 15 条、每条 101 个 XYZ 点，并记录 body/world 终态 `p/v/a`。
+- viewer 增加同步 XY、XZ、YZ 投影、模型/安全/selected 开关和三维终态表：
+  `dataset/benchmark_004_esdf_001/candidate_diagnostic_003/viewer/index.html`。
+- 新增严格 3D 合同测试，覆盖 3x5 行列顺序、pitch/yaw、完整 p/v/a 解码、XYZ Poly5 和
+  非零 yaw/pitch/roll 的 body-FLU/world-ENU 变换；未发现坐标系或 primitive 解码不一致。
+- 发现独立根因：历史 Route-YOPO head 使用 `[depth, observation, route]`，原版契约是
+  `[observation, depth]`。当前改为 `[observation, depth, route]`，旧 133-channel checkpoint
+  加载时显式置换第一层权重以保持函数不变；checkpoint 新增 `feature_order` 元数据。
+- 旧 Route checkpoint 的 optimizer moments 无法可靠迁移，禁止直接 resume，必须
+  `--finetune` 或从原版 YOPO-Simple 权重重新初始化训练。
+- 1479 条 route 上，Route-YOPO 三个输出行的平均 body z 为
+  `+0.442/+0.024/-0.397 m`，上下层顺序正确；完整报告见
+  `candidate_diagnostic_003/candidate_diagnostic_report.json`。
+- 所有输入 goal body z 均为 `0`；YOPO-Simple selected 终点平均上抬 `0.451 m` 且未选择
+  下层，Route-YOPO 为 `0.099 m`、下层占 `3.4%`。这是 checkpoint 的垂直选择偏置，不是
+  z 轴符号或 world/body 变换错误。
 - 使用说明：[CANDIDATE_DIAGNOSTIC.md](CANDIDATE_DIAGNOSTIC.md)。
+
+<a id="chg-0027"></a>
+## CHG-0027 修正通道顺序后的独立重训
+
+- 从原版 YOPO-Simple `epoch50.pth` 重新初始化，使用 `[observation, depth, route]`
+  的正确 head 契约；训练数据为 Batch 004 的 1479 条 route，RTX 3090。
+- 第一阶段 15 epoch 得到 `saved_corrected/YOPO_0/best.pth`；第二阶段降低学习率续训
+  20 epoch 得到 `saved_corrected/YOPO_1/best.pth`；随后冻结轨迹分支，仅校准 score head
+  12 epoch 得到 `saved_corrected/YOPO_2/best.pth`。
+- `YOPO_1` 全量评测：碰撞 `1.758%`、平均 3D 中心线距离 `0.373 m`、平均进度 `7.105 m`。
+  score-only 校准后的 `YOPO_2`：碰撞 `1.623%`、中心线距离 `0.368 m`、进度 `7.020 m`。
+- 新模型全部 15 候选中存在 `0%` 碰撞的安全 oracle，但 score-selected 碰撞仍为
+  `1.623%`，匹配率 `5.1%`；当前瓶颈已定位为 score 目标/排序，而不是 3D 候选生成。
+- 产物：[YOPO_1 对比 HTML](../dataset/benchmark_004_esdf_001/comparison_corrected_v1/viewer/index.html)、
+  [YOPO_2 评测 HTML](../dataset/benchmark_004_esdf_001/evaluation_corrected_scorecal/index.html)、
+  [YOPO_2 15-candidate 3D HTML](../dataset/benchmark_004_esdf_001/candidate_diagnostic_corrected_scorecal/viewer/index.html)。
+
+<a id="chg-0028"></a>
+## CHG-0028 迁移 YOPO_54 后的安全回归
+
+- 将已训练的 `YOPO_54` 首层按 `depth_observation_route_v0 -> observation_depth_route_v1`
+  迁移，在 Batch 004 以 `1e-5` 学习率微调 10 epoch，得到
+  `saved_corrected/YOPO_5/best.pth`。
+- 全量 1479 route：碰撞 `0.135%` (2/1479)、平均 3D 中心线距离 `0.309 m`、最大中心线
+  距离 `0.786 m`、最大走廊越界 `0.099 m`、进度 `6.794 m`。相比 `YOPO_54` 的 `0.203%`
+  碰撞有所改善，但中心线距离略增。
+- 统一三模型对比：[comparison_corrected_migrated54/viewer/index.html](../dataset/benchmark_004_esdf_001/comparison_corrected_migrated54/viewer/index.html)。
+- 全部 15 候选三维诊断：[candidate_diagnostic_corrected_migrated54/viewer/index.html](../dataset/benchmark_004_esdf_001/candidate_diagnostic_corrected_migrated54/viewer/index.html)。
+- 冻结轨迹的 safety-binary ranking 和 total-cost pairwise ranking 均未降低碰撞，已作为
+  负向实验保留，不纳入默认配置。当前安全 oracle 仍为 `0%` 碰撞，后续应在完整模型训练
+  中改进 score target，而不是继续叠加独立 ranking 权重。
 
 <a id="chg-0009"></a>
 ## CHG-0009 安全球融合 ESDF 场并只增加有序 path MSE

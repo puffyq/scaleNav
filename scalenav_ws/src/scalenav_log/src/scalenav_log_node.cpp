@@ -23,6 +23,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <trajectory_msgs/msg/multi_dof_joint_trajectory_point.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
@@ -185,10 +187,16 @@ public:
     goal_topic_ = declare_parameter<std::string>("goal_topic", "/goal_pose");
     local_goal_topic_ = declare_parameter<std::string>("local_goal_topic", "/epic/local_goal");
     clearance_topic_ = declare_parameter<std::string>("clearance_topic", "/epic/clearance");
+    collision_topic_ = declare_parameter<std::string>("collision_topic", "/sim/collision");
+    timing_topic_ = declare_parameter<std::string>("timing_topic", "/epic/timing");
+    mission_position_tolerance_m_ = declare_parameter<double>(
+      "mission_position_tolerance_m", 0.5);
+    mission_speed_tolerance_mps_ = declare_parameter<double>(
+      "mission_speed_tolerance_mps", 0.3);
 
     store_ = std::make_unique<SlidingLogStore>(fs::path(output_dir));
     std::ostringstream manifest;
-    manifest << "{\"schema\":\"scalenav_log.v1\",\"created_unix_ns\":"
+    manifest << "{\"schema\":\"scalenav_log.v2\",\"created_unix_ns\":"
       << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count()
       << ",\"topics\":{";
     manifest << "\"depth\":" << jsonQuote(depth_topic_) << ",\"rgb\":" << jsonQuote(rgb_topic_)
@@ -199,8 +207,14 @@ public:
       << ",\"semantic\":" << jsonQuote(semantic_topic_) << ",\"goal\":" << jsonQuote(goal_topic_)
       << ",\"local_goal\":" << jsonQuote(local_goal_topic_)
       << ",\"clearance\":" << jsonQuote(clearance_topic_)
+      << ",\"collision\":" << jsonQuote(collision_topic_)
+      << ",\"timing\":" << jsonQuote(timing_topic_)
       << "},\"pointcloud_max_points\":" << pointcloud_max_points_
-      << ",\"pointcloud_stride\":" << pointcloud_stride_ << "}";
+      << ",\"pointcloud_stride\":" << pointcloud_stride_
+      << ",\"evaluation\":{\"mission_position_tolerance_m\":"
+      << jsonNumber(mission_position_tolerance_m_)
+      << ",\"mission_speed_tolerance_mps\":"
+      << jsonNumber(mission_speed_tolerance_mps_) << "}}";
     store_->open(manifest.str());
 
     auto sensor_qos = rclcpp::SensorDataQoS().keep_last(qos_depth);
@@ -233,6 +247,12 @@ public:
       [this](geometry_msgs::msg::Vector3Stamped::ConstSharedPtr message) {
         captureClearance(*message);
       });
+    collision_sub_ = create_subscription<std_msgs::msg::Bool>(
+      collision_topic_, qos_depth,
+      [this](std_msgs::msg::Bool::ConstSharedPtr message) { captureCollision(*message); });
+    timing_sub_ = create_subscription<std_msgs::msg::String>(
+      timing_topic_, rclcpp::QoS(rclcpp::KeepLast(100)).reliable(),
+      [this](std_msgs::msg::String::ConstSharedPtr message) { captureTiming(*message); });
     RCLCPP_INFO(get_logger(), "scalenav log session: %s", store_->activeSession().string().c_str());
   }
 
@@ -421,26 +441,87 @@ private:
     const auto extra = "{\"frame_id\":" + jsonQuote(message.header.frame_id) + ",\"position\":" + array3(p) +
       ",\"orientation\":" + quaternion(message.pose.pose.orientation) + ",\"velocity\":" + array3(v) + "}";
     store_->record("odom", stampNs(message.header.stamp), "", extra.size(), extra);
+    if (mission_active_ && !mission_complete_) {
+      const double dx = p.x - mission_goal_[0];
+      const double dy = p.y - mission_goal_[1];
+      const double dz = p.z - mission_goal_[2];
+      const double position_error = std::sqrt(dx * dx + dy * dy + dz * dz);
+      const double speed = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+      if (position_error <= mission_position_tolerance_m_ &&
+          speed <= mission_speed_tolerance_mps_) {
+        mission_complete_ = true;
+        mission_active_ = false;
+        const auto stamp_ns = receptionStampNs();
+        const auto mission = "{\"event\":\"complete\",\"generation\":" +
+          std::to_string(mission_generation_) + ",\"goal\":[" +
+          jsonNumber(mission_goal_[0]) + "," + jsonNumber(mission_goal_[1]) + "," +
+          jsonNumber(mission_goal_[2]) + "],\"position_error_m\":" +
+          jsonNumber(position_error) + ",\"speed_mps\":" + jsonNumber(speed) + "}";
+        store_->record("mission", stamp_ns, "", mission.size(), mission);
+      }
+    }
   }
 
   void captureControl(const trajectory_msgs::msg::MultiDOFJointTrajectoryPoint &message)
   {
+    const auto stamp_ns = receptionStampNs();
     std::ostringstream extra;
     extra << "{\"transforms\":" << message.transforms.size() << ",\"velocities\":" << message.velocities.size()
       << ",\"accelerations\":" << message.accelerations.size();
     if (!message.transforms.empty()) extra << ",\"position\":" << array3(message.transforms.front().translation);
     if (!message.velocities.empty()) extra << ",\"velocity\":" << array3(message.velocities.front().linear);
     if (!message.accelerations.empty()) extra << ",\"acceleration\":" << array3(message.accelerations.front().linear);
+    if (!message.accelerations.empty()) {
+      const auto &acceleration = message.accelerations.front().linear;
+      const double acceleration_norm = std::sqrt(
+        acceleration.x * acceleration.x + acceleration.y * acceleration.y +
+        acceleration.z * acceleration.z);
+      extra << ",\"acceleration_norm_mps2\":" << jsonNumber(acceleration_norm);
+      if (have_control_acceleration_ && stamp_ns > last_control_stamp_ns_) {
+        const double dt = static_cast<double>(stamp_ns - last_control_stamp_ns_) * 1.0e-9;
+        if (dt > 1.0e-4 && dt < 1.0) {
+          const double jx = (acceleration.x - last_control_acceleration_[0]) / dt;
+          const double jy = (acceleration.y - last_control_acceleration_[1]) / dt;
+          const double jz = (acceleration.z - last_control_acceleration_[2]) / dt;
+          extra << ",\"jerk\":[" << jsonNumber(jx) << ',' << jsonNumber(jy) << ','
+            << jsonNumber(jz) << "],\"jerk_norm_mps3\":" <<
+            jsonNumber(std::sqrt(jx * jx + jy * jy + jz * jz));
+        }
+      }
+      last_control_acceleration_ = {acceleration.x, acceleration.y, acceleration.z};
+      last_control_stamp_ns_ = stamp_ns;
+      have_control_acceleration_ = true;
+    }
     extra << "}";
-    store_->record("control", 0, "", extra.str().size(), extra.str());
+    store_->record("control", stamp_ns, "", extra.str().size(), extra.str());
   }
 
   void captureGoal(const geometry_msgs::msg::PoseStamped &message)
   {
+    const auto source_stamp_ns = stampNs(message.header.stamp);
+    const auto stamp_ns = source_stamp_ns > 0 ? source_stamp_ns : receptionStampNs();
     const auto extra = "{\"frame_id\":" + jsonQuote(message.header.frame_id) +
       ",\"position\":" + array3(message.pose.position) +
       ",\"orientation\":" + quaternion(message.pose.orientation) + "}";
-    store_->record("goal", stampNs(message.header.stamp), "", extra.size(), extra);
+    store_->record("goal", stamp_ns, "", extra.size(), extra);
+    const std::array<double, 3> next_goal{
+      message.pose.position.x, message.pose.position.y, message.pose.position.z};
+    const double goal_change = std::sqrt(
+      (next_goal[0] - mission_goal_[0]) * (next_goal[0] - mission_goal_[0]) +
+      (next_goal[1] - mission_goal_[1]) * (next_goal[1] - mission_goal_[1]) +
+      (next_goal[2] - mission_goal_[2]) * (next_goal[2] - mission_goal_[2]));
+    if (!have_mission_goal_ || goal_change > 0.05) {
+      mission_goal_ = next_goal;
+      have_mission_goal_ = true;
+      mission_active_ = true;
+      mission_complete_ = false;
+      ++mission_generation_;
+      const auto mission = "{\"event\":\"start\",\"generation\":" +
+        std::to_string(mission_generation_) + ",\"goal\":[" +
+        jsonNumber(mission_goal_[0]) + "," + jsonNumber(mission_goal_[1]) + "," +
+        jsonNumber(mission_goal_[2]) + "]}";
+      store_->record("mission", stamp_ns, "", mission.size(), mission);
+    }
   }
 
   void captureLocalGoal(const geometry_msgs::msg::PoseStamped &message)
@@ -460,13 +541,51 @@ private:
     store_->record("clearance", stampNs(message.header.stamp), "", extra.size(), extra);
   }
 
+  void captureCollision(const std_msgs::msg::Bool &message)
+  {
+    if (have_collision_state_ && message.data == collision_state_) return;
+    collision_state_ = message.data;
+    have_collision_state_ = true;
+    collision_latched_ = collision_latched_ || message.data;
+    const auto extra = "{\"active\":" + std::string(message.data ? "true" : "false") +
+      ",\"latched\":" + std::string(collision_latched_ ? "true" : "false") + "}";
+    store_->record("collision", receptionStampNs(), "", extra.size(), extra);
+  }
+
+  void captureTiming(const std_msgs::msg::String &message)
+  {
+    const bool json_object = message.data.size() >= 2 && message.data.front() == '{' &&
+      message.data.back() == '}';
+    const auto extra = json_object ? message.data :
+      "{\"raw\":" + jsonQuote(message.data) + "}";
+    store_->record("timing", receptionStampNs(), "", extra.size(), extra);
+  }
+
+  std::int64_t receptionStampNs() const
+  {
+    return now().nanoseconds();
+  }
+
   std::unique_ptr<SlidingLogStore> store_;
   std::size_t pointcloud_max_points_ = 200000;
   std::size_t pointcloud_stride_ = 1;
   std::uint64_t depth_seq_ = 0, rgb_seq_ = 0, pointcloud_seq_ = 0, graph_seq_ = 0, path_seq_ = 0;
   std::string depth_topic_, rgb_topic_, pointcloud_topic_, free_ray_topic_, graph_topic_,
     bubble_topic_, path_topic_, odom_topic_, control_topic_, semantic_topic_, goal_topic_,
-    local_goal_topic_, clearance_topic_;
+    local_goal_topic_, clearance_topic_, collision_topic_, timing_topic_;
+  double mission_position_tolerance_m_ = 0.5;
+  double mission_speed_tolerance_mps_ = 0.3;
+  std::array<double, 3> mission_goal_{0.0, 0.0, 0.0};
+  std::array<double, 3> last_control_acceleration_{0.0, 0.0, 0.0};
+  std::int64_t last_control_stamp_ns_ = 0;
+  std::uint64_t mission_generation_ = 0;
+  bool have_mission_goal_ = false;
+  bool mission_active_ = false;
+  bool mission_complete_ = false;
+  bool have_control_acceleration_ = false;
+  bool have_collision_state_ = false;
+  bool collision_state_ = false;
+  bool collision_latched_ = false;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_, rgb_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_, free_ray_sub_;
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr graph_sub_, bubble_sub_;
@@ -476,6 +595,8 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr semantic_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_, local_goal_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr clearance_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr collision_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr timing_sub_;
 };
 
 }  // namespace

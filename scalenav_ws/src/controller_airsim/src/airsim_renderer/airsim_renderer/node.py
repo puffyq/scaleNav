@@ -372,6 +372,8 @@ def main(args=None):
         executor = MultiThreadedExecutor(num_threads=2)
         executor.add_node(node)
         executor.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
         if executor is not None:
             executor.shutdown()

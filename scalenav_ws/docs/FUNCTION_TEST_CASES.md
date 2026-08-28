@@ -6,7 +6,7 @@
 
 Route-Conditioned YOPO 的训练数据、Dataset、模型、loss、离线评测和在线 route 接口另见
 [YOPO_TRAINING_INTEGRATION_DESIGN.md](YOPO_TRAINING_INTEGRATION_DESIGN.md#5-测试规格)。训练侧
-保留 `UT-RC/MT-RC/IT-RC/PERF-RC` 编号，不并入本页 M1-M6 的 150 项在线统计。
+保留 `UT-RC/MT-RC/IT-RC/PERF-RC` 编号，不并入本页 M1-M6 的 151 项在线统计。
 
 重要性定义：
 
@@ -30,8 +30,8 @@ Route-Conditioned YOPO 的训练数据、Dataset、模型、loss、离线评测�
 |---|---:|---|
 | 单元测试 | 108 | 详细设计中的函数接口；重载、语义和 frontier 回归问题拆分测试 |
 | 模块测试 | 26 | M1、M2 各 3 项，M3 6 项，M4 5 项，M5 5 项，M6 4 项，新增 loss 排序场景 |
-| 集成测试 | 16 | ROS2 接口/并发 7 项，飞行场景 9 项 |
-| 合计 | 150 | 功能、异常、频率、并发、实时性和任务活性 |
+| 集成测试 | 17 | ROS2 接口/并发 7 项，飞行场景 10 项 |
+| 合计 | 151 | 功能、异常、频率、并发、实时性和任务活性 |
 
 ## 2. 单元测试用例
 
@@ -272,6 +272,7 @@ M5 单元测试执行明细和在线证据见
 | IT-FLT-007 | EPIC 输出接入 YOPO 和控制器，含窄门与转弯 | 飞行轨迹与控制状态 | 全链路额定频率 | local goal 坐标系/层高正确；控制连续；无碰撞和 emergency stop | 10 次路线 | P0 | 测试设计已定义 |
 | IT-FLT-008 | 长航线持续输入上/中/下分层语义目标及地面响应 | graph snapshot、row/FOV/地面/时间置信度、路线 loss | 全链路额定频率 | 三行空间信息保留；地面响应被抑制；不同 row 对路线 loss 的影响稳定、可重复，单行高风险仍有效 | 10 次 x 5 min | P0 | 测试设计已定义 |
 | IT-FLT-009 | 复现未到终点会话的地图、语义密度和代价比例 | 完整飞行轨迹、frontier 序列、loss 分解、任务完成事件 | 全链路额定频率 | 不复现 frontier 停滞/循环并按时到达；每次切换由总 loss 改善或物理失效解释，不要求一定是前向延伸 | 10 次完整任务 | P0 | 测试设计已定义 |
+| IT-FLT-010 | 同一进程执行 `(0,0) -> (0,140) -> (0,0)`；去程建立 graph，回程不清空 graph/semantic memory | goal graph 状态、background `inserted/remained`、route switch、update/rebuild 时延、完成时间、odom 轨迹长度、障碍密度热图及高风险语义距离 | depth/planner 10 Hz、semantic 2 Hz、odom 100 Hz | 回程必须复用 graph 且 `inserted/rebuild` 至少下降 30%；10 次往返中回程时间中位数至少降低 5%，轨迹和 update/rebuild P95 不得回退超过 5%，切换次数不增加；语义影响须以相同日志、语义权重开/关 A/B 区分于几何避障 | 10 次完整往返 | P1 | 部分通过（2 次日志实验）：graph 复用、几何新增量和切换次数通过；轮次 2 回程平均/P90 障碍密度下降 8.2%/28.6%，高风险语义 5 m 内暴露从 8.7% 降至 0%；但回程计算未加速、轨迹更长，且尚无语义权重 A/B 因果证据；见 [往返复用实验报告](test_reports/TEST_REPORT_2026-08-28_ROUND_TRIP_GRAPH_REUSE.md) |
 
 ## 5. 执行命令与通过标准
 
@@ -296,6 +297,8 @@ colcon test-result --verbose
 最近一次归档报告记录了 64 项 GTest、4 项在线节奏检查和 1 项按条件跳过的 rebuild 日志场景。当前源码已定义 67 项 GTest（其中 rebuild 日志场景仍可按条件跳过），新增测试项尚未形成新的归档执行证据。本规格中的测试设计条目仍需逐项保留输入、输出、频率、判定、次数和重要性。执行证据归档顺序为：
 
 最新 ROS 会话的覆盖复核见 [`TEST_REPORT_2026-08-27_LATEST_LOG_REVIEW.md`](test_reports/TEST_REPORT_2026-08-27_LATEST_LOG_REVIEW.md)。该报告将函数级通过、部分覆盖、日志失败和仅有设计四种状态分开，不能用单元测试结果替代闭环或性能验收。
+
+去程建图与回程效率的独立对照见 [`TEST_REPORT_2026-08-28_ROUND_TRIP_GRAPH_REUSE.md`](test_reports/TEST_REPORT_2026-08-28_ROUND_TRIP_GRAPH_REUSE.md)。当前 2 次完整往返证明 M2 graph 被复用，但尚未证明回程端到端计算和轨迹效率提高。
 
 现有日志包测试 `scalenav_log/test_log_storage` 已通过，覆盖 session 不因容量滚动且旧 session 不被自动删除；该结果属于日志包测试证据，不新增本页 `TC/MT/IT` 编号。
 

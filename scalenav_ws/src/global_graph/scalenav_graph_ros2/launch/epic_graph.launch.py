@@ -12,6 +12,7 @@ def generate_launch_description():
         DeclareLaunchArgument("odom_topic", default_value="/sim/odom"),
         DeclareLaunchArgument("goal_topic", default_value="/goal"),
         DeclareLaunchArgument("next_goal_topic", default_value="/epic/local_goal"),
+        DeclareLaunchArgument("timing_topic", default_value="/epic/timing"),
         DeclareLaunchArgument("next_goal_frame", default_value="world_enu"),
         DeclareLaunchArgument("visualization_frame", default_value="odom"),
         DeclareLaunchArgument("odom_twist_frame", default_value="world"),
@@ -21,7 +22,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "graph_log_file",
             default_value="epic_graph_snapshots.jsonl"),
-        DeclareLaunchArgument("trajectory_speed_color_max_mps", default_value="8.0"),
+        DeclareLaunchArgument("trajectory_speed_color_max_mps", default_value="6.0"),
         DeclareLaunchArgument("trajectory_max_points", default_value="50000"),
         DeclareLaunchArgument("graph_fixed_layer", default_value="true"),
         DeclareLaunchArgument("graph_layer_z", default_value="1.6"),
@@ -81,6 +82,10 @@ def generate_launch_description():
         DeclareLaunchArgument("semantic_point_separation_m", default_value="1.5"),
         DeclareLaunchArgument("semantic_point_radius_m", default_value="0.75"),
         DeclareLaunchArgument("semantic_point_max_nodes", default_value="16"),
+        DeclareLaunchArgument("virtual_semantic_prune_enabled", default_value="true"),
+        DeclareLaunchArgument("virtual_semantic_backtrack_margin_m", default_value="12.0"),
+        DeclareLaunchArgument("virtual_semantic_max_nodes", default_value="512"),
+        DeclareLaunchArgument("semantic_label_max_nodes", default_value="16"),
         DeclareLaunchArgument("semantic_camera_translation_flu.x", default_value="0.5"),
         DeclareLaunchArgument("semantic_camera_translation_flu.y", default_value="0.0"),
         DeclareLaunchArgument("semantic_camera_translation_flu.z", default_value="-0.1"),
@@ -100,6 +105,7 @@ def generate_launch_description():
                 "odom_topic": LaunchConfiguration("odom_topic"),
                 "goal_topic": LaunchConfiguration("goal_topic"),
                 "next_goal_topic": LaunchConfiguration("next_goal_topic"),
+                "timing_topic": LaunchConfiguration("timing_topic"),
                 "next_goal_frame": LaunchConfiguration("next_goal_frame"),
                 "visualization_frame": LaunchConfiguration("visualization_frame"),
                 "odom_twist_frame": LaunchConfiguration("odom_twist_frame"),
@@ -177,6 +183,14 @@ def generate_launch_description():
                     "semantic_point_separation_m"),
                 "semantic_point_radius_m": LaunchConfiguration("semantic_point_radius_m"),
                 "semantic_point_max_nodes": LaunchConfiguration("semantic_point_max_nodes"),
+                "virtual_semantic_prune_enabled": LaunchConfiguration(
+                    "virtual_semantic_prune_enabled"),
+                "virtual_semantic_backtrack_margin_m": LaunchConfiguration(
+                    "virtual_semantic_backtrack_margin_m"),
+                "virtual_semantic_max_nodes": LaunchConfiguration(
+                    "virtual_semantic_max_nodes"),
+                "semantic_label_max_nodes": LaunchConfiguration(
+                    "semantic_label_max_nodes"),
                 "semantic_camera_translation_flu.x": LaunchConfiguration(
                     "semantic_camera_translation_flu.x"),
                 "semantic_camera_translation_flu.y": LaunchConfiguration(

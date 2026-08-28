@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# x="-80.0"
-# y="0.0"
-# z="1.6"
-
 x="0.0"
 y="0.0"
 z="1.6"

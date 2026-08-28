@@ -126,8 +126,7 @@ def evaluate(
     )
     policy = YopoNetwork().to(selected_device).eval()
     checkpoint = torch.load(checkpoint_path, map_location=selected_device, weights_only=False)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    policy.load_state_dict(state_dict)
+    feature_order = policy.load_route_checkpoint(checkpoint)
 
     obstacle_trees = [
         cKDTree(read_ascii_point_cloud_ply(scene.path / "tree.ply"))
@@ -200,6 +199,7 @@ def evaluate(
         "dataset": str(data_root),
         "checkpoint": str(checkpoint_path),
         "checkpointEpoch": int(checkpoint.get("epoch", -1)) + 1,
+        "featureOrder": feature_order,
         "sampleCount": len(values),
         "split": split,
         "device": str(selected_device),

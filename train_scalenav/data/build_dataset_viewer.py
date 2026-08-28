@@ -49,10 +49,12 @@ def _route_payload(
     arrays = table.arrays
     payload = {
         "routeIndex": route_index,
-        "path": path[path_indices, :2].round(4).tolist(),
+        # Keep XYZ in the payload. Existing top-down viewers consume the first
+        # two coordinates; 3-D diagnostics additionally use XZ and YZ.
+        "path": path[path_indices, :3].round(4).tolist(),
         "radii": radii[path_indices].round(4).tolist(),
         "clearance": clearance[path_indices].round(4).tolist(),
-        "topology": topo[topo_indices, :2].round(4).tolist(),
+        "topology": topo[topo_indices, :3].round(4).tolist(),
         "topologyRadii": topo_radii[topo_indices].round(4).tolist(),
         "topologyIds": [int(value) for value in topo_ids[topo_indices]],
         "missionGoal": arrays["mission_goal_world"][route_index].round(4).tolist(),

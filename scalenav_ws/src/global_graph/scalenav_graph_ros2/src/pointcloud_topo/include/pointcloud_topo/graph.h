@@ -196,6 +196,9 @@ public:
   std::uint64_t persistent_id_ = 0;
   bool is_viewpoint_ = false;
   bool is_history_odom_node_ = false;
+  // Accepted route geometry forms the reusable mission corridor. Local map
+  // misses may refresh its edges, but must not discard the anchor itself.
+  bool is_route_anchor_ = false;
   TopoNodeRole role_ = TopoNodeRole::Geometric;
   TopoGeometryState geometry_state_ = TopoGeometryState::Verified;
   // A Bubble can be absent for one map snapshot while the ray-carved map and
@@ -361,6 +364,14 @@ struct TopoSemanticRecord {
   std::int64_t stamp_ns = 0;
 };
 
+struct VirtualSemanticPruneResult {
+  size_t before = 0;
+  size_t removed_behind = 0;
+  size_t removed_capacity = 0;
+  size_t after = 0;
+  vector<std::uint64_t> removed_ids;
+};
+
 struct TopoGraphSearchStats {
   size_t semantic_query_nodes = 0;
   size_t semantic_inactive_virtual_nodes_skipped = 0;
@@ -500,6 +511,15 @@ public:
   vector<TopoSemanticRecord> semanticMemorySnapshot() const;
   void loadSemanticMemory(const vector<TopoSemanticRecord> &records);
   size_t semanticMemorySize() const;
+  size_t protectRouteGeometry(const vector<TopoNode::Ptr> &nodes);
+  size_t routeAnchorCount() const;
+  VirtualSemanticPruneResult pruneVirtualSemanticNodes(
+      const Eigen::Vector3f &position,
+      const Eigen::Vector3f &forward_direction,
+      float backtrack_margin_m,
+      size_t maximum_nodes,
+      std::int64_t active_stamp_ns = 0,
+      const unordered_set<std::uint64_t> &protected_ids = {});
   size_t restoreNodeSemanticMemory(
       vector<TopoNode::Ptr> &nodes,
       const unordered_set<std::uint64_t> &unavailable_ids = {});

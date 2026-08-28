@@ -127,7 +127,7 @@ def evaluate_comparison(
 
     route_policy = YopoNetwork().to(selected_device).eval()
     route_state = torch.load(route_checkpoint, map_location=selected_device, weights_only=False)
-    route_policy.load_state_dict(route_state.get("model_state_dict", route_state), strict=True)
+    route_feature_order = route_policy.load_route_checkpoint(route_state)
     baseline = _load_baseline(baseline_checkpoint, selected_device)
     previous_route = None
     previous_route_state = None
@@ -136,9 +136,9 @@ def evaluate_comparison(
         previous_route_state = torch.load(
             previous_route_checkpoint, map_location=selected_device, weights_only=False
         )
-        previous_route.load_state_dict(
-            previous_route_state.get("model_state_dict", previous_route_state), strict=True
-        )
+        previous_feature_order = previous_route.load_route_checkpoint(previous_route_state)
+    else:
+        previous_feature_order = None
     obstacle_trees = [cKDTree(read_ascii_point_cloud_ply(scene.path / "tree.ply")) for scene in dataset.scenes]
 
     predictions: dict[tuple[str, int], dict[str, Any]] = {}
@@ -318,6 +318,8 @@ def evaluate_comparison(
             "witnessPathMayExtendBeyondSubgoal": True,
         },
         "routeYopoCheckpoint": str(route_checkpoint.resolve()),
+        "routeYopoFeatureOrder": route_feature_order,
+        "previousRouteYopoFeatureOrder": previous_feature_order,
         "previousRouteYopoCheckpoint": (
             str(previous_route_checkpoint.resolve())
             if previous_route_checkpoint is not None

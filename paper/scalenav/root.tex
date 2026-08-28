@@ -148,8 +148,8 @@ We evaluate the complete route contract in paired simulation experiments and
 report the current offline corridor-conditioned benchmark.  The experiments
 separate
 topology, semantic foresight, route stability, local route adherence, and
-system cost.  The model-independent semantic contract also permits a larger
-VLM, such as Qwen3-VL, to replace PEARL without changing graph search.
+system cost.  All semantic results in this paper use PEARL; transfer to other
+vision--language front ends is outside the present evaluation.
 
 \begin{figure*}[t]
 \centering
@@ -185,8 +185,13 @@ checking; Fast-Planner emphasizes efficient polynomial replanning in unknown
 trajectory optimization under limited sensing \cite{faster}.  SUPER pushes this
 line further with dual trajectories over point-cloud corridors, demonstrating
 safety-assured flight above $20$~m/s in cluttered scenes \cite{super}.
-These designs motivate our separation between a route-level witness and the
-local primitive.
+SUPER is therefore a strong geometric and dynamic baseline, but it does not
+formulate text-conditioned homotopy selection or preserve a semantic route
+identity across asynchronous graph replacement.  ScaleNav does not claim to
+replace SUPER's safety guarantees or match its demonstrated maximum speed;
+its contribution is the orthogonal route-memory and semantic-preference
+interface above a local planner.  These designs motivate our separation
+between a route-level witness and the local primitive.
 These methods optimize motion from the current observation or a short local
 history.  They do not expose a persistent route state that can remember which
 side of a distant wall was selected.  ScaleNav retains their fast reactive role
@@ -446,10 +451,13 @@ The measured endpoint risk is
 Semantic node $k$ induces the edge risk
 \begin{equation}
  r^{\mathrm{ff}}_{k,ij}=s_kc_k
- \exp\left(-\frac{d_{k,ij}^2}{2\sigma_s^2}\right),
+ \exp\left(-\frac{d_{k,ij}^2}{2(R_s/2)^2}\right),
  \qquad d_{k,ij}\le R_s.
 \label{eq:field}
 \end{equation}
+The implementation ties the Gaussian bandwidth to its finite support,
+$\sigma_s=R_s/2$, rather than exposing two independently tuned spatial
+scales.
 The combined risk uses a maximum rather than a sum:
 \begin{equation}
  r_{ij}=\max\left(r^{\mathrm{node}}_{ij},
@@ -473,25 +481,22 @@ The factor $L_{ij}$ makes exposure accumulate with travel distance.
 \section{RISK-AWARE ROLLING SEARCH}
 \subsection{Edge and Path Objectives}
 For an edge $e_{ij}$, the geometric traversal cost stored by the graph is
-$W_{ij}$.
-Let $\kappa_{ij}=\kappa_{\mathrm{mem}}<1$ if the edge matches the remembered
-forward route and $\kappa_{ij}=1$ otherwise.
-The complete edge cost is
+$W_{ij}$.  The deployed configuration does not discount remembered edges
+during a fresh search; route persistence is enforced by the accepted-route
+gate described below.  The complete candidate edge cost is
 \begin{equation}
- C(e_{ij})=\kappa_{ij}W_{ij}
-          +C_{\mathrm{clr}}(e_{ij})+C_{\mathrm{sem}}(e_{ij}).
+ C(e_{ij})=W_{ij}+C_{\mathrm{clr}}(e_{ij})+C_{\mathrm{sem}}(e_{ij}).
 \label{eq:edge_cost}
 \end{equation}
-For a graph path $P$, we separately accumulate its discounted geometric term
-and its risk term:
+For a graph path $P$, we separately accumulate its geometric and risk terms:
 \begin{align}
- G(P)&=\sum_{e\in P}\kappa_eW_e,\\
+ G(P)&=\sum_{e\in P}W_e,\\
  R(P)&=\sum_{e\in P}
        \left[C_{\mathrm{clr}}(e)+C_{\mathrm{sem}}(e)\right].
 \end{align}
-Keeping them separate is important.
-The terminal objective discounts geometry by a small factor, but must not
-discount safety and semantic exposure.
+Keeping them separate is important: terminal selection may weight geometry
+and accumulated risk differently, while neither term receives a hidden
+remembered-edge discount.
 
 The slow layer maintains three goal levels: the \emph{mission goal}
 $\vect{g}$, a route-level \emph{frontier goal} selected inside the local
@@ -543,8 +548,9 @@ An edge in the new graph is remembered if its geometry follows this window
 within a lateral tolerance.
 The incumbent terminal is restored by persistent node identity first, with
 nearest-neighbor remapping as a fallback.
-Equation (\ref{eq:edge_cost}) then provides a soft prior rather than a hard
-lock.
+Equation (\ref{eq:edge_cost}) ranks a fresh candidate without a historical
+edge discount; persistence enters only when the route gate compares that
+candidate with the remapped incumbent.
 
 A challenger replaces the incumbent only through hysteresis: its risk must
 improve by more than a margin, or its total cost must drop below a fixed
@@ -562,7 +568,7 @@ This balance is central to the design.
 Route memory prevents left-right oscillation.
 Risk-triggered release lets new language evidence change the homotopy.
 
-\subsection{Asynchronous Contract and Complexity}
+\subsubsection{Asynchronous Contract and Complexity}
 The geometry, semantic, and control streams run on separate clocks.  Every
 RGB, depth, odometry, graph, and semantic record carries a source timestamp;
 the planner consumes a consistent snapshot rather than joining callbacks by
@@ -590,6 +596,24 @@ growth $O(N_{\max}+V+E+M)$ independent of flight duration.  These bounds keep
 the slow route layer from competing with the fixed-rate local controller.
 
 \subsection{Corridor-Conditioned Local Policy}
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.94\columnwidth]{pics/corridor_motivation_paper.pdf}
+\caption{When both homotopies are geometrically passable, the unconstrained
+policy shortcuts off-route and is forced into a large detour later, whereas
+the corridor-conditioned policy tracks the remembered witness.}
+\label{fig:corridor_motivation}
+\end{figure}
+
+Figure~\ref{fig:corridor_motivation} exposes the central interface mismatch.
+At the illustrated fork, both homotopies are locally collision-free, so an
+endpoint-conditioned policy can prefer the apparently shorter left branch
+even though the slow graph layer has committed to the right-hand witness.
+After this shortcut leaves the selected homotopy, recovering the route
+requires a large detour.  A frontier goal communicates \emph{where} to move
+but not \emph{which route} to preserve; consequently, route identity can be
+lost exactly at the graph-to-policy boundary.  This failure motivates passing
+the remembered witness as an explicit corridor constraint.
 The graph publishes the accepted witness, and a 10-m lookahead on that
 witness produces the local goal $\vect{g}^{\mathrm{loc}}_t$.
 The same accepted witness is further processed into an ordered set of
@@ -670,33 +694,38 @@ around newly observed obstacles.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{EXPERIMENTS}
 \label{sec:experiments}
-\subsection{Evaluation Protocol}
-We organize the evaluation into three groups.  Experiment A is the main
-cross-scale comparison on empty space, trees, forests, long walls, buildings,
-and mixed-scale scenes.  Experiment B is a memory-bandwidth ablation that
-compares a direct goal, a rolling waypoint, and the ordered corridor under the
-same local-policy architecture.  Experiment C changes only the open-vocabulary
-query (e.g., ``avoid buildings,'' ``avoid trees,'' and ``avoid power lines'')
-and measures the resulting route changes without retraining the local policy.
-Runtime and memory are reported separately for every group.
+We organize the evaluation into three blocks.  The \emph{closed-loop system
+evaluation} compares ScaleNav with YOPO, EGO-Planner, and SUPER, varies the
+open-vocabulary query, removes individual ScaleNav components, and profiles
+runtime and memory under one paired protocol.  The \emph{local-policy
+evaluation} isolates corridor conditioning on an independent 1,800-route
+offline benchmark.  The \emph{persistence and semantic-exposure analysis}
+combines semantic-cost replay with an outbound/return experiment that tests
+graph reuse and measures the spatial exposure of both legs.
 
-This organization follows the intended failure boundaries: the graph supplies
-route memory, the corridor supplies the local constraint, and open-vocabulary
-evidence changes route preference.
+This decomposition separates the three intended sources of behavior: route
+memory is supplied by the graph, local feasibility by the corridor constraint,
+and route preference by open-vocabulary evidence.
 
-We use Colosseum/AirSim \cite{airsim} with synchronized RGB-D and odometry.
-The current evaluation uses a 1.6-m horizontal graph layer.
-Each condition uses at least 20 paired trials with identical starts, goals,
-scenes, and random seeds across methods.
-We report mean, standard deviation, and a 95\% confidence interval.
+The closed-loop evaluation and persistence analysis use the UE Map2 scene
+through Colosseum/AirSim \cite{airsim}, synchronized RGB-D and odometry.  The
+one-way closed-loop conditions use the fixed mission goal
+$(x,y,z)=(0.0,140.0,1.6)$~m; each trial is a single one-way flight and no
+return leg is included in its time, distance, or success metrics.  The offline
+and graph-reuse protocols are specified separately in their subsections.
+The topological planner operates on a 1.6-m horizontal graph layer.
+Each closed-loop condition contains at
+least 20 paired trials with identical initial states, goals, scenes, and random
+seeds across methods.  We report the mean, standard deviation, and 95\%
+confidence interval.
 Paired continuous metrics use a two-sided Wilcoxon signed-rank test.
 Success proportions use paired bootstrap intervals.
 Failures remain in safety and success metrics and are not silently removed
 from path-efficiency statistics.
 
-\subsection{Comparison and Ablation Matrix}
-The main comparison evaluates the complete ScaleNav system against the
-following published planners:
+\subsection{Closed-Loop System Evaluation}
+\subsubsection{Methods and Conditions}
+The closed-loop external comparison includes the following published planners:
 \begin{itemize}
   \item \textbf{YOPO}: the original local policy with the frontier goal and no
   persistent route constraint.
@@ -708,15 +737,12 @@ following published planners:
   memory, and corridor-conditioned local execution.
 \end{itemize}
 
-Internal variants are reported only in the component ablation.  It uses four
-matched stages: ``YOPO'' receives only the frontier goal; ``Rolling-Goal YOPO''
-adds the persistent graph and its rolling waypoint; ``Corridor-Conditioned
-YOPO'' additionally receives the ordered witness corridor; and ``ScaleNav''
-adds the open-vocabulary risk field.  Semantic weights are zero in the two
-geometric variants.  These stages isolate route memory, corridor conditioning,
-and semantic foresight, respectively.  All four use the same primitive
-generator and local state.  The semantic front end is PEARL; a Qwen3-VL adapter
-can be substituted through the same observation contract.
+For the language-condition comparison, the planner and scene geometry are held fixed while only the text
+condition changes: no query, known-object queries such as ``avoid buildings''
+and ``avoid trees,'' and the unseen-structure query ``avoid power lines.''
+The YOPO-constraint and ablation variants use the same primitive generator and
+local state as the full system.  The semantic front end is PEARL in every
+reported condition.
 
 ScaleNav variants use the same graph, route, and policy configuration.  The
 main online settings are listed in Table~\ref{tab:params}.
@@ -735,9 +761,9 @@ Point voxel & 0.10 m & Point budget & 100,000 \\
 Frame history & current frame only & Graph update & 100 ms \\
 Graph rebuild & 100 ms & Search radius & 35 m \\
 Local lookahead & 10 m & Goal-connect budget & 20 ms \\
-$\lambda_{\rm sem}$ & 2.0 & $R_s$ & 10 m \\
+$\lambda_{\rm sem}$ & 2.0 & $R_s$ & 5 m \\
 $\lambda_{\rm clr}$ & 2.0 & $\rho^\star$ & 1.2 m \\
-$\alpha$ in (\ref{eq:ema}) & 0.3 & $\kappa_{\rm mem}$ & 0.9 \\
+$\alpha$ in (\ref{eq:ema}) & 0.3 & Edge-memory discount & disabled \\
 Optical depth $\ell_s$ & 30 m & Node merge distance & 2.5 m \\
 Maximum semantic nodes & 16 & Semantic grid & $5\times3$ \\
 Route bubbles $K$ & 12 & Route mask & binary \\
@@ -746,39 +772,61 @@ Route bubbles $K$ & 12 & Route mask & binary \\
 }
 \end{table}
 
-\subsection{Scenarios}
-The cross-scale benchmark contains empty space, isolated trees, dense forests,
-long walls, buildings, building clusters, and a mixed-scale continuous flight
-that combines forests and buildings without mode markers.  The open-vocabulary
-trials use matched scenes with queries for buildings, trees, and power lines,
-together with hard-negative queries.
+\subsubsection{Scenarios}
+The closed-loop benchmark covers isolated trees, dense forests, long walls,
+buildings, building clusters, and a mixed-scale continuous flight without mode
+markers.  The language comparison
+uses matched views with no query and known-object queries, together with an
+unseen power-line scene.  The component ablation uses matched closed-loop
+scenes with one ScaleNav component removed at a time.
 
-\subsection{Metrics}
-We report path length, average speed, minimum and average obstacle distance,
-semantic exposure $E_{\mathrm{sem}}=\frac{1}{L}\int_0^T r(\vect{p}(t))v(t)\,dt$,
-route-switch count, success, collision, completion time, and semantic task
-compliance.
-For semantic forks we measure the decision distance at which the selected
-route commits to the correct branch.
-System metrics are PEARL latency, graph-update wall time, A* latency, graph
-size, resident memory, local-policy rate, and dropped semantic frames. The
-semantic comparison additionally reports region precision, recall, task
-compliance, and stale-response rejection; these metrics are reported for
-Qwen3-VL only when that adapter is available.
+Figure~1(b) provides the common Map2 overview.  To make scene scale and
+clutter reproducible, statistics are computed from the UE truth export rather
+than from ScaleNav's online point buffer.  The export spans
+$140.0\times132.0$~m in the horizontal plane.  In the evaluation corridor
+$x\in[-45,45]$~m, $y\in[0,120]$~m, a 0.5-m grid cell is marked occupied when
+the truth cloud intersects the navigation-height slab $z\in[0.6,2.6]$~m;
+$3.91\%$ of the cells are occupied.  The fixed start-to-goal Euclidean
+distance is 140~m.  Per-family reporting uses the obstacle-family label, start
+and goal, random seed, minimum passage width, and the same truth-derived
+occupied-cell fraction; these quantities are never estimated from a method's
+partial online map.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{RESULTS}
-Results are organized according to the comparison matrix above.  The
-offline corridor-conditioned experiment is complete; the remaining closed-loop
-entries are filled only after all paired trials for a condition have passed
-the same logging and validation protocol.  A dash therefore denotes an
-unreported measurement rather than a zero.
+\subsubsection{Metrics}
+Following the benchmark conventions of EGO-Planner and SUPER, the primary
+closed-loop metrics are success rate (goal reached without collision or
+timeout), safe rate (no collision or dynamically infeasible trajectory),
+collision/failure rate, path length,
+flight time, average flight speed, and planning time.  These metrics are
+reported for every external baseline and ScaleNav under identical starts and
+goals.  For shortest mission length $L^\star$, flown length $L$, and binary
+success $S$, we report the all-trial path efficiency
+$\eta_{\rm SPL}=S L^\star/\max(L,L^\star)$.  Completion time $T$ runs from
+the goal command until the vehicle enters the goal tolerance with admissible
+speed, and $\bar v=L/T$.  Raw $L$, $T$, and $\bar v$ are reported over
+successful trials; failures remain represented by success, collision,
+$\eta_{\rm SPL}$, and the fixed timeout.  This prevents early failures from
+appearing artificially short or fast.  Minimum clearance is retained as a
+secondary safety diagnostic.
 
-\subsection{Overall Navigation Performance}
-Table~\ref{tab:main_results} reports closed-loop navigation performance across
-all scenario families.  Success requires reaching the goal without collision
-or timeout.  Path and time statistics include failed trials to avoid favoring
-methods that terminate early.
+The language comparison additionally reports the change in selected route,
+query compliance, decision distance, route-switch count, and semantic exposure
+$E_{\mathrm{sem}}=\frac{1}{L}\int_0^T r(\vect{p}(t))v(t)\,dt$.  System profiling reports PEARL
+latency, graph-update wall time, rolling-A* latency, graph size, resident
+memory, local-policy rate, and dropped semantic frames.  Region precision,
+recall, task compliance, and stale-response rejection are reported only for
+the open-vocabulary front end.
+
+\subsubsection{Results}
+Closed-loop entries are reported only after all paired trials for a condition
+pass the same logging and validation protocol.  A dash denotes an unreported
+measurement, not a zero.
+Table~\ref{tab:main_results}
+reports closed-loop navigation performance across the selected scenario
+families.  A trial is successful only if the vehicle reaches the goal without
+collision or timeout while satisfying the common kinematic limits.  Path, time, and
+speed use successful trials, while $\eta_{\rm SPL}$ and success include every
+trial according to the definition above.
 
 \begin{table}[t]
 \caption{Closed-Loop Navigation Performance}
@@ -786,60 +834,108 @@ methods that terminate early.
 \centering
 \small
 \resizebox{\columnwidth}{!}{%
-\begin{tabular}{lccccc}
+\begin{tabular}{lcccccccc}
 \toprule
-Method & Succ. (\%) & Coll. (\%) & $L$ (m) & $d_{\min}$ (m) & Prog. (m) \\
+Method & Succ. (\%) & Safe (\%) & Coll. (\%) & $L$ (m) & $T$ (s) & $\bar v$ (m/s) & $\eta_{\rm SPL}$ (\%) & Plan mean (ms) \\
 \midrule
-YOPO              & \blank & \blank & \blank & \blank & \blank \\
-EGO-Planner       & \blank & \blank & \blank & \blank & \blank \\
-SUPER             & \blank & \blank & \blank & \blank & \blank \\
-ScaleNav (ours)   & \blank & \blank & \blank & \blank & \blank \\
+YOPO              & \blank & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
+EGO-Planner       & \blank & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
+SUPER             & \blank & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
+ScaleNav (ours)   & \blank & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
 \bottomrule
 \end{tabular}
 }
 \end{table}
 
-\subsection{Route Constraint and Open-Vocabulary Ablation}
-The ablation incrementally adds route-level memory, corridor conditioning, and
-open-vocabulary route ranking to the local baseline.
-Table~\ref{tab:semantic_results} reports branch selection, route stability, and
-semantic exposure.
+The language-condition comparison keeps the planner fixed and changes only
+the query.
+We compare geometric-only execution, known object queries, and an unseen
+power-line query in a scene containing power lines.  Table~\ref{tab:semantic_results}
+reports route change, query compliance, decision distance, and semantic
+exposure.
 
 \begin{table}[t]
-\caption{Route Constraint and Open-Vocabulary Ablations}
+\caption{Open-Vocabulary Query Conditions}
 \label{tab:semantic_results}
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+Condition & Query & Route change (\%) & Compliance (\%) & Dec. dist. (m) & $E_{\rm sem}$ \\
+\midrule
+Geometric-only & none & \blank & \blank & \blank & \blank \\
+Known query   & buildings/trees & \blank & \blank & \blank & \blank \\
+Unseen query  & power lines & \blank & \blank & \blank & \blank \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+The component ablation removes one ScaleNav component at a time while keeping
+the scene, goal, local policy, and evaluation metrics fixed.  This design measures the
+incremental contribution of persistent route memory, corridor-conditioned
+execution, and semantic foresight.
+
+\begin{table}[t]
+\caption{ScaleNav Component Ablation}
+\label{tab:ablation_results}
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+Variant & Succ. (\%) & Coll. (\%) & $L$ (m) & $T$ (s) & $\bar v$ (m/s) \\
+\midrule
+ScaleNav w/o route memory       & \blank & \blank & \blank & \blank & \blank \\
+ScaleNav w/o corridor execution & \blank & \blank & \blank & \blank & \blank \\
+ScaleNav w/o semantic foresight & \blank & \blank & \blank & \blank & \blank \\
+ScaleNav (full)                 & \blank & \blank & \blank & \blank & \blank \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+Finally, Table~\ref{tab:runtime_results} decomposes end-to-end compute cost.
+For each module, we report mean and 99th-percentile latency, execution rate,
+and memory usage measured during the same closed-loop runs.
+
+\begin{table}[t]
+\caption{Runtime and Memory Cost}
+\label{tab:runtime_results}
 \centering
 \small
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{lcccc}
 \toprule
-Method & Branch (\%) & Dec. dist. (m) & Switches & $E_{\rm sem}$ \\
+Module & Mean (ms) & P99 (ms) & Rate (Hz) & Memory (MB) \\
 \midrule
-YOPO                 & \blank & \blank & \blank & \blank \\
-Rolling-Goal YOPO    & \blank & \blank & \blank & \blank \\
-Corridor-Conditioned YOPO & \blank & \blank & \blank & \blank \\
-ScaleNav            & \blank & \blank & \blank & \blank \\
+PEARL inference & \blank & \blank & \blank & \blank \\
+Graph update    & \blank & \blank & \blank & \blank \\
+Rolling A*      & \blank & \blank & \blank & \blank \\
+Local-policy inference & \blank & \blank & \blank & \blank \\
+Full system     & \blank & \blank & \blank & \blank \\
 \bottomrule
 \end{tabular}
 }
 \end{table}
 
-\subsection{Corridor-Conditioned YOPO Evaluation}
-The current corridor-conditioned checkpoint is trained on $2{,}250$ routes and evaluated
-on an independent $1{,}800$-route benchmark containing cylindrical trees,
-the original tree point cloud, and large blocks.  All models receive identical
-depth, pose, zero motion, frontier goal, and (for Corridor-Conditioned YOPO)
-witness bubbles.
-The evaluation is single-step and offline; it is not a closed-loop flight
-success rate.
+\subsection{Offline Local-Policy Evaluation}
+\textit{Protocol.} The corridor-conditioned checkpoint is trained on $2{,}250$ routes and
+evaluated on an independent $1{,}800$-route benchmark containing cylindrical
+trees, the original tree point cloud, and large blocks.  All models receive
+identical depth, pose, zero motion, frontier goal, and (for
+Corridor-Conditioned YOPO) witness bubbles.  The evaluation is single-step and
+offline; it is not a closed-loop flight success rate.  We report collision,
+corridor violation, minimum clearance, and route progress.
 
-Corridor-Conditioned YOPO reduces collision and corridor violation while giving up some
-forward progress for safety.  On the full benchmark it obtains a $0.33\%$
+\textit{Results.} Corridor conditioning reduces collision and corridor violation, with a
+corresponding reduction in forward progress.  On the full benchmark it obtains a $0.33\%$
 collision rate and $8.67\%$ corridor violation, compared with $7.78\%$ and
 $54.33\%$ for YOPO.  Its average minimum clearance is $1.358$~m and
 average route progress is $4.230$~m, versus $1.146$~m and $6.117$~m for
-YOPO.  The difference makes the trade-off explicit rather than claiming
-an improvement on every metric.  On the original tree point cloud, the
+YOPO.  These results expose the safety--progress trade-off rather than implying
+uniform improvement across all metrics.  On the original tree point cloud, the
 collision rate is $0.33\%$ for Corridor-Conditioned YOPO and $19.33\%$ for
 YOPO.  The full benchmark records 6/1800 collisions, while the original
 tree-point-cloud subset records 2/600; both rates round to $0.33\%$.
@@ -863,30 +959,52 @@ Corridor-Conditioned YOPO (final) & \textbf{0.33} & \textbf{8.67} & \textbf{1.35
 }
 \end{table}
 
-\subsection{Runtime and Resource Usage}
-Table~\ref{tab:runtime_results} decomposes end-to-end compute cost.  Latency is
-reported as the mean and 99th percentile; rate and memory are measured during
-the same closed-loop runs.
+\subsection{Persistence and Semantic-Exposure Analysis}
+\textit{Protocol.} This exploratory mechanism analysis keeps the graph process
+alive while the vehicle flies from $(0,0,1.6)$~m to $(0,140,1.6)$~m and back;
+neither graph nor semantic memory is cleared at the turn.  Each leg begins at
+the corresponding new-goal event and ends at mission completion.  We verify
+reuse from the goal-state flag, absence of background initialization, nonzero
+retained nodes, and newly inserted nodes per rebuild.  Route-switch events
+measure stability; planner-update and background-rebuild statistics measure
+online cost.  Flight time is measured between mission events, and path length
+is integrated from synchronized 100-Hz odometry.
 
-\begin{table}[t]
-\caption{Runtime and Memory Cost}
-\label{tab:runtime_results}
-\centering
-\small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lcccc}
-\toprule
-Module & Mean (ms) & P99 (ms) & Rate (Hz) & Memory (MB) \\
-\midrule
-PEARL inference & \blank & \blank & \blank & \blank \\
-Graph update    & \blank & \blank & \blank & \blank \\
-Rolling A*      & \blank & \blank & \blank & \blank \\
-Local-policy inference & \blank & \blank & \blank & \blank \\
-Full system     & \blank & \blank & \blank & \blank \\
-\bottomrule
-\end{tabular}
-}
-\end{table}
+For spatial exposure, point clouds are transformed into the world frame,
+cropped to $z\in[0.3,3.2]$~m, and merged into 0.5-m occupied cells.  Local
+obstacle density is the occupied fraction within 3~m of each trajectory
+sample.  Final high-risk semantic nodes are restricted to a 4-m vertical band
+around the flight layer.  We report mean and P90 obstacle density, minimum
+semantic-node distance, and trajectory fraction within 5~m of a high-risk
+node.
+
+The causal follow-up replays identical graph snapshots and observations over
+$\lambda_{\rm sem}\in\{1,2,4\}$ and $R_s\in\{3,5,7\}$~m, with
+$\sigma_s=R_s/2$ and $(2,5)$ as the deployed setting.  It reports branch
+agreement, query compliance, semantic exposure, path length, and route-switch
+count without changing geometry or collision checks.  In particular, the
+paired $\lambda_{\rm sem}=2$ versus $0$ replay is required to separate semantic
+preference from geometric sparsity.
+
+\textit{Observed behavior.} The current analysis contains two complete round trips, rather
+than the ten specified for the final efficiency claim.  Both return legs reused the
+outbound graph without background reinitialization.  Newly inserted nodes per
+rebuild fell by $62.7\%$ and $61.5\%$, while route switches fell from 18 to 12
+and from 15 to 10.  This confirms graph persistence, but not an end-to-end
+speedup: rebuild mean increased by $21.5\%$ and $17.6\%$, and rebuild P95 by
+$15.0\%$ and $31.3\%$, as the retained graph and semantic working set grew.
+Return flight time changed by $-8.8\%$ and $-1.3\%$, whereas path length
+increased by $1.3\%$ and $4.6\%$.
+
+The spatial analysis of the second round trip shows that return mean and P90
+obstacle density decreased by $8.2\%$ and $28.6\%$.  The minimum distance to a final
+high-risk semantic node increased from 2.56 to 6.93~m, and the trajectory
+fraction within 5~m of such nodes decreased from $8.7\%$ to zero.  Thus the
+return selected a longer corridor through less clutter and farther from the
+final semantic-risk set.  This is correlation rather than semantic causation:
+the two legs have opposite viewpoints, the semantic set accumulates during the
+flight, and lower geometric density favors the same detour.  The paired
+semantic-on/off replay defined above remains necessary.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{DISCUSSION AND LIMITATIONS}
@@ -900,6 +1018,23 @@ topology and local depth avoidance.
 The bounded Gaussian field, bounded node set, EMA updates, and confidence
 factors limit both spatial and temporal error growth.
 
+The semantic parameters have distinct and monotone roles.  Increasing
+$\lambda_{\rm sem}$ strengthens preference for lower-risk routes without
+changing their geometric validity, whereas increasing $R_s$ expands the
+region influenced by each observation and simultaneously broadens its tied
+Gaussian bandwidth.  Excessive values can therefore produce conservative
+detours, while small values postpone the branch decision.  The fixed
+sensitivity protocol above is needed to establish how wide the stable
+operating range is; until those replay results are populated, robustness to
+these parameters should not be inferred from the nominal setting alone.
+
+SUPER and ScaleNav address different layers of the stack.  SUPER provides a
+geometric, safety-assured high-speed trajectory architecture; ScaleNav
+provides persistent, language-conditioned route choice and does not reproduce
+SUPER's safety guarantee.  The accepted witness/corridor contract could in
+principle condition a SUPER-like executor, but that composition is not
+evaluated here.
+
 The current experiments simplify topological search to a fixed-height layer,
 which isolates the left-right detour problem but does not evaluate vertical
 homotopy choices.
@@ -908,16 +1043,14 @@ replace the online C++ M4 search.  A full closed-loop evaluation is therefore
 the next validation step.  Future work should evaluate the same witness-field
 cost on a fully 3-D graph and report the complete paired matrix.
 
-\subsection{Limitations and Extension}
+\subsection{Semantic-Front-End Generality}
 \label{sec:extensions}
-The current semantic front end is PEARL.  A model-independent observation
-contract lets a larger VLM such as Qwen3-VL replace it without changing graph
-search.
-An adapter rasterizes boxes, points, or masks into the same heatmap that the
-projection, EMA, and edge-risk equations consume unchanged, preserving the
-invariants that only measured geometry determines collision validity, every
-learned signal has a zero-input fallback, and all asynchronous evidence carries
-a timestamp and bounded lifetime.
+The current semantic front end and every reported semantic observation use
+PEARL.  The software boundary accepts a calibrated heatmap, so boxes, points,
+or masks from another model could be rasterized into the same representation
+without changing graph search.  However, no alternative vision--language
+model is evaluated in this paper.  We therefore claim interface modularity,
+not empirical transfer across semantic models.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{CONCLUSION}
@@ -931,8 +1064,6 @@ and ordered witness corridor bubbles, while the topological layer publishes the
 local goal for execution.
 This yields a clean separation: topology remembers, semantics ranks, and the
 local policy flies inside the selected corridor.
-The Qwen3-VL adapter will widen language coverage without changing the planner
-contract.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 {\footnotesize

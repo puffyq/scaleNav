@@ -345,7 +345,16 @@ class YopoTrainer:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
         try:
-            self.policy.load_state_dict(state_dict)
+            if isinstance(checkpoint, dict) and "route_bubble_count" in checkpoint:
+                applied_order = self.policy.load_route_checkpoint(checkpoint)
+                if resume_training_state and "feature_order" not in checkpoint:
+                    raise ValueError(
+                        "legacy depth-first Route-YOPO checkpoint was migrated; "
+                        "use --finetune because its optimizer moments cannot be safely permuted"
+                    )
+                print(f"feature order: {applied_order}")
+            else:
+                self.policy.load_state_dict(state_dict)
         except RuntimeError:
             self.policy.load_yopo_simple_state_dict(state_dict)
         if (
@@ -368,6 +377,7 @@ class YopoTrainer:
                 "epoch": self.epoch_i,
                 "best_validation_cost": self.best_validation_cost,
                 "route_dataset_version": int(cfg["route_dataset_version"]),
+                "feature_order": self.policy.FEATURE_ORDER,
                 "route_bubble_count": int(cfg["route_bubble_count"]),
                 "route_anchor_distances_m": list(cfg["route_anchor_distances_m"]),
                 "local_subgoal_distance_m": float(cfg["local_subgoal_distance_m"]),

@@ -20,6 +20,7 @@ find_package(nav_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
 set(TOPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/src/pointcloud_topo)
@@ -56,7 +57,7 @@ target_include_directories(epic_graph_node PRIVATE
 )
 target_compile_definitions(epic_graph_node PRIVATE PCL_NO_PRECOMPILE)
 ament_target_dependencies(epic_graph_node
-  geometry_msgs nav_msgs pcl_conversions rclcpp sensor_msgs visualization_msgs)
+  geometry_msgs nav_msgs pcl_conversions rclcpp sensor_msgs std_msgs visualization_msgs)
 target_link_libraries(epic_graph_node ${PCL_LIBRARIES} OpenMP::OpenMP_CXX ikd_tree)
 
 if(BUILD_TESTING)

@@ -1,0 +1,38 @@
+{
+  "meta": {
+    "session": "log_scalenav/session_20260828_111856_991",
+    "graph_snapshot": "log_scalenav/session_20260828_111856_991/graph/graph_1808.json",
+    "sampled_pointcloud_frames": 156,
+    "accepted_points": 107939,
+    "occupied_cells": 998,
+    "semantic_nodes": 34,
+    "density_definition": "occupied 0.5 m cells in a 3 m XY neighborhood; world z 0.3..3.2 m",
+    "semantic_definition": "red high-risk points in final graph snapshot; abs(z-1.6) <= 4 m"
+  },
+  "metrics": {
+    "outbound": {
+      "samples": 769,
+      "path_length_m": 163.41528244836238,
+      "obstacle_density_mean": 0.01308445631034443,
+      "obstacle_density_p90": 0.061946902654867256,
+      "obstacle_density_max": 0.19469026548672566,
+      "semantic_distance_mean_m": 15.169336309136256,
+      "semantic_distance_min_m": 2.5571994677991743,
+      "semantic_within_5m_fraction": 0.08712613784135241,
+      "mean_abs_lateral_m": 4.6935198757481,
+      "max_abs_lateral_m": 14.2565157
+    },
+    "return": {
+      "samples": 753,
+      "path_length_m": 170.95991135191923,
+      "obstacle_density_mean": 0.012010953237198698,
+      "obstacle_density_p90": 0.04424778761061947,
+      "obstacle_density_max": 0.168141592920354,
+      "semantic_distance_mean_m": 16.200692147503283,
+      "semantic_distance_min_m": 6.926115876682469,
+      "semantic_within_5m_fraction": 0.0,
+      "mean_abs_lateral_m": 5.297017458594459,
+      "max_abs_lateral_m": 12.96288
+    }
+  }
+}

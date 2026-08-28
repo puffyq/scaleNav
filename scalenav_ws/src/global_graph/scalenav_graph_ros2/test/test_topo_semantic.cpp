@@ -665,6 +665,95 @@ TEST(TopoGraphM3Contract, TcM3017OverlappingFramesReusePersistentIdentity)
   EXPECT_EQ(graph.semanticMemorySize(), 1U);
 }
 
+TEST(TopoGraphSemanticPrune, RemovesPassedHistoryAndPreservesProtectedEvidence)
+{
+  TopoGraph graph;
+  auto region = graph.getRegionNode(Eigen::Vector3i::Zero());
+  auto verified = std::make_shared<TopoNode>();
+  verified->center_ = Eigen::Vector3f::Zero();
+  verified->geometry_state_ = TopoGeometryState::Verified;
+  region->topo_nodes_.insert(verified);
+
+  auto make_virtual = [&](float x, float risk, std::int64_t stamp) {
+    auto node = std::make_shared<TopoNode>();
+    node->center_ = Eigen::Vector3f(x, 0.0F, 1.6F);
+    node->geometry_state_ = TopoGeometryState::Unknown;
+    graph.updateNodeSemantic(node, risk, 1.0F, stamp, 1.0F);
+    region->topo_nodes_.insert(node);
+    return node;
+  };
+  auto behind = make_virtual(-5.0F, 0.8F, 100);
+  auto weak = make_virtual(5.0F, 0.1F, 200);
+  auto strong = make_virtual(6.0F, 0.9F, 300);
+  auto active = make_virtual(7.0F, 0.2F, 500);
+  auto protected_node = make_virtual(8.0F, 0.3F, 400);
+
+  behind->neighbors_.insert(verified);
+  verified->neighbors_.insert(behind);
+  behind->paths_[verified] = {behind->center_, verified->center_};
+  verified->paths_[behind] = {verified->center_, behind->center_};
+  behind->weight_[verified] = 5.0F;
+  verified->weight_[behind] = 5.0F;
+
+  const auto result = graph.pruneVirtualSemanticNodes(
+    Eigen::Vector3f::Zero(), Eigen::Vector3f::UnitX(), 2.0F, 3U, 500,
+    {protected_node->persistent_id_});
+  EXPECT_EQ(result.before, 5U);
+  EXPECT_EQ(result.removed_behind, 1U);
+  EXPECT_EQ(result.removed_capacity, 1U);
+  EXPECT_EQ(result.after, 3U);
+  EXPECT_EQ(graph.semanticMemorySize(), 3U);
+  EXPECT_EQ(region->topo_nodes_.count(behind), 0U);
+  EXPECT_EQ(region->topo_nodes_.count(weak), 0U);
+  EXPECT_EQ(region->topo_nodes_.count(strong), 1U);
+  EXPECT_EQ(region->topo_nodes_.count(active), 1U);
+  EXPECT_EQ(region->topo_nodes_.count(protected_node), 1U);
+  EXPECT_EQ(verified->neighbors_.count(behind), 0U);
+}
+
+TEST(TopoGraphSemanticPrune, AstarNeverUsesUnknownAsTransitTopology)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto unknown = std::make_shared<TopoNode>();
+  auto detour = std::make_shared<TopoNode>();
+  auto goal = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  unknown->center_ = Eigen::Vector3f(2.0F, 0.0F, 3.0F);
+  detour->center_ = Eigen::Vector3f(2.0F, 2.0F, 1.6F);
+  goal->center_ = Eigen::Vector3f(4.0F, 0.0F, 1.6F);
+  unknown->geometry_state_ = TopoGeometryState::Unknown;
+  for (const auto &node : {start, detour, goal}) {
+    node->geometry_state_ = TopoGeometryState::Verified;
+  }
+  auto connect = [](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
+    const float length = (left->center_ - right->center_).norm();
+    left->neighbors_.insert(right);
+    right->neighbors_.insert(left);
+    left->paths_[right] = {left->center_, right->center_};
+    right->paths_[left] = {right->center_, left->center_};
+    left->weight_[right] = length;
+    right->weight_[left] = length;
+  };
+  connect(start, unknown);
+  connect(unknown, goal);
+
+  std::vector<TopoNode::Ptr> path;
+  EXPECT_FALSE(graph.goalDirectedSearch(
+    start, goal->center_, path, 0.2, 1.0F, 1.0F, {}, 0.0F,
+    20.0F, &start->center_, 0.0F, true));
+  EXPECT_TRUE(path.empty());
+
+  connect(start, detour);
+  connect(detour, goal);
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, goal->center_, path, 0.2, 1.0F, 1.0F, {}, 0.0F,
+    20.0F, &start->center_, 0.0F, true));
+  ASSERT_EQ(path.size(), 3U);
+  EXPECT_EQ(path[1], detour);
+  EXPECT_EQ(path.back(), goal);
+}
+
 TEST(TopoGraphM3Contract, TcM3018FixedLayerDoesNotFlattenSemanticRows)
 {
   const Eigen::Vector3f camera = Eigen::Vector3f::Zero();
@@ -739,6 +828,7 @@ TEST(TopoGraphPersistence, DetachedRebuildCarriesVerifiedNodesAndEdges)
   auto from = std::make_shared<TopoNode>();
   from->center_ = Eigen::Vector3f(1.0F, 1.0F, 1.0F);
   from->persistent_id_ = 7;
+  from->is_route_anchor_ = true;
   auto to = std::make_shared<TopoNode>();
   to->center_ = Eigen::Vector3f(5.0F, 1.0F, 1.0F);
   from->neighbors_.insert(to);
@@ -767,6 +857,8 @@ TEST(TopoGraphPersistence, DetachedRebuildCarriesVerifiedNodesAndEdges)
   }
   ASSERT_TRUE(copied_from);
   ASSERT_TRUE(copied_to);
+  EXPECT_TRUE(copied_from->is_route_anchor_);
+  EXPECT_EQ(rebuilt.routeAnchorCount(), 1U);
   EXPECT_EQ(copied_from->neighbors_.count(copied_to), 1U);
   EXPECT_FLOAT_EQ(copied_from->weight_.at(copied_to), 4.0F);
 }
@@ -897,6 +989,42 @@ TEST(TopoGraphConnectivity, SemanticAssociationRadiusDoesNotMergeGeometryDiff)
   // association radius. Only the latter must remain unmatched and removed.
   ASSERT_EQ(remained.size(), 0U);
   ASSERT_EQ(removed.size(), 2U);
+}
+
+TEST(TopoGraphCorridorMemory, ProtectsOnlyVerifiedRouteGeometry)
+{
+  TopoGraph graph;
+  auto verified = std::make_shared<TopoNode>();
+  auto unknown = std::make_shared<TopoNode>();
+  auto odom = std::make_shared<TopoNode>();
+  verified->geometry_state_ = TopoGeometryState::Verified;
+  unknown->geometry_state_ = TopoGeometryState::Unknown;
+  odom->role_ = TopoNodeRole::Odom;
+
+  EXPECT_EQ(graph.protectRouteGeometry({verified, unknown, odom}), 1U);
+  EXPECT_TRUE(verified->is_route_anchor_);
+  EXPECT_FALSE(unknown->is_route_anchor_);
+  EXPECT_FALSE(odom->is_route_anchor_);
+  EXPECT_EQ(graph.protectRouteGeometry({verified}), 0U);
+}
+
+TEST(TopoGraphCorridorMemory, DeduplicationKeepsRouteAnchor)
+{
+  TopoGraph graph;
+  auto ordinary = std::make_shared<TopoNode>();
+  auto anchor = std::make_shared<TopoNode>();
+  ordinary->center_ = Eigen::Vector3f(1.0F, 1.0F, 1.0F);
+  anchor->center_ = Eigen::Vector3f(1.02F, 1.0F, 1.0F);
+  anchor->is_route_anchor_ = true;
+  const auto region = graph.getRegionNode(Eigen::Vector3i::Zero());
+  region->topo_nodes_.insert(ordinary);
+  region->topo_nodes_.insert(anchor);
+
+  EXPECT_EQ(graph.deduplicateNearbyNodes(0.05F), 1U);
+  ASSERT_EQ(region->topo_nodes_.size(), 1U);
+  EXPECT_EQ(*region->topo_nodes_.begin(), anchor);
+  EXPECT_TRUE((*region->topo_nodes_.begin())->is_route_anchor_);
+  EXPECT_EQ(graph.routeAnchorCount(), 1U);
 }
 
 TEST(TopoGraphConnectivity, HalfEdgesAreRemovedFromThePersistentGraph)

@@ -30,7 +30,7 @@ def run(data_root: Path, checkpoint: Path, output: Path, device: str) -> None:
     loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=0)
     policy = YopoNetwork().to(selected_device).eval()
     state = torch.load(checkpoint, map_location=selected_device, weights_only=False)
-    policy.load_state_dict(state.get("model_state_dict", state))
+    feature_order = policy.load_route_checkpoint(state)
     trees = [cKDTree(read_ascii_point_cloud_ply(scene.path / "tree.ply")) for scene in dataset.scenes]
     threshold = float(cfg["robot_radius_m"] + cfg["safety_margin_m"])
     selected_collision = safety_oracle_collision = corridor_oracle_collision = 0
@@ -81,6 +81,7 @@ def run(data_root: Path, checkpoint: Path, output: Path, device: str) -> None:
     report = {
         "checkpoint": str(checkpoint.resolve()),
         "dataset": str(data_root.resolve()),
+        "featureOrder": feature_order,
         "sampleCount": samples,
         "collisionThresholdM": threshold,
         "selectedCollisionRate": selected_collision / samples,

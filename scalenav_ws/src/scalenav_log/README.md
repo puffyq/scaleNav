@@ -7,8 +7,14 @@
 - 深度图：`depth/*.pgm`，16-bit PGM，单位毫米；不支持的编码保留为 `*.bin`。
 - 点云和 free-ray：`pointcloud/*.pcd`，PCD ASCII，支持按 stride 和最大点数抽样。
 - graph、bubbles、path：`graph/*.json`，保留 marker 类型、命名空间、颜色、姿态和点序列。
-- odometry、trajectory control、goal、semantic heatmap：结构化写入 `index.jsonl`。
+- odometry、goal、semantic heatmap：结构化写入 `index.jsonl`。
+- trajectory control 使用 logger 接收时间，并记录 position、velocity、acceleration 和由连续命令计算的 jerk。
+- `mission` 记录每个新目标的开始，以及进入 0.5 m 目标域并降到 0.3 m/s 后的完成事件。
+- `/sim/collision` 的状态变化和累计碰撞标志记录为 `collision`；它是仿真碰撞标签，不由 clearance 推断。
+- `/epic/timing` 的每周期结构化计时记录为 `timing`，用于计算真实 mean/P99，而不是从节流文本日志采样。
 - 规划器净空：`/epic/clearance` 自动写为 `clearance` 事件，包含车辆净空、当前路径最小净空和平均净空；数值来自 Bubble A* 使用的同一障碍距离场。
+
+论文评测以第一个非平凡目标为单程任务：到达目标并停止后结束 trial，不把返程计入时间、里程或成功率。`analyze_flight_logs.py --mission-mode all` 仅用于诊断旧的多段日志。
 
 默认话题见 `config/scalenav_log.yaml`，均可通过 ROS 参数覆盖。
 

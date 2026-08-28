@@ -12,6 +12,8 @@ from policy.state_transform import StateTransform
 
 
 class YopoNetwork(nn.Module):
+    FEATURE_ORDER = "observation_depth_route_v1"
+    LEGACY_FEATURE_ORDER = "depth_observation_route_v0"
     def __init__(self, output_dim: int = 10, hidden_state: int = 64) -> None:
         super().__init__()
         self.route_bubble_count = int(cfg["route_bubble_count"])
@@ -80,3 +82,41 @@ class YopoNetwork(nn.Module):
                         channels = min(value.shape[1], target.shape[1])
                         target[:, :channels].copy_(value[:, :channels])
         self.load_state_dict(current)
+
+    @classmethod
+    def migrate_legacy_route_state_dict(
+        cls, state_dict: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """Convert old Route-YOPO head weights to the corrected feature order.
+
+        Historical Route-YOPO checkpoints consumed ``depth(64), observation(9),
+        route``.  The network now preserves YOPO-Simple's original
+        ``observation(9), depth(64)`` contract and appends route channels.  A
+        matching first-layer permutation preserves the old model function
+        exactly under the corrected implementation.
+        """
+        migrated = dict(state_dict)
+        name = "yopo_head.model.0.weight"
+        weight = state_dict.get(name)
+        if weight is None or weight.ndim != 4 or weight.shape[1] < 73:
+            raise ValueError("legacy Route-YOPO state lacks a compatible first head layer")
+        converted = weight.clone()
+        converted[:, :9] = weight[:, 64:73]
+        converted[:, 9:73] = weight[:, :64]
+        converted[:, 73:] = weight[:, 73:]
+        migrated[name] = converted
+        return migrated
+
+    def load_route_checkpoint(self, checkpoint: dict) -> str:
+        """Load a Route-YOPO checkpoint and return the applied feature contract."""
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+        feature_order = checkpoint.get("feature_order") if isinstance(checkpoint, dict) else None
+        first = state_dict.get("yopo_head.model.0.weight")
+        is_route_model = first is not None and first.ndim == 4 and first.shape[1] > 73
+        if is_route_model and feature_order in (None, self.LEGACY_FEATURE_ORDER):
+            state_dict = self.migrate_legacy_route_state_dict(state_dict)
+            feature_order = self.LEGACY_FEATURE_ORDER + "->" + self.FEATURE_ORDER
+        elif is_route_model and feature_order != self.FEATURE_ORDER:
+            raise ValueError(f"unsupported Route-YOPO feature order: {feature_order!r}")
+        self.load_state_dict(state_dict, strict=True)
+        return str(feature_order or self.FEATURE_ORDER)
