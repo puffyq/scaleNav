@@ -48,11 +48,11 @@ Route-Conditioned YOPO 的训练数据、Dataset、模型、loss、离线评测�
 | TC-M1-007 | `LIOInterface::KNN` | 10 个已知点，`k=1,3,20` | 点及距离数组 | Bubble 生成 | 数量为 `min(k,N)`，按距离非降序且点匹配 | 10/配置 | P1 | 已测试通过（GTest，2026-08-27） |
 | TC-M1-008 | `LIOInterface::boxSearch` | 已知点集及相交/空 AABB | 盒内点集 | 区域更新 | 仅返回闭区间内点；空盒返回空集 | 20 | P1 | 已测试通过（GTest，2026-08-27） |
 | TC-M1-009 | `LIOInterface::updateCloudMapOdometry` | 重复帧、同体素多点、40 m 内外点 | 更新后的点云/KD-tree | 约 10 Hz | 重复帧无增长；保留近体素中心点；窗内点仅作为 M1 跨帧缓存，窗外点删除且不转为 M2 persistent node | 100 帧 | P0 | 已测试失败：静止后窗外点重入（2026-08-27） |
-| TC-M1-010 | `EpicGraphNode::onOdom` | 非单位四元数、递增时间戳轨迹 | 当前状态、姿态历史 | odom 频率 | 姿态归一化，位置正确，历史不超容量 | 1000 消息 | P1 | 部分通过：5491 条日志姿态有限且单位化；非单位输入和内部容量未直接观测（2026-08-27） |
-| TC-M1-011 | `EpicGraphNode::poseForCloud` | 精确、容差内、容差外时间戳 | pose 与 bool | 每点云/语义帧 | 前两者成功且姿态正确；超时返回 false | 100/场景 | P0 | 部分通过：日志覆盖 0/10-40/50-90 ms 分支，未直接比对返回 pose（2026-08-27） |
-| TC-M1-012 | `EpicGraphNode::onCloud` | 含 NaN、近点、40 m 外点的机体系点云 | 世界地图更新 | 约 10 Hz | 非法/窗外点不入图，合法点坐标变换正确 | 120 帧 | P0 | 部分通过：410 帧真实点云正常处理；NaN/40 m 外点未独立注入（2026-08-27） |
-| TC-M1-013 | `EpicGraphNode::onFreeRays` | 只含自由端点的消息 | M1 局部占据点数不变 | 约 10 Hz | 自由射线端点不写入跨帧占据缓存，也不生成 M2 persistent node；最近障碍距离不变 | 120 帧 | P0 | 已测试通过（GTest 120 帧；日志 410 帧，2026-08-27） |
-| TC-M1-014 | `EpicGraphNode::onCloud` | 同一体素多点、相邻体素点、叶尺寸 `0.1 m` 及低于 `0.05 m` 的配置、采样后为空的点云 | `latestCloudSnapshot`、M1 局部地图及诊断字段 | 约 10 Hz | 每体素至多保留一个代表点；M1 地图更新只使用采样结果；叶尺寸低于下限时钳位到 `0.05 m`；空采样帧不更新图且被丢弃 | 120 帧/配置 | P0 | 测试设计已定义 |
+| TC-M1-010 | `ScaleNavGraphNode::onOdom` | 非单位四元数、递增时间戳轨迹 | 当前状态、姿态历史 | odom 频率 | 姿态归一化，位置正确，历史不超容量 | 1000 消息 | P1 | 部分通过：5491 条日志姿态有限且单位化；非单位输入和内部容量未直接观测（2026-08-27） |
+| TC-M1-011 | `ScaleNavGraphNode::poseForCloud` | 精确、容差内、容差外时间戳 | pose 与 bool | 每点云/语义帧 | 前两者成功且姿态正确；超时返回 false | 100/场景 | P0 | 部分通过：日志覆盖 0/10-40/50-90 ms 分支，未直接比对返回 pose（2026-08-27） |
+| TC-M1-012 | `ScaleNavGraphNode::onCloud` | 含 NaN、近点、40 m 外点的机体系点云 | 世界地图更新 | 约 10 Hz | 非法/窗外点不入图，合法点坐标变换正确 | 120 帧 | P0 | 部分通过：410 帧真实点云正常处理；NaN/40 m 外点未独立注入（2026-08-27） |
+| TC-M1-013 | `ScaleNavGraphNode::onFreeRays` | 只含自由端点的消息 | M1 局部占据点数不变 | 约 10 Hz | 自由射线端点不写入跨帧占据缓存，也不生成 M2 persistent node；最近障碍距离不变 | 120 帧 | P0 | 已测试通过（GTest 120 帧；日志 410 帧，2026-08-27） |
+| TC-M1-014 | `ScaleNavGraphNode::onCloud` | 同一体素多点、相邻体素点、叶尺寸 `0.1 m` 及低于 `0.05 m` 的配置、采样后为空的点云 | `latestCloudSnapshot`、M1 局部地图及诊断字段 | 约 10 Hz | 每体素至多保留一个代表点；M1 地图更新只使用采样结果；叶尺寸低于下限时钳位到 `0.05 m`；空采样帧不更新图且被丢弃 | 120 帧/配置 | P0 | 测试设计已定义 |
 
 M1 单元测试执行明细、失败定位和日志证据见
 [`TEST_REPORT_2026-08-27_M1_UNIT.md`](test_reports/TEST_REPORT_2026-08-27_M1_UNIT.md)。
@@ -93,7 +93,7 @@ M1 单元测试执行明细、失败定位和日志证据见
 | TC-M3-002 | `calibrateSemanticScore` | score/baseline 边界及非有限值 | `[0,1]` 风险 | 每 patch | 非有限为 0，基线扣除与上下界钳位正确 | 1000 | P1 | 已测试通过（GTest，2026-08-27） |
 | TC-M3-003 | `isSemanticRiskAnchor` | 分数/置信度恰低于、等于、高于门槛 | bool | 每语义节点 | 两值均达到门槛才 true；NaN/Inf false | 1000 | P1 | 已测试通过（GTest，2026-08-27） |
 | TC-M3-004 | `virtualSemanticPointFlu` | 中心/四角 patch，FOV 90x60，depth 30 m | FLU 点 | 每 patch | 所有点 optical x 增量 30 m；三行 z 有序且边角欧氏距离更大 | 1500 点 | P0 | 已测试通过（GTest，2026-08-27） |
-| TC-M3-005 | `EpicGraphNode::onSemanticHeatmap` | mono8、32FC1、错误编码、带姿态帧 | 世界风险点帧 | 约 2 Hz | 合法帧产生 15 patch；非法/无姿态帧丢弃 | 100/编码 | P0 | 部分通过：在线 32FC1 帧均产生 15 patch；mono8、错误编码和无姿态分支未受控注入（2026-08-27） |
+| TC-M3-005 | `ScaleNavGraphNode::onSemanticHeatmap` | mono8、32FC1、错误编码、带姿态帧 | 世界风险点帧 | 约 2 Hz | 合法帧产生 15 patch；非法/无姿态帧丢弃 | 100/编码 | P0 | 部分通过：在线 32FC1 帧均产生 15 patch；mono8、错误编码和无姿态分支未受控注入（2026-08-27） |
 | TC-M3-006 | `TopoGraph::insertSemanticNodes` | 新点、2.5 m 内重复点、被墙隔断点 | 插入/更新数及节点 | 每语义帧 | 近点复用 id；分数更新；失败连接无可执行边 | 100/场景 | P0 | 已测试通过（GTest，2026-08-27） |
 | TC-M3-007 | `TopoGraph::updateNodeSemantic` | 观测 `0,0.8,1.2`，alpha `0,0.5,1`，递增时间 | 节点语义字段 | 每匹配点 | EMA 与钳位正确，次数递增，时间更新 | 100/配置 | P1 | 已测试通过（GTest，2026-08-27） |
 | TC-M3-008 | `TopoGraph::semanticNodes` | 局部/远端、有/无有效证据节点 | 节点列表 | 搜索/发布周期 | 半径查询排除远点；仅返回有语义观测节点 | 1000 | P1 | 已测试通过（GTest，2026-08-27） |
@@ -101,12 +101,12 @@ M1 单元测试执行明细、失败定位和日志证据见
 | TC-M3-010 | `TopoGraph::loadSemanticMemory` | 重复 id、新旧时间混合记录 | 图内记忆 | 每次建图 | 每 id 唯一且采用预期记录，无数量膨胀 | 100 | P1 | 已测试失败：同 id 的旧记录覆盖新记录（GTest，2026-08-27） |
 | TC-M3-011 | `TopoGraph::semanticMemorySize` | 空、加载、更新后的记忆 | size | 诊断 | 始终等于 snapshot 条目数 | 1000 | P2 | 已测试通过（GTest，2026-08-27） |
 | TC-M3-012 | `TopoGraph::restoreNodeSemanticMemory` | 同 id、近点、远点、冲突 id 节点 | 恢复数量/属性 | 每次重建 | 同 id/允许近点恢复，远点和 unavailable id 不恢复 | 100/场景 | P0 | 已测试通过（GTest，2026-08-27） |
-| TC-M3-013 | `EpicGraphNode::mergeSemanticMemory` | 同 id 的新旧时间记录 | 全局记忆 | 重建/语义周期 | 新记录覆盖旧记录，旧时间不反向覆盖 | 100 | P1 | 测试设计已定义 |
-| TC-M3-014 | `EpicGraphNode::semanticMemorySnapshot` | 与 merge 并发读 | 记录副本 | 重建周期 | 无数据竞争，字段自洽且 id 唯一 | 10000 次 | P1 | 测试设计已定义 |
-| TC-M3-015 | `EpicGraphNode::semanticRiskAlongRoute` | witness 上/边缘/带外风险点；上/中/下 row；FOV 中心/边缘；地面型响应；不同观测时间 | `[0,1]` 路线风险及分项诊断 | 规划/语义周期 | 风险同时考虑 row、FOV、地面可能性和时间置信度；风险随距离衰减；带外为 0；地面型响应降权但不直接清除空中风险 | 1000/场景 | P0 | 部分通过：距离衰减、影响带和置信度链路已有测试/日志；row、FOV、地面与时间矩阵未完整执行（2026-08-27） |
-| TC-M3-016 | `EpicGraphNode::updateTopoSemanticMemory` | 新鲜/过期/重复时间帧与安全 incumbent | 图更新及 replan latch | 规划周期 | 新鲜帧应用一次；过期/重复忽略；请求不清空路线 | 100/场景 | P0 | 部分通过：在线新鲜帧应用且 incumbent 持续保留；过期和重复帧未受控注入（2026-08-27） |
-| TC-M3-017 | `EpicGraphNode::updateTopoSemanticMemory` | 连续两帧相同 5x3 风险图；无人机沿前向移动 `2.65 m`；两帧 30 m 投影足迹重叠 | persistent id、节点数、观测次数 | 语义 2 Hz | 重叠区对应射线复用 persistent id，观测次数增加；节点数不增加 15 个 | 1000 对帧 | P0 | 部分通过：同名 GTest 实际只插入单点并做 `0.001 m` 级扰动，未执行 5x3、多帧移动、重建及 global/local/A* 工作集；见 [最新日志复核报告](test_reports/TEST_REPORT_2026-08-27_LATEST_LOG_REVIEW.md) |
-| TC-M3-018 | `EpicGraphNode::updateTopoSemanticMemory` | 同列上/中/下三 patch 分数 `0.2/0.6/0.9`，fixed-layer 开/关各一组 | 三个语义中心及对应分数 | 语义 2 Hz | 原始三维位置保持 row 间 z 差异；fixed-layer 不回写语义节点 z；上/中/下行信息均保留，不因排序或 `1.5 m` 去重随机丢行 | 1000 帧/模式 | P0 | 部分通过：投影 GTest 及真实快照均保留多高度；fixed-layer 开/关完整回调矩阵未执行（2026-08-27） |
+| TC-M3-013 | `ScaleNavGraphNode::mergeSemanticMemory` | 同 id 的新旧时间记录 | 全局记忆 | 重建/语义周期 | 新记录覆盖旧记录，旧时间不反向覆盖 | 100 | P1 | 测试设计已定义 |
+| TC-M3-014 | `ScaleNavGraphNode::semanticMemorySnapshot` | 与 merge 并发读 | 记录副本 | 重建周期 | 无数据竞争，字段自洽且 id 唯一 | 10000 次 | P1 | 测试设计已定义 |
+| TC-M3-015 | `ScaleNavGraphNode::semanticRiskAlongRoute` | witness 上/边缘/带外风险点；上/中/下 row；FOV 中心/边缘；地面型响应；不同观测时间 | `[0,1]` 路线风险及分项诊断 | 规划/语义周期 | 风险同时考虑 row、FOV、地面可能性和时间置信度；风险随距离衰减；带外为 0；地面型响应降权但不直接清除空中风险 | 1000/场景 | P0 | 部分通过：距离衰减、影响带和置信度链路已有测试/日志；row、FOV、地面与时间矩阵未完整执行（2026-08-27） |
+| TC-M3-016 | `ScaleNavGraphNode::updateTopoSemanticMemory` | 新鲜/过期/重复时间帧与安全 incumbent | 图更新及 replan latch | 规划周期 | 新鲜帧应用一次；过期/重复忽略；请求不清空路线 | 100/场景 | P0 | 部分通过：在线新鲜帧应用且 incumbent 持续保留；过期和重复帧未受控注入（2026-08-27） |
+| TC-M3-017 | `ScaleNavGraphNode::updateTopoSemanticMemory` | 连续两帧相同 5x3 风险图；无人机沿前向移动 `2.65 m`；两帧 30 m 投影足迹重叠 | persistent id、节点数、观测次数 | 语义 2 Hz | 重叠区对应射线复用 persistent id，观测次数增加；节点数不增加 15 个 | 1000 对帧 | P0 | 部分通过：同名 GTest 实际只插入单点并做 `0.001 m` 级扰动，未执行 5x3、多帧移动、重建及 global/local/A* 工作集；见 [最新日志复核报告](test_reports/TEST_REPORT_2026-08-27_LATEST_LOG_REVIEW.md) |
+| TC-M3-018 | `ScaleNavGraphNode::updateTopoSemanticMemory` | 同列上/中/下三 patch 分数 `0.2/0.6/0.9`，fixed-layer 开/关各一组 | 三个语义中心及对应分数 | 语义 2 Hz | 原始三维位置保持 row 间 z 差异；fixed-layer 不回写语义节点 z；上/中/下行信息均保留，不因排序或 `1.5 m` 去重随机丢行 | 1000 帧/模式 | P0 | 部分通过：投影 GTest 及真实快照均保留多高度；fixed-layer 开/关完整回调矩阵未执行（2026-08-27） |
 | TC-M3-019 | `semanticObservationConfidence` | 单行、多行一致、多行冲突、FOV 中心/边缘、地面型射线 | 观测置信度 `[0,1]` | 每语义目标 | 输入差异只改变置信度和诊断项，不产生路线 hard reject；置信度不得把物理可行候选直接判为不可行 | 1000/场景 | P0 | 测试设计已定义 |
 | TC-M3-020 | `semanticVerticalAggregation` | 同一目标由单行或上/中/下三行表达，含地面行和空中行 | 聚合风险、row 权重和置信度 | 每语义目标 | 三行不将风险简单累加三倍；地面行降权；上/中行高风险仍能贡献路线 loss；冲突行降低置信度而非取消资格 | 1000/场景 | P0 | 测试设计已定义 |
 | TC-M3-021 | `TopoGraph::semanticNodes` | 当前 `semantic_stamp` 的 `Unknown` 虚拟节点、上一帧 `Unknown` 节点、历史 `Verified` 节点及语义流过期状态 | 搜索语义工作集及路线风险 | A*/发布周期 | 当前代 `Unknown` 参与；历史 `Unknown` 仍保存在 persistent memory 但不参与；历史 `Verified` 持续参与；语义流过期时所有 `Unknown` 均退出 | 1000/场景 | P0 | 已测试通过（GTest 及在线工作集日志，2026-08-27） |
@@ -133,7 +133,7 @@ M3 单元测试执行明细、失败定位和在线证据见
 | TC-M4-013 | `TopoGraph::graphSearch` | 连通图、断图、终点在 35 m 外、超时 | bool 与节点路径 | incumbent 恢复 | 连通返回正确最小代价路径；其余失败且 path 不冒充成功 | 100/场景 | P0 | 部分通过：连通搜索及窗外拒绝通过；断图和受控超时未完成规定次数（2026-08-27） |
 | TC-M4-014 | `TopoGraph::goalDirectedSearch` | 双走廊不同长度、任务方向、FOV、语义风险、安全空间和 smoothness 的物理可行 terminal | bool 与 terminal path | 候选重规划 | 所有物理可行 terminal 使用统一 loss 排序；较短但更安全的候选可以胜出；不得按距离单项或最远节点单项选择 | 1000/场景 | P0 | 部分通过：几何/语义/方向权重与安全候选排序通过；完整场景矩阵未达规定次数（2026-08-27） |
 | TC-M4-015 | `TopoGraph::getPathLength` | 带 witness 的多边路径及空路径 | 总长度 | 路线评估 | 等于 witness 段总长；空/单节点为 0 | 1000 | P1 | 已测试失败：空路径和单节点路径均触发越界崩溃（2026-08-27） |
-| TC-M4-016 | `EpicGraphNode::connectTerminalToGoal` | 窗内开放、超距、墙阻断及 A* 超时的 goal | bool、extension 与发布 path | 目标接近时 | 仅窗内且搜索和碰撞复核均通过时追加 extension，端点误差 `<=0.5 m`；墙阻断或超时时保持于已验证 terminal，发布 path 不得拼接未经检查的 terminal-to-goal 直线 | 100/场景 | P0 | 已有测试，待场景复核 |
+| TC-M4-016 | `ScaleNavGraphNode::connectTerminalToGoal` | 窗内开放、超距、墙阻断及 A* 超时的 goal | bool、extension 与发布 path | 目标接近时 | 仅窗内且搜索和碰撞复核均通过时追加 extension，端点误差 `<=0.5 m`；墙阻断或超时时保持于已验证 terminal，发布 path 不得拼接未经检查的 terminal-to-goal 直线 | 100/场景 | P0 | 已有测试，待场景复核 |
 | TC-M4-017 | `TopoGraph::goalDirectedSearch` | 35 m 图内加入 235 个活动语义节点；候选路线几何/语义代价分别约 `34/47` 和 `31/50` | frontier terminal 与节点路径 | 候选重规划 | `31.5 m`、任务方向偏差和 FOV 位置均作为 loss 项，不作为 hard qualification；所有物理可行 terminal 均参与统一 loss，选择结果可由权重解释 | 1000 图种子 | P0 | 部分通过：径向安全绕行和较近安全 terminal 可胜出；未执行 1000 个日志规模图种子（2026-08-27） |
 | TC-M4-018 | `TopoGraph::goalDirectedSearch` | 同一几何图分别加入 11 个和 235 个表达相同风险场的语义节点 | 两组 frontier terminal | 候选重规划 | 两组选择同一等价风险场下的同一排序；节点数量变化不改变排序，terminal 进度差 `<1 m` | 1000 图种子 | P0 | 部分通过：1 与 235 个等价风险节点重复 1000 次排序一致；未覆盖 1000 个不同图种子（2026-08-27） |
 | TC-M4-019 | `frontierCandidateLoss` | 分别改变进度短缺、任务方向偏差、FOV 位置、语义、安全空间、smoothness | 总 loss 及分项 loss | 每候选 terminal | 每个 loss 项随对应输入单调变化；权重为 0 时该项不影响总 loss；总 loss 为各项加权和 | 2000/权重 | P0 | 部分通过：几何、语义、安全空间和方向权重单调性通过；FOV/smoothness 分项未逐项穷举（2026-08-27） |
@@ -162,13 +162,13 @@ M4 单元测试执行明细、失败定位和历史变更证据见
 | TC-M5-012 | `semanticRiskIncreaseRequiresReplan` | 上升小于/等于/大于阈值、下降、NaN | bool | 每语义更新 | 达到阈值的有限上升 true，其余 false | 1000/场景 | P1 | 已测试通过（GTest，2026-08-27） |
 | TC-M5-013 | `semanticRiskChangeRequiresReplan` | 与 TC-M5-012 相同 | bool | 每语义更新 | 与 increase 函数结果逐项一致 | 1000/场景 | P2 | 已测试通过（GTest，2026-08-27） |
 | TC-M5-014 | `semanticRouteResetRequested` | 开关开/关及显著/微小风险上升 | bool | 每语义更新 | 仅开关开启且风险触发时 true | 1000/场景 | P1 | 已测试通过（GTest，2026-08-27） |
-| TC-M5-015 | `EpicGraphNode::nearestPersistentNode` | 正确 id、id 丢失近点、远点 | 节点或 null | graph swap/规划 | id 优先；后备不超距离；远点 null | 100/场景 | P0 | 测试设计已定义 |
-| TC-M5-016 | `EpicGraphNode::ensureOdomConnectivity` | odom 已连接、近邻开放、近邻被墙隔断图 | 新增连接数 | 规划周期 | 已连为 0；仅向安全邻居建立带 witness 双向边 | 100/场景 | P0 | 部分通过：在线覆盖连接成功及失败诊断；三场景函数级矩阵未完成（2026-08-27） |
-| TC-M5-017 | `EpicGraphNode::buildRememberedEdges` | 无人机位于 witness 中段的拓扑路径 | 边集合及数量 | 规划周期 | 只包含投影前方 accepted route 边 | 1000 | P0 | 部分通过：前向裁剪和 edge 匹配 GTest 通过，在线 remembered edge 持续更新；私有函数未直接执行 1000 次（2026-08-27） |
-| TC-M5-018 | `EpicGraphNode::selectNextGoal` | 平面 accepted path、无人机位置、10 m lookahead | goal 与 bool | 成功规划周期 | goal 在前方约 10 m；近 mission goal 时直接选 goal | 1000 | P0 | 部分通过：折线顺序前视 GTest 1000 次及在线 local goal 通过；近 mission goal 私有分支未受控执行 1000 次（2026-08-27） |
-| TC-M5-019 | `EpicGraphNode::update` | accepted witness 且未 blocked、terminal 可重映射；无人机相对 witness 横向偏离分别小于/大于 `route_reuse_lateral_distance_m` | terminal id、remembered edges、local goal 及切换原因 | 默认 10 Hz | 仅横向偏离不得清除 accepted witness、触发 `NO_ACCEPTED_ROUTE` 或切换 terminal；仍按 witness 前向投影发布 local goal | 1000/场景 | P0 | 部分通过：日志中横向偏离至 `5.81 m` 时仍保留 RECOVERED incumbent；未完成双边界 1000 tick（2026-08-27） |
-| TC-M5-020 | `EpicGraphNode::update` | accepted witness 执行进度 `<50%`、`=50%`、`>50%`；候选分别为兼容延伸、低收益分叉及显著更低 loss 分叉 | `frontier_half_replan`、候选搜索、提交结果及切换原因 | 默认 10 Hz | 未过半不因固定 `31.5 m` 或 horizon 触发刷新；过半触发候选搜索；兼容延伸可用 `FRONTIER_HALF` 提交；分叉仍须按总 loss 和滞回胜出 | 1000/场景 | P0 | 部分通过：日志覆盖 9 次兼容 FRONTIER_HALF、1 次 LOWER_LOSS 和 5 次候选滞回拒绝；精确 50% 边界矩阵未完成（2026-08-27） |
-| TC-M5-021 | `EpicGraphNode::update` | mission goal 进入 `35 m` 窗口，存在安全 incumbent；分别覆盖未过半、已过半和 blocked | terminal、切换原因及 candidate search | 默认 10 Hz | goal in window 只影响 candidate target/loss，不得单独清空 incumbent、强制重搜或 hard switch；只有过半、blocked、incumbent 丢失等状态可改变 terminal | 1000/场景 | P0 | 部分通过：goal 距离 30.28 m 及 0 m 时 incumbent 均可保持；未完成 blocked/过半组合 1000 tick（2026-08-27） |
+| TC-M5-015 | `ScaleNavGraphNode::nearestPersistentNode` | 正确 id、id 丢失近点、远点 | 节点或 null | graph swap/规划 | id 优先；后备不超距离；远点 null | 100/场景 | P0 | 测试设计已定义 |
+| TC-M5-016 | `ScaleNavGraphNode::ensureOdomConnectivity` | odom 已连接、近邻开放、近邻被墙隔断图 | 新增连接数 | 规划周期 | 已连为 0；仅向安全邻居建立带 witness 双向边 | 100/场景 | P0 | 部分通过：在线覆盖连接成功及失败诊断；三场景函数级矩阵未完成（2026-08-27） |
+| TC-M5-017 | `ScaleNavGraphNode::buildRememberedEdges` | 无人机位于 witness 中段的拓扑路径 | 边集合及数量 | 规划周期 | 只包含投影前方 accepted route 边 | 1000 | P0 | 部分通过：前向裁剪和 edge 匹配 GTest 通过，在线 remembered edge 持续更新；私有函数未直接执行 1000 次（2026-08-27） |
+| TC-M5-018 | `ScaleNavGraphNode::selectNextGoal` | 平面 accepted path、无人机位置、10 m lookahead | goal 与 bool | 成功规划周期 | goal 在前方约 10 m；近 mission goal 时直接选 goal | 1000 | P0 | 部分通过：折线顺序前视 GTest 1000 次及在线 local goal 通过；近 mission goal 私有分支未受控执行 1000 次（2026-08-27） |
+| TC-M5-019 | `ScaleNavGraphNode::update` | accepted witness 且未 blocked、terminal 可重映射；无人机相对 witness 横向偏离分别小于/大于 `route_reuse_lateral_distance_m` | terminal id、remembered edges、local goal 及切换原因 | 默认 10 Hz | 仅横向偏离不得清除 accepted witness、触发 `NO_ACCEPTED_ROUTE` 或切换 terminal；仍按 witness 前向投影发布 local goal | 1000/场景 | P0 | 部分通过：日志中横向偏离至 `5.81 m` 时仍保留 RECOVERED incumbent；未完成双边界 1000 tick（2026-08-27） |
+| TC-M5-020 | `ScaleNavGraphNode::update` | accepted witness 执行进度 `<50%`、`=50%`、`>50%`；候选分别为兼容延伸、低收益分叉及显著更低 loss 分叉 | `frontier_half_replan`、候选搜索、提交结果及切换原因 | 默认 10 Hz | 未过半不因固定 `31.5 m` 或 horizon 触发刷新；过半触发候选搜索；兼容延伸可用 `FRONTIER_HALF` 提交；分叉仍须按总 loss 和滞回胜出 | 1000/场景 | P0 | 部分通过：日志覆盖 9 次兼容 FRONTIER_HALF、1 次 LOWER_LOSS 和 5 次候选滞回拒绝；精确 50% 边界矩阵未完成（2026-08-27） |
+| TC-M5-021 | `ScaleNavGraphNode::update` | mission goal 进入 `35 m` 窗口，存在安全 incumbent；分别覆盖未过半、已过半和 blocked | terminal、切换原因及 candidate search | 默认 10 Hz | goal in window 只影响 candidate target/loss，不得单独清空 incumbent、强制重搜或 hard switch；只有过半、blocked、incumbent 丢失等状态可改变 terminal | 1000/场景 | P0 | 部分通过：goal 距离 30.28 m 及 0 m 时 incumbent 均可保持；未完成 blocked/过半组合 1000 tick（2026-08-27） |
 
 M5 单元测试执行明细和在线证据见
 [`TEST_REPORT_2026-08-27_M5_UNIT.md`](test_reports/TEST_REPORT_2026-08-27_M5_UNIT.md)。
@@ -177,13 +177,13 @@ M5 单元测试执行明细和在线证据见
 
 | 用例 ID | 函数 | 输入 | 预期输出 | 运行频率 | 预期结果/判定 | 测试次数 | 重要性 | 测试状态 |
 |---|---|---|---|---:|---|---:|---:|---|
-| TC-M6-001 | `EpicGraphNode::configureMapBounds` | 地图、中心 `(0,0,1.6)`、margin 50 m | 初始边界 | 首目标/首帧 | 中心在边界内，各方向余量满足配置 | 20 | P1 | 测试设计已定义 |
-| TC-M6-002 | `EpicGraphNode::expandMapBounds` | 已有边界内点和边界外新点 | bool 与新边界 | 新目标/点云 | 内点 false 且不变；外点 true 且只扩不缩，点云保留 | 100 | P1 | 已有测试 |
-| TC-M6-003 | `EpicGraphNode::onGoal` | 首目标、重复目标、远端新目标 | mission goal 与规划状态 | 事件触发 | 首目标初始化；重复目标幂等；新目标清除旧 terminal 状态但按配置保留图 | 20/场景 | P0 | 测试设计已定义 |
-| TC-M6-004 | `EpicGraphNode::startSkeletonRebuild` | 100 Hz 并发触发、单次构建耗时 80 ms | rebuild 次数与交换图 | 默认约 10 Hz | 同时最多一个 worker，无 backlog，交换图可规划 | 1000 触发 | P0 | 已有测试 |
-| TC-M6-005 | `EpicGraphNode::update` | 正常、储备不足、语义上升、remap 失败、route blocked 状态 | 路线状态迁移 | 默认 10 Hz | 安全 incumbent 保留；兼容延伸提交；硬阻塞不发布旧路线 | 每场景 600 tick | P0 | 已有测试 |
-| TC-M6-006 | `EpicGraphNode::publish` | accepted、未接受 candidate、阻塞路线、hold timeout 状态 | ROS 输出与统计 | 规划周期 | 仅发布 accepted 安全 witness；local goal 连续；超时后停止保底 | 每场景 600 tick | P0 | 测试设计已定义 |
-| TC-M6-007 | `EpicGraphNode::update` | 连续 140 m 任务的图快照序列；每 tick 更新无人机位置并注入高语义代价 | frontier 序列、任务进度、完成状态 | 默认 10 Hz | 无硬阻塞时 frontier 的 mission-direction 累计进度单调增加；goal 进入 35 m 后选 goal terminal；最终进入到达容差 | 100 次任务 | P0 | 测试设计已定义 |
+| TC-M6-001 | `ScaleNavGraphNode::configureMapBounds` | 地图、中心 `(0,0,1.6)`、margin 50 m | 初始边界 | 首目标/首帧 | 中心在边界内，各方向余量满足配置 | 20 | P1 | 测试设计已定义 |
+| TC-M6-002 | `ScaleNavGraphNode::expandMapBounds` | 已有边界内点和边界外新点 | bool 与新边界 | 新目标/点云 | 内点 false 且不变；外点 true 且只扩不缩，点云保留 | 100 | P1 | 已有测试 |
+| TC-M6-003 | `ScaleNavGraphNode::onGoal` | 首目标、重复目标、远端新目标 | mission goal 与规划状态 | 事件触发 | 首目标初始化；重复目标幂等；新目标清除旧 terminal 状态但按配置保留图 | 20/场景 | P0 | 测试设计已定义 |
+| TC-M6-004 | `ScaleNavGraphNode::startSkeletonRebuild` | 100 Hz 并发触发、单次构建耗时 80 ms | rebuild 次数与交换图 | 默认约 10 Hz | 同时最多一个 worker，无 backlog，交换图可规划 | 1000 触发 | P0 | 已有测试 |
+| TC-M6-005 | `ScaleNavGraphNode::update` | 正常、储备不足、语义上升、remap 失败、route blocked 状态 | 路线状态迁移 | 默认 10 Hz | 安全 incumbent 保留；兼容延伸提交；硬阻塞不发布旧路线 | 每场景 600 tick | P0 | 已有测试 |
+| TC-M6-006 | `ScaleNavGraphNode::publish` | accepted、未接受 candidate、阻塞路线、hold timeout 状态 | ROS 输出与统计 | 规划周期 | 仅发布 accepted 安全 witness；local goal 连续；超时后停止保底 | 每场景 600 tick | P0 | 测试设计已定义 |
+| TC-M6-007 | `ScaleNavGraphNode::update` | 连续 140 m 任务的图快照序列；每 tick 更新无人机位置并注入高语义代价 | frontier 序列、任务进度、完成状态 | 默认 10 Hz | 无硬阻塞时 frontier 的 mission-direction 累计进度单调增加；goal 进入 35 m 后选 goal terminal；最终进入到达容差 | 100 次任务 | P0 | 测试设计已定义 |
 
 ## 3. 模块测试用例
 
@@ -251,12 +251,12 @@ M5 单元测试执行明细和在线证据见
 
 | 用例 ID | 场景输入 | 预期输出 | 输入频率 | 预期结果/判定 | 测试次数 | 重要性 | 测试状态 |
 |---|---|---|---:|---|---:|---:|---|
-| IT-ROS-001 | 启动 `epic_graph_node`，发布 odom/depth/goal | `/epic/path`、`/epic/local_goal` | odom 100 Hz、depth/planner 10 Hz | QoS 匹配；首次有效图后 2 s 内输出有限目标 | 20 次启动 | P0 | 测试设计已定义 |
+| IT-ROS-001 | 启动 `scalenav_graph_node`，发布 odom/depth/goal | `/scalenav/path`、`/scalenav/local_goal` | odom 100 Hz、depth/planner 10 Hz | QoS 匹配；首次有效图后 2 s 内输出有限目标 | 20 次启动 | P0 | 测试设计已定义 |
 | IT-ROS-002 | 时间戳乱序、语义延迟 300 ms、点云延迟 300 ms | 路线与告警 | 各输入额定频率 | 超容差数据丢弃，节点继续运行，accepted route 不被空数据清除 | 100 批次 | P0 | 测试设计已定义 |
 | IT-ROS-003 | 规划、语义、点云和 rebuild 并发 30 min | 全部话题及 sanitizer | 10/2/10/10 Hz | 无死锁、数据竞争、崩溃和持续 backlog | 3 次 x 30 min | P0 | 测试设计已定义 |
 | IT-ROS-004 | 动态改变 goal 到地图边界外 | 扩展地图、重规划路径 | goal 0.2 Hz | 边界只扩不缩，旧地图/图不损坏，新 local goal 朝新任务方向 | 50 个 goal | P1 | 测试设计已定义 |
 | IT-ROS-005 | 发布 120 帧固定 5x3 热力图并同步发布匀速 odom，采集 graph snapshot | 节点数、id、z、score 时序 | semantic 2 Hz、odom 100 Hz | 节点增长非逐帧 15 个；重叠观测 id 连续；每列三行 z/score 对应稳定 | 20 次 x 60 s | P0 | 测试设计已定义 |
-| IT-ROS-006 | ROS2 闭环测试节点跟随 `/epic/local_goal` 更新 odom，并注入 235 个局部语义节点 | `/epic/path`、frontier、完整 loss、local goal、到达事件 | odom 100 Hz、planner 10 Hz、semantic 2 Hz | 统一 loss 下 frontier 不长期停滞，允许短期偏离，最终收敛到 mission goal 并在超时前发布到达状态 | 20 次任务 | P0 | 测试设计已定义 |
+| IT-ROS-006 | ROS2 闭环测试节点跟随 `/scalenav/local_goal` 更新 odom，并注入 235 个局部语义节点 | `/scalenav/path`、frontier、完整 loss、local goal、到达事件 | odom 100 Hz、planner 10 Hz、semantic 2 Hz | 统一 loss 下 frontier 不长期停滞，允许短期偏离，最终收敛到 mission goal 并在超时前发布到达状态 | 20 次任务 | P0 | 测试设计已定义 |
 | IT-ROS-007 | 闭环注入单行/多行风险及地面误检 | 路线 risk/loss、local goal、切换次数、任务状态 | odom 100 Hz、planner 10 Hz、semantic 2 Hz | local goal 连续；路线不因单帧、单行或地面误检左右振荡；最终完成任务 | 20 次任务 | P0 | 测试设计已定义 |
 | IT-ROS-008 | 独立启动 Route-YOPO 控制，注入同步及超时的 odom/depth/path/frontier/clearance，并注入第二控制 publisher | status、route_condition、15 候选、planned path 和 `/scalenav/trajectory_point` | odom 100 Hz、depth/EPIC 10 Hz、模型 5 Hz、控制 50 Hz | 兼容输入标记 `compat_non_atomic`；三级降级正确；仅执行安全候选；无安全候选时位置保持；第二 publisher 出现时停止发布 | 每状态 100 tick、10 次启动 | P0 | 部分通过：14 项函数测试和 RTX 3090 合成 P95 通过；尚未执行真实 DDS 输入同步和闭环飞行 |
 

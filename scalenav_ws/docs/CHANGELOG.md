@@ -2,6 +2,38 @@
 
 本文件按修改批次记录，不按日期聚合。每次代码更新新增一个独立变更编号；后续补充验证结果时更新对应记录，不把不同修改合并到同一天的章节中。
 
+<a id="chg-0035"></a>
+## CHG-0035 语义球 A* 候选检查限流
+
+- 记录时间：2026-08-29
+- 状态：代码、Release 编译和配置接入完成；真实飞行性能待复测
+
+问题与根因：
+
+- 最新日志中的 `astar_semantic_nodes=117` 是实际进入当前 A* 语义代价计算的节点数，包含
+  持久化风险已转移到 Verified 拓扑节点的语义记录。
+- `astar_inactive_virtual_semantic_nodes=106` 是旧代 Unknown virtual 节点，被
+  `semanticNodeActiveForPlanning()` 排除在语义空间索引之外，不参与 `15074` 次候选检查；
+  两个字段此前容易被误读为同一批节点。
+- 真正的开销是每条候选边对影响半径内的多个语义球重复计算 witness 折线距离。
+
+修改内容：
+
+- 新增 `bubble_topo/semantic_edge_candidate_limit`，默认值为 `8`，配置于
+  `scalenav_ws/src/config/config.yaml`，并接入 `scalenav_graph.launch.py`。
+- `SemanticSpatialIndex` 先按 witness 包围盒和语义场强进行常数时间排序，每条边只对最相关的
+  8 个球执行原有精确折线距离计算；设为 `0` 可关闭限制。
+- 保留全部远距离语义风险记忆、语义球影响半径和现有 3D 绕障语义代价，不删除历史语义节点，
+  不使用体素化，也不改变 YOPO 局部避障职责。
+- ScaleNav 启动配置日志新增 `semantic_edge_candidate_limit`，便于确认运行时参数。
+
+验证结果：
+
+- `colcon build --packages-select scalenav_graph_ros2 --symlink-install` 通过。
+- `python3 -m py_compile scalenav_graph.launch.py` 和 `git diff --check` 通过。
+- 真实复测应比较 `astar_semantic_checks`、A* 耗时和语义路线风险，确认检查量下降且高风险
+  语义球仍能改变候选路线。
+
 <a id="chg-0034"></a>
 ## CHG-0034 Route-YOPO 固定高度执行合同
 

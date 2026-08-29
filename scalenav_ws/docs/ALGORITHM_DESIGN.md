@@ -378,7 +378,7 @@ D_e = w_clearance * ||v-u|| * (d_target/(d_target+d_min))^2，d_min>=0
 C_e = G_e + S_e + D_e
 ```
 
-`d_prev` 仅在该边属于上一条 accepted route 时取 `[0,1]` 内的连续性因子，否则为 `1`。`R_e` 使用边 witness 折线计算，不使用节点中心弦线。`d_target` 是安全距离衰减尺度，不是零代价阈值；因此安全空间越大的可行边仍具有更小的安全代价。`graphSearch()` 搜索指定 frontier_goal；`goalDirectedSearch()` 在 `35 m` 局部窗口内联合评价前向进度与总代价。
+`d_prev` 仅在该边属于上一条 accepted route 时取 `[0,1]` 内的连续性因子，否则为 `1`。`R_e` 使用边 witness 折线计算，不使用节点中心弦线。`d_target` 是安全距离衰减尺度，不是零代价阈值；因此安全空间越大的可行边仍具有更小的安全代价。`graphSearch()` 搜索指定 frontier_goal；`goalDirectedSearch()` 在缺省 `45 m` 局部窗口内累计边代价并选择终点。
 
 对候选 frontier_goal `q`，额外计算 frontier loss：
 
