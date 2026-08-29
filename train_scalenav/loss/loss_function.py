@@ -108,7 +108,6 @@ class YOPOLoss(nn.Module):
         map_id,
         route_points,
         route_radii,
-        route_mask,
     ):
         """
         Args:
@@ -135,7 +134,7 @@ class YOPOLoss(nn.Module):
         else:
             goal_cost = th.zeros_like(smoothness_cost)
         corridor_cost, centerline_cost, progress_cost, progress_floor_cost, tangent_cost, path_mse = self.route_loss(
-            Df, Dp, route_points, route_radii, route_mask
+            Df, Dp, route_points, route_radii
         )
 
         return {

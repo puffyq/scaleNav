@@ -171,12 +171,10 @@ class StateTransform:
             self.lattice_primitive.horizon_num,
         )
 
-    def prepare_route_input(self, route_bubbles, route_mask):
+    def prepare_route_input(self, route_bubbles):
         """Transform K normalized body-FLU corridor bubbles per primitive."""
         if route_bubbles.ndim != 3 or route_bubbles.shape[-1] != 4:
             raise ValueError("route_bubbles must have shape [B, K, 4]")
-        if route_mask.shape != route_bubbles.shape[:2]:
-            raise ValueError("route_mask must have shape [B, K]")
         batch, bubble_count, _ = route_bubbles.shape
         trajectory_count = self.lattice_primitive.traj_num
         rotations = self.lattice_primitive.getRotation().to(
@@ -189,18 +187,15 @@ class StateTransform:
             batch, trajectory_count, 3, 3
         )
         transformed = torch.matmul(centers, rotations)
-        mask = route_mask[:, None, :, None].expand(
-            batch, trajectory_count, bubble_count, 1
-        ).to(dtype=route_bubbles.dtype)
         radius = route_bubbles[:, None, :, 3:4].expand(
             batch, trajectory_count, bubble_count, 1
         )
-        features = torch.cat((transformed * mask, radius * mask, mask), dim=-1)
-        features = features.reshape(batch, trajectory_count, bubble_count * 5)
+        features = torch.cat((transformed, radius), dim=-1)
+        features = features.reshape(batch, trajectory_count, bubble_count * 4)
         features = features.permute(0, 2, 1).contiguous()
         return features.view(
             batch,
-            bubble_count * 5,
+            bubble_count * 4,
             self.lattice_primitive.vertical_num,
             self.lattice_primitive.horizon_num,
         )

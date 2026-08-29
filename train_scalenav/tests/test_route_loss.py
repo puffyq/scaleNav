@@ -22,12 +22,11 @@ def _coefficient_map() -> torch.Tensor:
     return torch.inverse(boundary_matrix) @ selector
 
 
-def _route(y: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _route(y: float) -> tuple[torch.Tensor, torch.Tensor]:
     x = torch.linspace(0.0, 10.0, 41)
     points = torch.stack((x, torch.full_like(x, y), torch.zeros_like(x)), dim=1)[None]
     radius = torch.full((1, 41), 0.75)
-    mask = torch.ones((1, 41))
-    return points, radius, mask
+    return points, radius
 
 
 def test_route_loss_penalizes_leaving_corridor_and_backpropagates():
@@ -56,23 +55,12 @@ def test_bubble_field_has_gradient_inside_safe_volume():
     x = torch.linspace(0.0, 10.0, 41)
     route = torch.stack((x, torch.full_like(x, 0.3), torch.zeros_like(x)), dim=1)[None]
     radius = torch.full((1, 41), 0.75)
-    mask = torch.ones((1, 41))
-    corridor = loss(fixed, decision, route, radius, mask)[0]
+    corridor = loss(fixed, decision, route, radius)[0]
     corridor.backward()
     assert corridor.item() < 2.0
     assert decision.grad is not None
     assert torch.isfinite(decision.grad).all()
     assert decision.grad[:, 0, 1].abs().item() > 1.0e-6
-
-
-def test_route_dropout_disables_all_route_costs():
-    loss = RouteLoss(_coefficient_map())
-    fixed = torch.zeros((1, 3, 3))
-    decision = torch.zeros((1, 3, 3))
-    points, radius, mask = _route(2.0)
-    costs = loss(fixed, decision, points, radius, torch.zeros_like(mask))
-    for cost in costs:
-        torch.testing.assert_close(cost, torch.zeros_like(cost))
 
 
 def test_route_progress_floor_rejects_short_endpoint():

@@ -112,20 +112,17 @@ def test_adapter_route_id_is_stable_and_monotonic():
 def test_route_feature_normalization_matches_training_contract():
     centers = np.array([[1.0, 0.0, 0.0], [0.0, 4.0, 0.0]], dtype=np.float32)
     radii = np.array([1.5, 6.0], dtype=np.float32)
-    mask = np.array([1.0, 0.0], dtype=np.float32)
     distances = np.array([1.0, 4.0], dtype=np.float32)
-    features, output_mask = build_route_features(
+    features = build_route_features(
         centers,
         radii,
-        mask,
         distances,
         np.zeros(3),
         np.eye(3),
         radius_clip_m=3.0,
     )
     np.testing.assert_allclose(features[0], [1.0, 0.0, 0.0, 0.5])
-    np.testing.assert_allclose(features[1], np.zeros(4))
-    np.testing.assert_array_equal(output_mask, mask)
+    np.testing.assert_allclose(features[1], [0.0, 1.0, 0.0, 1.0])
 
 
 def test_quaternion_rotation_preserves_full_xyz_axes():

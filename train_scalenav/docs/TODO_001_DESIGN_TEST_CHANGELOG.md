@@ -51,20 +51,20 @@ flowchart LR
 | 坐标归一化 | NED/FRD 位姿、点云 | ENU/FLU 数组 | shape/有限性错误拒绝 |
 | 路线标注 | 起点、frontier、EPIC 或真值地图 | witness、clearance、bubbles | 保存 `route_quality_flags` |
 | 质量校验 | 路线数组、起终点、配置 | `RouteQualityResult` | hard flag 非零则 `route_valid=0` |
-| Dataset 预处理 | 有效 route、当前位姿 | `[K,4]` bubbles、mask、dense route | 尾部重复 terminal 并置 mask |
+| Dataset 预处理 | 有效 route、当前位姿 | `[K,4]` bubbles、dense route | 尾部重复 terminal |
 | 模型推理 | depth、motion、frontier、route | 15 个 primitive endstate/score | 非有限输出进入安全停机 |
-| 训练损失 | primitive、dense route、ESDF | corridor/progress/tangent/total | dropout 关闭路线项 |
+| 训练损失 | primitive、dense route、ESDF | corridor/progress/tangent/total | 无有效 route 时关闭路线项 |
 
 ```text
 evaluate_route(path[N,3], clearance[N], radius[N], start[3], frontier[3])
   -> valid, flags, path_length_m, minimum_clearance_m,
      maximum_curvature_rad_m, weight
 sample_route_bubbles(path[N,3], radius[N], anchors[K])
-  -> centers[K,3], radii[K], mask[K], sample_distances[K]
+  -> centers[K,3], radii[K], sample_distances[K]
 RouteCondition(route_id, stamp, frontier[3], centers[K,3], radii[K],
                remaining_length_m, quality_flags, valid)
 RouteLoss(fixed_derivatives[B,3,3], decision_derivatives[B,3,3],
-          dense_route[B,M,3], dense_radius[B,M], dense_mask[B,M])
+          dense_route[B,M,3], dense_radius[B,M])
   -> corridor[B], progress[B], tangent[B]
 ```
 
@@ -133,13 +133,13 @@ TopoGraph 持久化、语义节点代际和 frontier 统一 loss 的既有验收
 | UT-RC-003 | `world_to_body_flu` / `body_to_world_flu` | 随机位姿和点 | 往返点坐标 | 每次 Dataset 取样 | 往返误差不超过 `1e-5 m` | 100 组 | P0 | 已有测试代码 | `test_coordinates.py::test_world_to_body_round_trip` |
 | UT-RC-004 | `polyline_arclength` | Nx3 折线、重复点 | 累积弧长和总长 | 每次路线校验 | 累积值单调，重复点不增加长度 | 20 组 | P0 | 测试设计已定义 | `route_contract.py` |
 | UT-RC-005 | `maximum_polyline_curvature` | 直线、单拐角、急转折线 | 最大曲率 | 每次路线校验 | 直线为零，超过阈值的路线可被标记 | 20 组 | P1 | 测试设计已定义 | `route_contract.py` |
-| UT-RC-006 | `resample_polyline` | 不同段长、重复端点、`max_step` | 稠密点和插值值 | 每条路线 | 点间距不超过 `max_step`，端点不变，值线性插值 | 20 组 | P0 | 已有测试代码 | `test_route_contract.py::test_fixed_and_dense_route_sampling_are_masked_and_conservative` |
+| UT-RC-006 | `resample_polyline` | 不同段长、重复端点、`max_step` | 稠密点和插值值 | 每条路线 | 点间距不超过 `max_step`，端点不变，值线性插值 | 20 组 | P0 | 已有测试代码 | `test_route_contract.py::test_fixed_and_dense_route_sampling_is_conservative` |
 | UT-RC-007 | `build_witness_corridor` | witness、障碍点、机器人半径和安全裕量 | 稠密点、原始距离、安全半径 | 每条有效路线 | `radius = clearance - robot_radius - safety_margin`，无非有限值 | 20 组 | P0 | 已有测试代码 | `test_route_contract.py::test_corridor_clearance_comes_from_obstacle_distance` |
 | UT-RC-008 | `save_route_table` / `load_route_table` | `RouteRecord` 数组 | `routes.npz` 和加载表 | 每次数据发布 | 无 pickle 往返，字段 dtype/offset 保持一致 | 5 个场景 | P0 | 已有测试代码 | `test_route_contract.py::test_route_npz_round_trip_without_pickle` |
 | UT-RC-009 | `RouteQualityGate.evaluate` | 合法前向路线、起终点、距离数组 | `RouteQualityResult` | 每条标注路线 | `flags=NONE`，长度、最小安全空间和权重有限 | 10 组 | P0 | 已有测试代码 | `test_route_contract.py::test_quality_gate_accepts_safe_forward_corridor` |
 | UT-RC-010 | `RouteQualityGate.evaluate` | 反向、阻塞、Bubble 间隙、低安全空间 | flags 和无效结果 | 每条标注路线 | 对应 reason flag 置位，`valid=false`，不静默丢弃 | 每种 3 组 | P0 | 已有测试代码 | `test_route_contract.py::test_quality_gate_rejects_clearance_and_reverse_route` |
 | UT-RC-011 | `RouteQualityGate.evaluate` | NaN/Inf、空路径、错误 shape | flags 和有限诊断值 | 每次输入校验 | 设置 `NON_FINITE/EMPTY_PATH`，诊断字段不产生 NaN | 每种 3 组 | P0 | 已有测试代码 | `test_route_contract.py::test_quality_gate_rejects_nonfinite_without_returning_nan_metrics` |
-| UT-RC-012 | `sample_route_bubbles` | 稠密 witness、半径、K 个 anchor | `[K,3]` 中心、半径、mask、距离 | 每次 Dataset 取样 | 路线不足时 terminal 重复且 mask 正确；半径取负责区间最小值 | 30 组 | P0 | 已有测试代码 | `test_route_contract.py::test_fixed_and_dense_route_sampling_are_masked_and_conservative` |
+| UT-RC-012 | `sample_route_bubbles` | 稠密 witness、半径、K 个 anchor | `[K,3]` 中心、半径、距离 | 每次 Dataset 取样 | 路线不足时 terminal 重复；半径保持局部安全值 | 30 组 | P0 | 已有测试代码 | `test_route_contract.py::test_fixed_and_dense_route_sampling_is_conservative` |
 
 #### 2.2.2 Dataset、变换与损失
 
@@ -151,9 +151,9 @@ TopoGraph 持久化、语义节点代际和 frontier 统一 loss 的既有验收
 | UT-RC-016 | `YOPODataset._read_depth` | EXR 深度、NaN/Inf、最大深度 | `[1,H,W]` 归一化深度 | 每个样本 | 深度裁剪到 `[0,1]`，无效值按最大深度处理 | 30 张 | P0 | 已有测试代码 | `test_snapshot_dataset.py::test_depth_planar_world_conversion_keeps_pose_and_axes` |
 | UT-RC-017 | `YOPODataset._random_motion` | 随机种子、速度/加速度配置 | `[velocity, acceleration]` | 每个训练样本 | 范围和范数约束满足配置，固定 seed 可复现 | 1000 次 | P1 | 测试设计已定义 | `yopo_dataset.py` |
 | UT-RC-018 | `world_to_body_flu` 路线预处理 | world route、当前位姿和旋转 | body-FLU bubbles/frontier | 每个样本 | 同一实现用于训练和在线；旋转后方向一致 | 100 组 | P0 | 已有测试代码 | `test_training_pipeline.py::test_same_depth_and_frontier_respond_to_different_witness_routes` |
-| UT-RC-019 | route dropout 分支 | 有效 route、dropout 概率 0/1 | route mask、dense mask | 每个训练 batch | dropout 时两种 mask 全零，frontier 保留 | 每种 20 batch | P0 | 已有测试代码 | `test_training_pipeline.py::test_route_dropout_keeps_frontier_but_masks_routes` |
-| UT-RC-020 | `RouteLoss.forward` | primitive 导数、dense route/radius/mask | corridor、progress、tangent loss | 每个训练 batch | 三项 shape 为 `[B]`，route 外轨迹代价更高 | 20 batch | P0 | 已有测试代码 | `test_route_loss.py::test_route_loss_penalizes_leaving_corridor_and_backpropagates` |
-| UT-RC-021 | `RouteLoss.forward` dropout | route mask 全零 | 三项 route loss | 每个 dropout batch | 三项均为零，不影响 safety/smooth/acceleration loss | 20 batch | P0 | 已有测试代码 | `test_route_loss.py::test_route_dropout_disables_all_route_costs` |
+| UT-RC-019 | route 有效性分支 | 有效 route、重复 terminal | route 几何、dense route | 每个训练 batch | 无有效路线时路线项为零，frontier 保留 | 每种 20 batch | P0 | 已有测试代码 | `test_training_pipeline.py::test_one_training_batch_backpropagates_all_costs` |
+| UT-RC-020 | `RouteLoss.forward` | primitive 导数、dense route/radius | corridor、progress、tangent loss | 每个训练 batch | 三项 shape 为 `[B]`，route 外轨迹代价更高 | 20 batch | P0 | 已有测试代码 | `test_route_loss.py::test_route_loss_penalizes_leaving_corridor_and_backpropagates` |
+| UT-RC-021 | `RouteLoss.forward` 无效路线 | 重复 terminal 的 dense route | 三项 route loss | 每个无效路线 batch | 三项均为零，不影响 safety/smooth/acceleration loss | 20 batch | P0 | 已有测试代码 | `test_route_loss.py::test_route_loss_penalizes_leaving_corridor_and_backpropagates` |
 | UT-RC-022 | `RouteLoss._coefficients` / `_positions` | 固定/决策导数、时间采样 | 五次多项式位置 | 每个 batch | 起点边界条件满足，位置张量无 NaN | 20 batch | P0 | 测试设计已定义 | `route_loss.py` |
 | UT-RC-023 | `StateTransform` route branch | frontier、K 个 bubble、15 primitive frame | primitive-frame route 特征 | 每次前向 | 每个 primitive 得到相对路线关系，shape 与 head 输入一致 | 50 batch | P0 | 测试设计已定义 | `state_transform.py` |
 | UT-RC-024 | `YOPONetwork.forward` | depth `[B,1,96,160]`、motion、frontier、route | 15 个 primitive endstate/score | 每次推理 | 输出维度保持 9-D endstate + 1-D score，均有限 | 100 batch | P0 | 测试设计已定义 | `yopo_network.py` |
@@ -191,7 +191,7 @@ TopoGraph 持久化、语义节点代际和 frontier 统一 loss 的既有验收
 | MT-RC-003 | EPIC JSONL labeler + `RouteQualityGate` | accepted witness JSONL、障碍点云 | `routes.npz` 和失败报告 | 每次日志标注 | 起终点、连续安全空间、Bubble 覆盖和 route flag 一致 | 100 条 route | P0 | 已有测试代码，待场景复核 | `test_route_contract.py::test_epic_labeler_preserves_failures_and_builds_corridor` |
 | MT-RC-004 | `YOPODataset` + route transform | 两场景 routes、depth、pose | 一个 batch 的模型输入和 dense loss 输入 | 每个训练 epoch | 固定 bubbles 与 dense witness 来自同一条 route；场景切分无泄漏 | 10 epoch | P0 | 已有测试代码，待场景复核 | `test_training_pipeline.py` |
 | MT-RC-005 | Dataset + YOPO network | batch、左右反事实 route | endstate/score | 每个 validation epoch | route 条件改变时输出可区分，shape/finite 保持 | 5 epoch | P0 | 测试设计已定义 | `yopo_dataset.py`, `yopo_network.py` |
-| MT-RC-006 | YOPO network + `RouteLoss` + safety loss | 预测 primitive、ESDF、dense route | total cost、score target、梯度 | 每个训练 epoch | loss 可反向传播，route dropout 不产生路线梯度 | 5 epoch | P0 | 已有测试代码，待场景复核 | `test_route_loss.py`, `test_training_pipeline.py::test_one_training_batch_backpropagates_all_costs` |
+| MT-RC-006 | YOPO network + `RouteLoss` + safety loss | 预测 primitive、ESDF、dense route | total cost、score target、梯度 | 每个训练 epoch | loss 可反向传播，无效路线不产生路线梯度 | 5 epoch | P0 | 已有测试代码，待场景复核 | `test_route_loss.py`, `test_training_pipeline.py::test_one_training_batch_backpropagates_all_costs` |
 | MT-RC-007 | Trainer + checkpoint | 配置、一个 batch、旧 checkpoint | best checkpoint 和指标 | 每次训练发布 | 保存数据版本、路线参数、loss 权重；可 reload | 3 次 | P1 | 已有测试代码，待场景复核 | `test_training_pipeline.py::test_one_training_batch_backpropagates_all_costs` |
 | MT-RC-008 | `validate_snapshot_dataset.py` + 可视化输入 | 合法/非法场景、routes.npz | 校验报告和路线图 | 每次数据发布 | 每个 reason code 可定位到 scene/frame/route，三维字段不丢失 | 100 条 route | P1 | 测试设计已定义 | `validate_snapshot_dataset.py` |
 
@@ -202,7 +202,7 @@ TopoGraph 持久化、语义节点代际和 frontier 统一 loss 的既有验收
 | IT-RC-001 | 合成场景 -> Dataset -> YOPO -> route loss -> backward | 双场景深度、route、ESDF | 梯度、checkpoint、cost 指标 | 每次提交 | 单 batch 完成前向、反向和保存；无 NaN | 5 次 | P0 | 已有测试代码，待场景复核 | `test_training_pipeline.py` |
 | IT-RC-002 | routes.npz 发布/加载闭环 | 100 条有效和失败 route | Dataset 样本统计 | 每次 pilot | 有效比例、失败 flags、最小安全空间统计可复现 | 3 次 | P0 | 测试设计已定义 | `test_route_contract.py`, `validate_snapshot_dataset.py` |
 | IT-RC-003 | AirSim/EPIC JSONL -> accepted route -> labeler | 真实 accepted witness 日志 | route 表和失败报告 | 每批真实日志 | 只消费 accepted witness，不重写生产搜索；原始 witness 可追溯 | 2 批 | P0 | 已有测试，待场景复核 | `test_route_contract.py::test_epic_labeler_preserves_failures_and_builds_corridor` |
-| IT-RC-004 | route dropout 训练/验证 | 同 route 的正常和 dropout batch | 两种模型输出与 loss | 每次训练回归 | dropout 只屏蔽 route，frontier 和安全项仍工作 | 10 对 batch | P0 | 已有测试代码，待场景复核 | `test_training_pipeline.py::test_route_dropout_keeps_frontier_but_masks_routes` |
+| IT-RC-004 | route 有效/无效训练验证 | 同 route 的有效和无效几何 | 两种模型输出与 loss | 每次训练回归 | 无效路线不影响 frontier 和安全项 | 10 对 batch | P0 | 已有测试代码，待场景复核 | `test_training_pipeline.py::test_one_training_batch_backpropagates_all_costs` |
 | IT-RC-005 | `RouteCondition.msg` 在线原子接口 | route_id、stamp、frontier、bubbles、flags | ROUTE/FRONTIER_ONLY/SAFETY_HOLD | 每个 ROS2 tick | 过期、回退、非连续 route 被拒绝；旧 route 仅在仍新鲜时复用 | 每种状态 20 次 | P0 | 测试设计已定义 | 尚未实现独立 ROS2 测试 |
 | IT-RC-006 | TorchScript/export/reload | 训练 checkpoint、固定输入 batch | 导出模型和 reload 输出 | 每个模型发布 | 导出前后 shape、有限性和 primitive 排列一致 | 3 个 checkpoint | P1 | 测试设计已定义 | 尚未确认导出入口 |
 | IT-RC-007 | 在线闭环路线切换 | 单行/多行语义、地面误检、左右路线 | local goal、轨迹、模式事件 | 每条闭环任务 | 无左/右振荡；路线失效有 reason code；最终到 mission goal | 3 个往返任务 | P0 | 测试设计已定义 | 尚未实现闭环测试 |
@@ -218,7 +218,7 @@ TopoGraph 持久化、语义节点代际和 frontier 统一 loss 的既有验收
 | PERF-RC-001 | ESDF 全图与 tile 内存 | 实际 `tree.ply`、0.2 m 分辨率、halo 配置 | 字节数、tile 查询误差 | 每个场景版本 | 样本不加载超预算全图；tile 边界距离误差在配置阈值内 | 2 场景 x 3 次 | P0 | 测试设计已定义 | 尚未实现性能采集 |
 | PERF-RC-002 | Dataset 主机内存 | batch size 1/8/32、K=8/12/16 | 峰值 RSS、加载时间 | 每个训练版本 | 内存随 batch/K 可解释增长，无 routes 全量复制 | 每组 5 次 | P1 | 测试设计已定义 | 尚未实现性能采集 |
 | PERF-RC-003 | YOPO 推理延迟 | 固定深度、motion、frontier、route batch | P50/P95/最大延迟 | 每个模型发布 | P95 不超过控制周期 25%，输出有限 | 1000 tick | P0 | 测试设计已定义 | 尚未实现性能采集 |
-| PERF-RC-004 | route loss 延迟和显存 | primitive 数、dense route 点数 M | loss 时间、显存、梯度 | 每个训练版本 | M 增长不会引发不可控显存；route dropout 仍完成 | 每组 100 batch | P1 | 测试设计已定义 | 尚未实现性能采集 |
+| PERF-RC-004 | route loss 延迟和显存 | primitive 数、dense route 点数 M | loss 时间、显存、梯度 | 每个训练版本 | M 增长不会引发不可控显存；route validity 仍完成 | 每组 100 batch | P1 | 测试设计已定义 | 尚未实现性能采集 |
 | PERF-RC-005 | 在线 route 预处理和消息开销 | K=8/12/16、route 切换和过期输入 | 预处理延迟、消息字节、切换频率 | 每个 ROS2 tick | 不因 route 重采样阻塞控制；超时进入明确降级状态 | 1000 tick | P0 | 测试设计已定义 | 尚未实现性能采集 |
 
 ### 2.6 通过口径和记录要求

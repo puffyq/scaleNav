@@ -210,8 +210,7 @@ class RouteYopoController(Node):
         motion = torch.zeros((1, 6), device=self.device)
         frontier = torch.tensor([[10.0, 0.0, 0.0]], device=self.device)
         route = torch.zeros((1, count, 4), device=self.device)
-        mask = torch.zeros((1, count), device=self.device)
-        endstate, score = self.model(depth, motion, frontier, route, mask)
+        endstate, score = self.model(depth, motion, frontier, route)
         if tuple(endstate.shape) != (1, 9, 3, 5) or tuple(score.shape) != (1, 3, 5):
             raise ValueError(
                 f"Route-YOPO output contract mismatch: {tuple(endstate.shape)}, {tuple(score.shape)}"
@@ -438,7 +437,6 @@ class RouteYopoController(Node):
         route_id = self.route_ids.value
         centers_world = np.repeat(position_world[None], count, axis=0).astype(np.float32)
         sampled_radii = np.zeros(count, dtype=np.float32)
-        route_mask = np.zeros(count, dtype=np.float32)
         route_features = np.zeros((count, 4), dtype=np.float32)
         sample_distances = self.anchors.copy()
         if decision.mode == RouteMode.ROUTE:
@@ -448,13 +446,12 @@ class RouteYopoController(Node):
             # disabled for non-positive safe radii below.
             feature_radius = max(safe_radius_m, 0.25)
             point_radii = np.full(len(route_path), feature_radius, dtype=np.float32)
-            centers_world, sampled_radii, route_mask, sample_distances = (
+            centers_world, sampled_radii, sample_distances = (
                 self.sample_route_bubbles(route_path, point_radii, self.anchors)
             )
-            route_features, route_mask = build_route_features(
+            route_features = build_route_features(
                 centers_world,
                 sampled_radii,
-                route_mask,
                 sample_distances,
                 position_world,
                 rotation,
@@ -481,11 +478,10 @@ class RouteYopoController(Node):
         route_tensor = torch.from_numpy(route_features[None]).to(
             self.device, non_blocking=True
         )
-        mask_tensor = torch.from_numpy(route_mask[None]).to(self.device, non_blocking=True)
 
         started = time.perf_counter()
         endstate, score = self.model(
-            depth_tensor, motion_tensor, frontier_tensor, route_tensor, mask_tensor
+            depth_tensor, motion_tensor, frontier_tensor, route_tensor
         )
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
@@ -576,7 +572,6 @@ class RouteYopoController(Node):
             "frontier_world": frontier_world.tolist(),
             "centers_world": centers_world.tolist(),
             "safe_radii_m": sampled_radii.tolist(),
-            "mask": route_mask.tolist(),
             "anchor_or_feature_distances_m": sample_distances.tolist(),
             "radius_source": "scalenav_path_min_clearance_broadcast",
             "corridor_map": "polyline_capsule_sdf",

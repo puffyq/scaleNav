@@ -21,9 +21,7 @@ def synthetic_data(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def test_small_pilot_uses_disjoint_frame_groups_and_separate_dense_route(
     synthetic_data: Path,
 ):
-    train = YOPODataset(
-        "train", data_root=synthetic_data, route_dropout_probability=0.0
-    )
+    train = YOPODataset("train", data_root=synthetic_data)
     valid = YOPODataset("valid", data_root=synthetic_data)
     def frame_keys(dataset: YOPODataset) -> set[tuple[int, int]]:
         return {
@@ -40,9 +38,7 @@ def test_small_pilot_uses_disjoint_frame_groups_and_separate_dense_route(
     assert frame_keys(train).isdisjoint(frame_keys(valid))
     sample = train[0]
     assert sample["route_bubbles"].shape == (12, 4)
-    assert sample["route_mask"].shape == (12,)
     assert sample["dense_route_world"].shape == (128, 3)
-    assert sample["dense_route_mask"].sum() > sample["route_mask"].sum()
     assert sample["depth"].min() >= 0.0 and sample["depth"].max() <= 1.0
 
 
@@ -50,8 +46,8 @@ def test_three_scene_split_keeps_every_scene_in_train_and_validation(tmp_path: P
     data_root = generate_synthetic_dataset(
         tmp_path / "three_scenes", scene_count=3, frames_per_scene=3
     )
-    train = YOPODataset("train", data_root=data_root, route_dropout_probability=0.0)
-    valid = YOPODataset("valid", data_root=data_root, route_dropout_probability=0.0)
+    train = YOPODataset("train", data_root=data_root)
+    valid = YOPODataset("valid", data_root=data_root)
 
     assert train.split_strategy == "frame_group_holdout"
     assert valid.split_strategy == "frame_group_holdout"
@@ -70,25 +66,15 @@ def test_three_scene_split_keeps_every_scene_in_train_and_validation(tmp_path: P
     assert frame_keys(train).isdisjoint(frame_keys(valid))
 
 
-def test_route_dropout_keeps_frontier_but_masks_routes(synthetic_data: Path):
-    dataset = YOPODataset(
-        "train", data_root=synthetic_data, route_dropout_probability=1.0
-    )
-    sample = dataset[0]
-    assert torch.count_nonzero(sample["route_mask"]) == 0
-    assert torch.count_nonzero(sample["dense_route_mask"]) == 0
-    assert torch.isfinite(sample["frontier_body"]).all()
-
-
 def test_validation_motion_is_deterministic_per_sample(synthetic_data: Path):
     dataset = YOPODataset(
-        "valid", data_root=synthetic_data, route_dropout_probability=0.0, seed=42
+        "valid", data_root=synthetic_data, seed=42
     )
     torch.testing.assert_close(dataset[0]["motion_body"], dataset[0]["motion_body"])
 
 
 def test_same_depth_and_frontier_respond_to_different_witness_routes(synthetic_data: Path):
-    dataset = YOPODataset("all", data_root=synthetic_data, route_dropout_probability=0.0)
+    dataset = YOPODataset("all", data_root=synthetic_data)
     first = dataset[0]
     second = dataset[1]
     torch.testing.assert_close(first["depth"], second["depth"])
@@ -100,14 +86,12 @@ def test_same_depth_and_frontier_respond_to_different_witness_routes(synthetic_d
             first["motion_body"][None],
             first["frontier_body"][None],
             first["route_bubbles"][None],
-            first["route_mask"][None],
         )
         second_endstate, _ = model(
             first["depth"][None],
             first["motion_body"][None],
             first["frontier_body"][None],
             second["route_bubbles"][None],
-            second["route_mask"][None],
         )
     assert torch.max(torch.abs(first_endstate - second_endstate)).item() > 1.0e-7
 
@@ -123,7 +107,6 @@ def test_one_training_batch_backpropagates_all_costs(
         batch_size=1,
         num_workers=0,
         device="cpu",
-        route_dropout_probability=0.0,
     )
     before = trainer.policy.yopo_head.model[0].weight.detach().clone()
     metrics = trainer.run_epoch(trainer.train_dataloader, training=True, max_batches=1)

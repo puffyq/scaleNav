@@ -256,7 +256,7 @@ python -m pytest -q tests
 
 The suite covers coordinate conversion, safe pose sampling, route NPZ
 round-trips, quality rejection, conservative bubble sampling, route loss
-gradients/dropout, scene-level splitting, path-conditioned output changes, and
+gradients and invalid-route handling, scene-level splitting, path-conditioned output changes, and
 a complete ESDF-backed optimizer update with checkpoint serialization. It also
 covers large-block A* detours, analytic ground-truth depth rendering, and a
 generated-scene contract round trip.

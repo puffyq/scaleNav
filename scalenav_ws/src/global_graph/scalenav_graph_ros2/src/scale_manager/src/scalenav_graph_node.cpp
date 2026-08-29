@@ -79,6 +79,14 @@ geometry_msgs::msg::Point toPoint(const Eigen::Vector3d &value)
   return point;
 }
 
+Eigen::Vector3f projectPlanningPoint(
+  const Eigen::Vector3f &value, bool fixed_layer, double layer_z)
+{
+  Eigen::Vector3f projected = value;
+  if (fixed_layer) projected.z() = static_cast<float>(layer_z);
+  return projected;
+}
+
 struct Rgb
 {
   float r;
@@ -228,7 +236,10 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       static_cast<int>(declare_parameter<int>("semantic_patch_rows", 3)), 1, 32);
     semantic_virtual_depth_m_ = declare_parameter<double>("semantic_virtual_depth_m", 30.0);
     semantic_points_enabled_ = declare_parameter<bool>("semantic_points_enabled", true);
-    semantic_point_min_score_ = declare_parameter<double>("semantic_point_min_score", 0.35);
+    // PEARL scores are calibrated contrast scores, not obstacle clearance.
+    // Retain weak but useful semantic evidence; geometric collision checks
+    // remain authoritative for executable paths.
+    semantic_point_min_score_ = declare_parameter<double>("semantic_point_min_score", 0.20);
     semantic_point_separation_m_ = declare_parameter<double>(
       "semantic_point_separation_m", 1.5);
     semantic_point_radius_m_ = declare_parameter<double>("semantic_point_radius_m", 0.75);
@@ -304,12 +315,13 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       get_logger(),
       "ScaleNav config: clearance_target=%.2f m clearance_weight=%.2f "
       "geometry_map=%s reuse_previous_route=%d semantic_radius=%.2f m "
-      "semantic_visual_max=%.2f baseline_q=%.2f "
+      "semantic_visual_max=%.2f pearl_risk_threshold=%.2f baseline_q=%.2f "
       "diagnostic_period=%d ms",
       clearance_target_m_, clearance_cost_weight_,
       map_history_radius_m_ <= 0.0 ? "CURRENT_FRAME" : "SLIDING_WINDOW",
       static_cast<int>(reuse_previous_route_),
       semantic_point_radius_m_, semantic_visualization_max_score_,
+      semantic_point_min_score_,
       semantic_baseline_quantile_,
       diagnostic_log_period_ms_);
     RCLCPP_INFO(get_logger(), "ScaleNav graph snapshots: file=%s period=%d ms",
@@ -969,10 +981,13 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         const float row_confidence = patch_rows <= 1 ? 0.7F :
           0.65F + 0.35F * static_cast<float>(row_support > 0 ? row_support - 1 : 0) /
             static_cast<float>(patch_rows - 1);
+        // Once the ray is projected to the fixed planning layer, its image
+        // elevation is no longer evidence against the semantic anchor. Keep
+        // the PEARL confidence instead of applying a second height penalty.
         const float below_layer = static_cast<float>(graph_layer_z_) - point_world.z();
-        const float ground_confidence = !graph_fixed_layer_ || below_layer <= 0.5F ?
-          1.0F : std::clamp(
-            1.0F - (below_layer - 0.5F) / 5.0F, 0.25F, 1.0F);
+        const float ground_confidence = graph_fixed_layer_ ? 1.0F :
+          (below_layer <= 0.5F ? 1.0F : std::clamp(
+            1.0F - (below_layer - 0.5F) / 5.0F, 0.25F, 1.0F));
         frame.confidences.push_back(std::clamp(
           fov_confidence * row_confidence * ground_confidence, 0.05F, 1.0F));
         raw_min = std::min(raw_min, patch_scores[i]);
@@ -1932,10 +1947,10 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       std::chrono::steady_clock::now() - astar_start).count();
     // Keep the candidate frontier_goal local until publish() has accepted the
     // complete witness.  A topology path is not an incumbent by itself.
-    const Eigen::Vector3f proposed_frontier_goal =
-      (found && !path_nodes.empty()) ?
-      path_nodes.back()->center_ :
-      accepted_route_.frontier_goal;
+    const Eigen::Vector3f proposed_frontier_goal = projectPlanningPoint(
+      (found && !path_nodes.empty()) ? path_nodes.back()->center_ :
+      accepted_route_.frontier_goal,
+      graph_fixed_layer_, graph_layer_z_);
     const std::uint64_t proposed_frontier_goal_id =
       (found && !path_nodes.empty()) ? path_nodes.back()->persistent_id_ :
       accepted_route_.frontier_goal_id;
@@ -2520,35 +2535,31 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       std::vector<float> semantic_scores;
       std::vector<float> semantic_confidences;
       const Eigen::Vector3f origin = frame->origin;
-      const float fixed_layer_influence_m = static_cast<float>(std::max(
-        std::max(0.0, semantic_route_influence_m_),
-        std::max(0.0, semantic_point_influence_m_)));
       for (const auto &ray : rays) {
         if (static_cast<int>(semantic_centers.size()) >=
             std::max(0, semantic_point_max_nodes_)) break;
         const Eigen::Vector3f chosen = ray.point;
         const float distance = (chosen - origin).norm();
         if (!std::isfinite(distance) || distance < 1.0F) continue;
-        if (graph_fixed_layer_ &&
-            !scalenav_graph::semanticPointCanInfluenceFixedLayer(
-              chosen.z(), static_cast<float>(graph_layer_z_), fixed_layer_influence_m)) {
-          ++semantic_height_rejected;
-          continue;
-        }
-        if (!topo->lidar_map_interface_->IsInBox(chosen)) continue;
+        // PEARL rays are image-space evidence. In fixed-layer mode their
+        // vertical component must not reject a useful far-field anchor or
+        // create a 3-D frontier; retain XY and plan at the graph layer.
+        const Eigen::Vector3f planning_point = projectPlanningPoint(
+          chosen, graph_fixed_layer_, graph_layer_z_);
+        if (!topo->lidar_map_interface_->IsInBox(planning_point)) continue;
         bool duplicate = false;
         for (const auto &existing : semantic_centers) {
-          if ((existing - chosen).norm() <
+          if ((existing - planning_point).norm() <
               static_cast<float>(std::max(1.0, semantic_point_separation_m_))) {
             duplicate = true;
             break;
           }
         }
         if (!duplicate) {
-          semantic_centers.push_back(chosen);
+          semantic_centers.push_back(planning_point);
           semantic_scores.push_back(std::clamp(ray.score, 0.0F, 1.0F));
           semantic_confidences.push_back(std::clamp(ray.confidence, 0.0F, 1.0F));
-          const float range = (chosen - origin).norm();
+          const float range = (planning_point - origin).norm();
           semantic_min_range_m = std::min(semantic_min_range_m, range);
           semantic_max_range_m = std::max(semantic_max_range_m, range);
         }
@@ -3218,8 +3229,10 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       next_goal_pub_->publish(next_goal_message);
       const float local_goal_to_frontier_goal =
         (local_goal - accepted_route_.frontier_goal).norm();
-      const Eigen::Vector3f topology_frontier_goal = found && !path_nodes.empty() ?
-        path_nodes.back()->center_ : accepted_route_.frontier_goal;
+      const Eigen::Vector3f topology_frontier_goal = projectPlanningPoint(
+        found && !path_nodes.empty() ? path_nodes.back()->center_ :
+        accepted_route_.frontier_goal,
+        graph_fixed_layer_, graph_layer_z_);
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
         "[ScaleNav goals] vehicle=(%.2f,%.2f,%.2f) mission_goal=(%.2f,%.2f,%.2f) "
         "topology_anchor=(%.2f,%.2f,%.2f) frontier_goal=(%.2f,%.2f,%.2f) "
@@ -3294,7 +3307,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     frontier_goal_marker.scale.y = 0.62;
     frontier_goal_marker.scale.z = 0.62;
     setColor(frontier_goal_marker.color, kFrontierGoal);
-    frontier_goal_marker.pose.position = toPoint(accepted_route_.frontier_goal);
+    frontier_goal_marker.pose.position = toPoint(projectPlanningPoint(
+      accepted_route_.frontier_goal, graph_fixed_layer_, graph_layer_z_));
     graph.markers.push_back(frontier_goal_marker);
 
     visualization_msgs::msg::Marker frontier_goal_label = goal_marker;
@@ -3304,7 +3318,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     frontier_goal_label.action = accepted_route_.valid ?
       visualization_msgs::msg::Marker::ADD : visualization_msgs::msg::Marker::DELETE;
     const Eigen::Vector3f frontier_goal_label_position =
-      accepted_route_.frontier_goal + Eigen::Vector3f(0.0F, 0.0F, 0.8F);
+      projectPlanningPoint(accepted_route_.frontier_goal, graph_fixed_layer_, graph_layer_z_) +
+      Eigen::Vector3f(0.0F, 0.0F, 0.8F);
     frontier_goal_label.pose.position = toPoint(frontier_goal_label_position);
     setColor(frontier_goal_label.color, kFrontierGoal);
     frontier_goal_label.text = "FRONTIER GOAL";
@@ -3484,7 +3499,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   double semantic_baseline_quantile_ = 0.25;
   double semantic_virtual_depth_m_ = 30.0;
   bool semantic_points_enabled_ = true;
-  double semantic_point_min_score_ = 0.35;
+  double semantic_point_min_score_ = 0.20;
   double semantic_point_separation_m_ = 1.5;
   double semantic_point_radius_m_ = 0.75;
   int semantic_point_max_nodes_ = 16;

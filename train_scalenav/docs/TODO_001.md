@@ -15,7 +15,7 @@
 - 无 pickle 的版本化 `routes.npz` 读写、校验及失败路线 reason flags。
 - 对生产 EPIC accepted edge-witness 输出的连续 clearance 审计和 corridor Bubble 生成。
 - 固定 K 个保守 witness Bubble 模型输入，以及独立的稠密 witness loss 输入。
-- Route-Conditioned YOPO、primitive-frame route transform 和 route dropout。
+- Route-Conditioned YOPO、primitive-frame route transform 和 route validity。
 - `L_path_corridor + L_path_progress + L_path_tangent`，并纳入 detached score label。
 - 场景级 train/validation 切分、selected/oracle/regret/top-1 指标和版本化 checkpoint。
 - 合成双场景的 ESDF、前向、反向传播和 checkpoint 端到端 smoke 训练。
@@ -337,7 +337,7 @@ Dataset 从起点在 witness 上向前裁剪。模型输入使用可配置数量
 s = [1, 2, 3, 4, 5, 6, 8, 10, 14, 18, 24, 30] m
 ```
 
-路线不足对应距离时重复 terminal，并通过 `route_mask` 标记无效尾部。`K=8/12/16`
+路线不足对应距离时重复 terminal，所有固定 bubble 继续使用 terminal 几何。
 必须作为 pilot 消融，而不是在接口中永久写死 8 点。
 
 - [ ] 将 waypoint 转成相对于轨迹起点的 body-FLU 向量。
@@ -355,17 +355,16 @@ depth             [B, 1, 96, 160]
 motion            [B, 6]
 frontier_body     [B, 3]
 route_bubbles     [B, K, 4]    # body-FLU center xyz + normalized safe radius
-route_mask        [B, K]
 ```
 
-训练 loss 还需要世界坐标位姿、稠密 route、dense route mask 和 `sdf_tile_id`。Loss
+训练 loss 还需要世界坐标位姿、稠密 route 和 `sdf_tile_id`。Loss
 不得使用模型输入的 K 点近似代替稠密 witness，否则会漏掉窄走廊和急转弯监督。
 
 ### 5.2 Route-Conditioned YOPO V1
 
 - [ ] 保留 `[velocity, acceleration, frontier]` 作为原来的 9-D observation。
 - [ ] 使用 `StateTransform` 将 frontier 和每个 witness bubble center 转换到每个 primitive frame。
-- [ ] 将 witness bubble safe radius 和 route mask broadcast 到 `vertical_num x horizon_num`。
+- [ ] 将 witness bubble safe radius broadcast 到 `vertical_num x horizon_num`。
 - [ ] 与 64 通道 depth feature 拼接。
 - [ ] 扩展 YOPO head 的第一层输入通道，保持输出仍为 9-D endstate 和 1-D score。
 - [ ] 保持 15 个 primitive 的排列和图像网格顺序不变。
@@ -407,13 +406,13 @@ ROUTE
   -> 新 route 不合格但上一 route 仍合格：保持上一 route
 
 FRONTIER_ONLY
-  -> 无合格 route，但 frontier 新鲜且有限：route_mask 全零，仅使用 frontier 和 depth
+  -> 无合格 route，但 frontier 新鲜且有限：route bubbles 全零，仅使用 frontier 和 depth
 
 SAFETY_HOLD
   -> route 与 frontier 均不合格：受控减速/悬停，不得静默跟随过期走廊
 ```
 
-`FRONTIER_ONLY` 是正式模型契约，训练集需要加入 route dropout 样本；`SAFETY_HOLD`
+`FRONTIER_ONLY` 是正式模型契约，训练集需要加入 route validity 样本；`SAFETY_HOLD`
 优先使用确定性的制动/悬停控制，不把无目标的 YOPO primitive 选择冒充安全保证。
 
 ## 6. P1 损失函数
@@ -447,7 +446,7 @@ L = L_safety
 - [ ] 从现有 YOPO-Simple checkpoint 加载 depth backbone。
 - [ ] 保留原 head 中 depth、velocity、acceleration 和 goal 对应权重。
 - [ ] 将 frontier 放在旧 goal 的 3 个通道，最大化预训练权重复用。
-- [ ] 新 route、clearance 和 mask 通道使用小值初始化。
+- [ ] 新 route、clearance 和 route geometry 通道使用小值初始化。
 - [ ] 输出 checkpoint 时同时保存数据版本、route 参数和 loss 权重。
 
 ### 7.2 分阶段训练
@@ -469,7 +468,7 @@ L = L_safety
 
 - 增加低 clearance、强转弯和 lattice 边界样本。
 - 加入深度噪声、缺失值和轻微位姿扰动。
-- 加入明确标记的 route dropout 样本，训练 `FRONTIER_ONLY` 降级模式。
+- 加入明确标记的 route validity 样本，训练 `FRONTIER_ONLY` 降级模式。
 - 不对 route geometry 和 depth 使用相互不一致的数据增强。
 
 ### 7.3 关键消融

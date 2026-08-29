@@ -119,4 +119,4 @@ EPIC 的 `/epic/path`、`/epic/graph` 和 `/epic/clearance` 仍是分离话题�
 1. 用实际 EPIC 和仿真深度完成 10 次窄门、转弯和障碍突入闭环飞行。
 2. 真实障碍分布运行至少 1000 个模型 tick，记录完整控制链 P50/P95/max。
 3. 注入 depth、odom、route 超时和旧 planner publisher，核对飞行日志中的保持行为。
-4. EPIC 增加 source route id、frontier、centers、真实 radii、mask 和 flags 的原子消息。
+4. EPIC 增加 source route id、frontier、centers、真实 radii、route geometry 和 flags 的原子消息。

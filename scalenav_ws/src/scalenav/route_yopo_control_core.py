@@ -432,7 +432,6 @@ def validate_route_corridor(
 def build_route_features(
     centers_world: np.ndarray,
     safe_radii_m: np.ndarray,
-    route_mask: np.ndarray,
     sample_distances_m: np.ndarray,
     position_world: np.ndarray,
     rotation_body_to_world: np.ndarray,
@@ -441,12 +440,11 @@ def build_route_features(
 ) -> tuple[np.ndarray, np.ndarray]:
     centers = np.asarray(centers_world, dtype=np.float64)
     radii = np.asarray(safe_radii_m, dtype=np.float64)
-    mask = np.asarray(route_mask, dtype=np.float32)
     distances = np.asarray(sample_distances_m, dtype=np.float64)
     if centers.ndim != 2 or centers.shape[1:] != (3,):
         raise ValueError("route centers must have shape [K, 3]")
-    if radii.shape != (len(centers),) or mask.shape != radii.shape or distances.shape != radii.shape:
-        raise ValueError("route radius, mask and distance shapes must match centers")
+    if radii.shape != (len(centers),) or distances.shape != radii.shape:
+        raise ValueError("route radius and distance shapes must match centers")
     if radius_clip_m <= 0.0 or np.any(distances <= 0.0):
         raise ValueError("normalization distances and radius clip must be positive")
     centers_body = world_to_body_flu(
@@ -455,10 +453,9 @@ def build_route_features(
     normalized_centers = centers_body / np.maximum(distances[:, None], 1.0)
     normalized_radii = np.clip(radii, 0.0, radius_clip_m) / radius_clip_m
     features = np.concatenate((normalized_centers, normalized_radii[:, None]), axis=1)
-    features *= mask[:, None]
     if not np.isfinite(features).all():
         raise ValueError("route features are non-finite")
-    return features.astype(np.float32), mask.astype(np.float32)
+    return features.astype(np.float32)
 
 
 def route_signature(

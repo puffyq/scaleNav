@@ -120,7 +120,7 @@ def evaluate_comparison(
     data_root = Path(data_root).resolve()
     output_dir = Path(output_dir).resolve()
     selected_device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    dataset = YOPODataset("all", data_root=data_root, route_dropout_probability=0.0)
+    dataset = YOPODataset("all", data_root=data_root)
     samples = dataset.samples if max_samples is None else dataset.samples[:max_samples]
     dataset.samples = list(samples)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers)
@@ -158,7 +158,6 @@ def evaluate_comparison(
                 motion,
                 frontier,
                 batch["route_bubbles"].to(selected_device),
-                batch["route_mask"].to(selected_device),
             )
             if previous_route is not None:
                 previous_end, previous_score = previous_route(
@@ -166,7 +165,6 @@ def evaluate_comparison(
                     motion,
                     frontier,
                     batch["route_bubbles"].to(selected_device),
-                    batch["route_mask"].to(selected_device),
                 )
             simple_end, simple_score = baseline(depth, motion, frontier)
             route_flat = route_end.permute(0, 2, 3, 1).reshape(count, -1, 9)

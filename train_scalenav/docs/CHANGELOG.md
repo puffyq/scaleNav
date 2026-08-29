@@ -10,7 +10,7 @@
   `+/-15 deg`，因此上下行不可能拟合水平 Route；原训练却对全部 15 条候选使用软 Route
   loss，在线又直接执行未投影的三维终态。
 - Route-active 样本现在先将世界系终点投影到 Route local-subgoal 高度，并设置终端
-  `vz=az=0`，再计算 ESDF、Route 和 score target；Route dropout 样本保持原三维 YOPO。
+  `vz=az=0`，再计算 ESDF、Route 和 score target；无效路线几何样本仅保留原三维 YOPO。
 - 修复 safety ranking 错接总 safety/corridor cost 的问题，改用真实 collision barrier，
   并采用 `safety_ranking_target_margin` 判定 unsafe。
 - validation motion 改为按 seed/scene/route 确定性生成，训练 seed 同时控制 frame-group

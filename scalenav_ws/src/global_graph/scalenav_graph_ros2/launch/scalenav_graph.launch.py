@@ -82,7 +82,7 @@ def generate_launch_description():
         DeclareLaunchArgument("semantic_max_age_ms", default_value="1500.0"),
         DeclareLaunchArgument("semantic_virtual_depth_m", default_value="30.0"),
         DeclareLaunchArgument("semantic_points_enabled", default_value="true"),
-        DeclareLaunchArgument("semantic_point_min_score", default_value="0.35"),
+        DeclareLaunchArgument("semantic_point_min_score", default_value="0.20"),
         DeclareLaunchArgument("semantic_point_separation_m", default_value="1.5"),
         DeclareLaunchArgument("semantic_point_radius_m", default_value="0.75"),
         DeclareLaunchArgument("semantic_point_max_nodes", default_value="16"),

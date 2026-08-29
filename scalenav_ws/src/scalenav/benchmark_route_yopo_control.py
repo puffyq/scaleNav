@@ -69,7 +69,6 @@ def main() -> None:
     route = torch.zeros((1, bubble_count, 4), device=device)
     route[:, :, 0] = 1.0
     route[:, :, 3] = 0.5
-    mask = torch.ones((1, bubble_count), device=device)
 
     @torch.inference_mode()
     def infer(
@@ -77,9 +76,8 @@ def main() -> None:
         motion_input: torch.Tensor = motion,
         frontier_input: torch.Tensor = frontier,
         route_input: torch.Tensor = route,
-        mask_input: torch.Tensor = mask,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return model(depth_input, motion_input, frontier_input, route_input, mask_input)
+        return model(depth_input, motion_input, frontier_input, route_input)
 
     for _ in range(args.warmup):
         infer()
@@ -124,8 +122,7 @@ def main() -> None:
         motion_tick = torch.from_numpy(np.zeros((1, 6), dtype=np.float32)).to(device)
         frontier_tick = torch.from_numpy(np.array([[10.0, 0.0, 0.0]], dtype=np.float32)).to(device)
         route_tick = route.detach().clone()
-        mask_tick = mask.detach().clone()
-        endstate, _ = infer(depth_tick, motion_tick, frontier_tick, route_tick, mask_tick)
+        endstate, _ = infer(depth_tick, motion_tick, frontier_tick, route_tick)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         endstates = endstate[0].permute(1, 2, 0).reshape(-1, 9).cpu().numpy()

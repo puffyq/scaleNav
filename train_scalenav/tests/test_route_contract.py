@@ -123,17 +123,17 @@ def test_corridor_clearance_comes_from_obstacle_distance():
     np.testing.assert_allclose(radius, 0.5, atol=1e-6)
 
 
-def test_fixed_and_dense_route_sampling_are_masked_and_conservative():
+def test_fixed_and_dense_route_sampling_is_conservative():
     record = _straight_record()
     record.path_bubble_radius_m[5:8] = 0.25
-    centers, radii, mask, distances = sample_route_bubbles(
+    centers, radii, distances = sample_route_bubbles(
         record.path_points_world, record.path_bubble_radius_m, [1, 2, 3, 5, 8]
     )
     assert centers.shape == (5, 3)
     assert distances.shape == (5,)
-    np.testing.assert_array_equal(mask, [1, 1, 1, 0, 0])
+    assert np.all(np.diff(distances) >= 0.0)
     assert np.min(radii[:3]) == 0.25
-    dense_points, dense_radii, dense_mask = dense_route_arrays(
+    dense_points, dense_radii = dense_route_arrays(
         record.path_points_world,
         record.path_bubble_radius_m,
         count=24,
@@ -141,7 +141,6 @@ def test_fixed_and_dense_route_sampling_are_masked_and_conservative():
     )
     assert dense_points.shape == (24, 3)
     assert dense_radii.shape == (24,)
-    assert int(dense_mask.sum()) == 17
     np.testing.assert_allclose(dense_points[-1], record.path_points_world[-1])
 
 
@@ -150,10 +149,9 @@ def test_route_sampler_fills_all_valid_slots_after_priority_deduplication():
     points = np.stack((x, 0.08 * np.sin(3.0 * x), np.full_like(x, 1.6)), axis=1)
     radii = (0.8 + 0.2 * np.cos(2.0 * x)).astype(np.float32)
     anchors = [1, 2, 3, 4, 5, 6, 8, 10, 14, 18, 24, 30]
-    centers, sampled_radii, mask, distances = sample_route_bubbles(points, radii, anchors)
+    centers, sampled_radii, distances = sample_route_bubbles(points, radii, anchors)
     assert centers.shape == (12, 3)
-    assert sampled_radii.shape == mask.shape == distances.shape == (12,)
-    assert mask.tolist() == [1.0] * 12
+    assert sampled_radii.shape == distances.shape == (12,)
     assert np.all(np.diff(distances) > 0.0)
 
 
@@ -163,10 +161,9 @@ def test_route_sampler_does_not_spread_isolated_radius_dip_into_bubble():
     ).astype(np.float32)
     radii = np.full(101, 1.0, dtype=np.float32)
     radii[45:56] = 0.2
-    centers, sampled_radii, mask, distances = sample_route_bubbles(
+    centers, sampled_radii, distances = sample_route_bubbles(
         points, radii, [2, 4, 6, 8]
     )
-    assert mask.tolist() == [1.0] * 4
     # Bubble centers are certified locally; the dip straddles the 4 m and 6 m
     # anchors, but only the sphere whose own center is inside it is narrow.
     # Interval-minimum sampling incorrectly shrank both neighboring spheres.

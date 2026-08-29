@@ -26,12 +26,11 @@ class RouteLoss(nn.Module):
         decision_derivatives: torch.Tensor,
         route_points: torch.Tensor,
         route_radii: torch.Tensor,
-        route_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if route_points.ndim != 3 or route_points.shape[-1] != 3:
             raise ValueError("route_points must have shape [B, M, 3]")
-        if route_radii.shape != route_points.shape[:2] or route_mask.shape != route_points.shape[:2]:
-            raise ValueError("route radii/mask must have shape [B, M]")
+        if route_radii.shape != route_points.shape[:2]:
+            raise ValueError("route radii must have shape [B, M]")
         coefficients = self._coefficients(fixed_derivatives, decision_derivatives)
         times = torch.linspace(
             self.segment_time / self.eval_points,
@@ -46,8 +45,7 @@ class RouteLoss(nn.Module):
         segment_start = route_points[:, :-1]
         segment_vector = route_points[:, 1:] - segment_start
         segment_length = segment_vector.norm(dim=-1)
-        segment_valid = (route_mask[:, :-1] > 0.5) & (route_mask[:, 1:] > 0.5)
-        segment_valid &= segment_length > 1.0e-5
+        segment_valid = segment_length > 1.0e-5
         active = segment_valid.any(dim=1)
         cumulative = torch.cat(
             (torch.zeros_like(segment_length[:, :1]), torch.cumsum(segment_length, dim=1)), dim=1
@@ -60,9 +58,6 @@ class RouteLoss(nn.Module):
         bubble_difference = positions[:, :, None, :] - route_points[:, None, :, :]
         safe_radii = route_radii.clamp(min=0.0, max=self.corridor_width_cap_m)
         bubble_signed_distance = bubble_difference.norm(dim=-1) - safe_radii[:, None, :]
-        bubble_signed_distance = bubble_signed_distance.masked_fill(
-            route_mask[:, None, :] <= 0.5, 1.0e8
-        )
         union_signed_distance = -bubble_signed_distance.min(dim=-1).values
         field_argument = (union_signed_distance / max(self.corridor_scale_m, 1.0e-3)).clamp(-8.0, 8.0)
         corridor_field = torch.exp(-field_argument)

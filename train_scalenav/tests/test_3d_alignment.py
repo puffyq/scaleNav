@@ -21,7 +21,6 @@ from policy.state_transform import (
     state_body2world,
 )
 from policy.yopo_simple_baseline import YopoSimpleBaseline
-from policy.yopo_network import YopoNetwork
 
 
 def _upstream_poly5_solver():
@@ -191,27 +190,3 @@ def test_body_world_transform_matches_manual_3d_rotation():
     np.testing.assert_allclose(pos_world.numpy()[0], matrix @ pos_body.numpy()[0] + translation.numpy()[0], atol=1.0e-6)
     np.testing.assert_allclose(vel_world.numpy()[0], matrix @ vel_body.numpy()[0], atol=1.0e-6)
     np.testing.assert_allclose(acc_world.numpy()[0], matrix @ acc_body.numpy()[0], atol=1.0e-6)
-
-
-def test_legacy_route_head_channel_migration_preserves_3d_output():
-    """Corrected concat plus migrated weights must equal the old head function."""
-    model = YopoNetwork().cpu().eval()
-    state = model.state_dict()
-    legacy = dict(state)
-    generator = torch.Generator().manual_seed(8428)
-    weight = torch.randn(state["yopo_head.model.0.weight"].shape, generator=generator)
-    legacy["yopo_head.model.0.weight"] = weight
-    migrated = model.migrate_legacy_route_state_dict(legacy)
-
-    depth = torch.randn((2, 64, 3, 5), generator=generator)
-    observation = torch.randn((2, 9, 3, 5), generator=generator)
-    route = torch.randn((2, weight.shape[1] - 73, 3, 5), generator=generator)
-    old_features = torch.cat((depth, observation, route), dim=1)
-    new_features = torch.cat((observation, depth, route), dim=1)
-    old_output = torch.nn.functional.conv2d(
-        old_features, weight, state["yopo_head.model.0.bias"]
-    )
-    new_output = torch.nn.functional.conv2d(
-        new_features, migrated["yopo_head.model.0.weight"], state["yopo_head.model.0.bias"]
-    )
-    torch.testing.assert_close(old_output, new_output, rtol=0.0, atol=2.0e-5)

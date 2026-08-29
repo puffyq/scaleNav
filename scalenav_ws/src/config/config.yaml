@@ -6,6 +6,10 @@ scalenav_graph:
     # Maximum radius of the local topology graph searched by frontier A*.
     local_graph_radius_m: 45.0
 
+    # PEARL calibrated semantic-risk threshold. Lower values preserve weak
+    # far-field evidence; collision geometry still decides edge validity.
+    semantic_point_min_score: 0.20
+
     # A fixed-depth semantic endpoint is a provisional far frontier. Attach it
     # only to nearby measured topology; a real Bubble later replaces it.
     "bubble_topo/semantic_point_connection_candidates": 4

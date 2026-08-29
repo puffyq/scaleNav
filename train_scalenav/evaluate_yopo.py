@@ -112,7 +112,7 @@ def evaluate(
     checkpoint_path = Path(checkpoint_path).resolve()
     selected_device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     dataset = YOPODataset(
-        split, data_root=data_root, route_dropout_probability=0.0
+        split, data_root=data_root
     )
     samples = dataset.samples if max_samples is None else dataset.samples[:max_samples]
     if len(samples) != len(dataset.samples):
@@ -143,7 +143,6 @@ def evaluate(
                 motion,
                 batch["frontier_body"].to(selected_device),
                 batch["route_bubbles"].to(selected_device),
-                batch["route_mask"].to(selected_device),
             )
             endstate_flat = endstate.permute(0, 2, 3, 1).reshape(count, -1, 9)
             score_flat = score.reshape(count, -1)

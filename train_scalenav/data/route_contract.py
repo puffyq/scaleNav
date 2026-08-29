@@ -337,7 +337,7 @@ def sample_route_bubbles(
     path_points: np.ndarray,
     safe_radii: np.ndarray,
     anchors_m: Sequence[float],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     points = np.asarray(path_points, dtype=np.float32)
     radii = np.asarray(safe_radii, dtype=np.float32)
     anchors = np.asarray(anchors_m, dtype=np.float32)
@@ -385,7 +385,6 @@ def sample_route_bubbles(
     )
     if len(sample_distances) != len(anchors):
         raise RuntimeError("route sampler did not produce the configured bubble count")
-    mask = sample_distances <= length + 1.0e-5
     centers = np.stack(
         [
             _interpolate_at_arclength(points, cumulative, min(float(distance), length))
@@ -402,7 +401,10 @@ def sample_route_bubbles(
         sampled_radii[index] = float(np.interp(
             min(float(sample_distances[index]), length), cumulative, radii
         ))
-    return centers, sampled_radii, mask.astype(np.float32), sample_distances
+    # Every configured slot is a usable point.  Anchors beyond a short route
+    # are clamped to the terminal point, so the ordered polyline remains a
+    # fixed-size input without a separate validity-mask concept.
+    return centers, sampled_radii, sample_distances
 
 
 def dense_route_arrays(
@@ -411,7 +413,7 @@ def dense_route_arrays(
     *,
     count: int,
     step_m: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     points, radii = resample_polyline(path_points, max_step_m=step_m, values=safe_radii)
     assert radii is not None
     if len(points) > count:
@@ -422,9 +424,7 @@ def dense_route_arrays(
     output_radii = np.repeat(radii[-1:], count, axis=0)
     output_points[:valid_count] = points
     output_radii[:valid_count] = radii
-    mask = np.zeros(count, dtype=np.float32)
-    mask[:valid_count] = 1.0
-    return output_points, output_radii, mask
+    return output_points, output_radii
 
 
 class RouteTable:

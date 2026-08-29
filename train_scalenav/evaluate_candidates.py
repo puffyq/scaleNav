@@ -75,7 +75,7 @@ def evaluate_candidates(
     checkpoint_path = Path(checkpoint_path).resolve()
     output_dir = Path(output_dir).resolve()
     selected_device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    dataset = YOPODataset("all", data_root=data_root, route_dropout_probability=0.0)
+    dataset = YOPODataset("all", data_root=data_root)
     samples = dataset.samples if max_samples is None else dataset.samples[:max_samples]
     dataset.samples = list(samples)
     loader = DataLoader(
@@ -113,7 +113,6 @@ def evaluate_candidates(
                 motion,
                 batch["frontier_body"].to(selected_device),
                 batch["route_bubbles"].to(selected_device),
-                batch["route_mask"].to(selected_device),
             )
             if baseline is not None:
                 simple_endstate, simple_score = baseline(

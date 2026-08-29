@@ -157,6 +157,11 @@ void TopoGraph::init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, Parallel
 
 void TopoGraph::copyPersistentNodesFrom(const TopoGraph &source) {
   if (this == &source) return;
+  const auto project_persistent_point = [this](const Eigen::Vector3f &point) {
+    Eigen::Vector3f projected = point;
+    if (planar_graph_) projected.z() = planar_z_;
+    return projected;
+  };
   std::unordered_map<TopoNode::Ptr, TopoNode::Ptr> copied;
   std::vector<TopoNode::Ptr> source_nodes;
   {
@@ -172,7 +177,7 @@ void TopoGraph::copyPersistentNodesFrom(const TopoGraph &source) {
         clone->role_ = node->role_;
         clone->geometry_state_ = node->geometry_state_;
         clone->geometry_miss_count_ = node->geometry_miss_count_;
-        clone->center_ = node->center_;
+        clone->center_ = project_persistent_point(node->center_);
         clone->bubble_radius_ = node->bubble_radius_;
         clone->semantic_score_ = node->semantic_score_;
         clone->semantic_confidence_ = node->semantic_confidence_;
@@ -206,8 +211,10 @@ void TopoGraph::copyPersistentNodesFrom(const TopoGraph &source) {
       to->neighbors_.insert(from);
       const auto path_it = source_node->paths_.find(source_neighbor);
       if (path_it != source_node->paths_.end()) {
-        from->paths_[to] = path_it->second;
-        auto reverse_path = path_it->second;
+        auto projected_path = path_it->second;
+        for (auto &point : projected_path) point = project_persistent_point(point);
+        from->paths_[to] = projected_path;
+        auto reverse_path = projected_path;
         std::reverse(reverse_path.begin(), reverse_path.end());
         to->paths_[from] = reverse_path;
       }
@@ -1941,7 +1948,8 @@ size_t TopoGraph::insertSemanticNodes(
   size_t updated_semantic = 0;
   size_t influenced_existing = 0;
   for (size_t center_index = 0; center_index < centers.size(); ++center_index) {
-    const auto &center = centers[center_index];
+    const Eigen::Vector3f center = projectGraphPoint(
+      centers[center_index], planar_graph_, planar_z_);
     if (!center.allFinite() || !lidar_map_interface_->IsInBox(center)) continue;
     const float score = std::clamp(
       center_index < semantic_scores.size() ? semantic_scores[center_index] : 1.0F,

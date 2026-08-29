@@ -26,7 +26,7 @@ from policy.yopo_network import YopoNetwork
 
 def run(data_root: Path, checkpoint: Path, output: Path, device: str) -> None:
     selected_device = torch.device(device)
-    dataset = YOPODataset("all", data_root=data_root, route_dropout_probability=0.0)
+    dataset = YOPODataset("all", data_root=data_root)
     loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=0)
     policy = YopoNetwork().to(selected_device).eval()
     state = torch.load(checkpoint, map_location=selected_device, weights_only=False)
@@ -45,7 +45,6 @@ def run(data_root: Path, checkpoint: Path, output: Path, device: str) -> None:
                 batch["depth"].to(selected_device), motion,
                 batch["frontier_body"].to(selected_device),
                 batch["route_bubbles"].to(selected_device),
-                batch["route_mask"].to(selected_device),
             )
             flat = endstate.permute(0, 2, 3, 1).reshape(count, 15, 9)
             position = batch["position_world"].to(selected_device)[:, None].expand(-1, 15, -1).reshape(-1, 3)

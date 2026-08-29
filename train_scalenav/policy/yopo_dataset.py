@@ -68,7 +68,6 @@ class YOPODataset(Dataset):
         *,
         data_root: str | Path | None = None,
         validation_ratio: float = 0.1,
-        route_dropout_probability: float | None = None,
         seed: int = 0,
     ) -> None:
         super().__init__()
@@ -102,13 +101,6 @@ class YOPODataset(Dataset):
         self.clearance_clip_m = float(cfg["route_clearance_clip_m"])
         self.dense_count = int(cfg["dense_route_points"])
         self.dense_step_m = float(cfg["dense_route_step_m"])
-        self.route_dropout_probability = float(
-            cfg["route_dropout_probability"]
-            if route_dropout_probability is None
-            else route_dropout_probability
-        )
-        if not 0.0 <= self.route_dropout_probability <= 1.0:
-            raise ValueError("route_dropout_probability must be in [0, 1]")
         self.mode = mode
         self.seed = int(seed)
         self.split_strategy = "all"
@@ -220,7 +212,7 @@ class YOPODataset(Dataset):
         frontier_body = world_to_body_flu(frontier_world, position, rotation).astype(np.float32)
 
         path_world, _, path_radius = scene.routes.path(route_index)
-        centers_world, conservative_radius, route_mask, sample_distances = sample_route_bubbles(
+        centers_world, conservative_radius, sample_distances = sample_route_bubbles(
             path_world, path_radius, self.anchors
         )
         centers_body = world_to_body_flu(centers_world, position, rotation)
@@ -229,17 +221,12 @@ class YOPODataset(Dataset):
         route_bubbles = np.concatenate(
             (normalized_centers, normalized_radius[:, None]), axis=1
         ).astype(np.float32)
-        dense_world, dense_radius, dense_mask = dense_route_arrays(
+        dense_world, dense_radius = dense_route_arrays(
             path_world,
             path_radius,
             count=self.dense_count,
             step_m=self.dense_step_m,
         )
-
-        dropout = self.mode == "train" and np.random.random() < self.route_dropout_probability
-        if dropout:
-            route_mask = np.zeros_like(route_mask)
-            dense_mask = np.zeros_like(dense_mask)
 
         return {
             "depth": torch.from_numpy(depth),
@@ -249,15 +236,12 @@ class YOPODataset(Dataset):
             "frontier_body": torch.from_numpy(frontier_body),
             "frontier_world": torch.from_numpy(frontier_world),
             "route_bubbles": torch.from_numpy(route_bubbles),
-            "route_mask": torch.from_numpy(route_mask.astype(np.float32)),
             "dense_route_world": torch.from_numpy(dense_world),
             "dense_route_radius": torch.from_numpy(dense_radius),
-            "dense_route_mask": torch.from_numpy(dense_mask),
             "map_id": torch.tensor(scene.map_id, dtype=torch.long),
             "route_quality_weight": torch.tensor(
                 float(arrays["route_quality_weight"][route_index]), dtype=torch.float32
             ),
-            "route_dropout": torch.tensor(dropout, dtype=torch.bool),
         }
 
     def _read_depth(self, path: Path, frame: dict[str, Any]) -> np.ndarray:

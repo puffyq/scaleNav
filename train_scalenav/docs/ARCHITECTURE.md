@@ -173,10 +173,9 @@ Depth             [B, 1, 96, 160]
 Velocity/Accel    [B, 6] body FLU
 Frontier goal     [B, 3] body FLU
 Ordered bubbles   [B, 12, 4] = center_xyz + safe_radius
-Route mask        [B, 12]
 ```
 
-Dataset 只能做坐标变换、固定 K 采样、归一化和 dropout，不负责重新搜索、移动圆心或修改
+Dataset 只能做坐标变换、固定 K 采样和归一化，不负责重新搜索、移动圆心或修改
 几何真值。训练和在线必须共用同一固定 K 采样规则。
 
 ### 3.8 S7 模型和 S8 Loss

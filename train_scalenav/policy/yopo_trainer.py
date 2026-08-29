@@ -33,7 +33,6 @@ class YopoTrainer:
         checkpoint_path: str | Path | None = None,
         resume_training_state: bool = True,
         device: str | torch.device | None = None,
-        route_dropout_probability: float | None = None,
         random_seed: int | None = None,
         score_only: bool = False,
     ) -> None:
@@ -55,13 +54,11 @@ class YopoTrainer:
         self.train_dataset = YOPODataset(
             mode="train",
             data_root=data_root,
-            route_dropout_probability=route_dropout_probability,
             seed=self.random_seed or 0,
         )
         self.valid_dataset = YOPODataset(
             mode="valid",
             data_root=data_root,
-            route_dropout_probability=0.0,
             seed=self.random_seed or 0,
         )
         loader_options = {
@@ -186,7 +183,6 @@ class YopoTrainer:
             batch["motion_body"],
             batch["frontier_body"],
             batch["route_bubbles"],
-            batch["route_mask"],
         )
         batch_size = batch["depth"].shape[0]
         position = batch["position_world"]
@@ -212,7 +208,12 @@ class YopoTrainer:
         frontier_expanded = batch["frontier_world"].repeat_interleave(
             self.traj_num, dim=0
         )
-        route_active = (batch["dense_route_mask"] > 0.5).any(dim=1)
+        route_active = (
+            (batch["dense_route_world"][:, 1:] - batch["dense_route_world"][:, :-1])
+            .norm(dim=-1)
+            .gt(1.0e-5)
+            .any(dim=1)
+        )
         route_active_expanded = route_active.repeat_interleave(self.traj_num)
         route_compatible = self.policy.state_transform.route_primitive_compatibility(
             batch["frontier_body"]
@@ -239,9 +240,6 @@ class YopoTrainer:
         route_radii_expanded = batch["dense_route_radius"].repeat_interleave(
             self.traj_num, dim=0
         )
-        route_mask_expanded = batch["dense_route_mask"].repeat_interleave(
-            self.traj_num, dim=0
-        )
         costs = self.yopo_loss(
             start_state_expanded,
             end_state_world,
@@ -249,7 +247,6 @@ class YopoTrainer:
             batch["map_id"],
             route_points_expanded,
             route_radii_expanded,
-            route_mask_expanded,
         )
         # Fuse the bubble signed-distance field into the original ESDF safety
         # term. The original YOPO terms remain intact; ordered witness MSE is
@@ -482,7 +479,6 @@ class YopoTrainer:
             "learning_rate": self.learning_rate,
             "num_workers": self.num_workers,
             "random_seed": self.random_seed,
-            "route_dropout_probability": self.train_dataset.route_dropout_probability,
             "route_dataset_version": int(cfg["route_dataset_version"]),
             "local_subgoal_distance_m": float(cfg["local_subgoal_distance_m"]),
             "fixed_route_altitude_projection": True,

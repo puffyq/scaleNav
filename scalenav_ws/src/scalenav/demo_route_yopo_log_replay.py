@@ -299,13 +299,12 @@ def main() -> None:
     anchors = np.asarray(cfg["route_anchor_distances_m"], dtype=np.float32)
     if route_valid:
         point_radii = np.full(len(path_world), max(route_safe_radius, 0.25), dtype=np.float32)
-        centers, radii, mask, distances = sample_route_bubbles(
+        centers, radii, distances = sample_route_bubbles(
             path_world, point_radii, anchors
         )
-        route_features, route_mask = build_route_features(
+        route_features = build_route_features(
             centers,
             radii,
-            mask,
             distances,
             position,
             rotation,
@@ -313,7 +312,6 @@ def main() -> None:
         )
     else:
         route_features = np.zeros((len(anchors), 4), dtype=np.float32)
-        route_mask = np.zeros(len(anchors), dtype=np.float32)
 
     raw_depth = decode_logged_depth(session / depth_record["file"])
     prepared_depth = model_depth(raw_depth, args.minimum_depth, args.max_depth)
@@ -340,7 +338,6 @@ def main() -> None:
             torch.from_numpy(motion_body[None]).to(device),
             torch.from_numpy(frontier_body[None]).to(device),
             torch.from_numpy(route_features[None]).to(device),
-            torch.from_numpy(route_mask[None]).to(device),
         )
     endstates = endstate[0].permute(1, 2, 0).reshape(-1, 9).cpu().numpy()
     scores = score[0].reshape(-1).cpu().numpy()

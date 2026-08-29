@@ -42,7 +42,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-interval", type=int, default=5)
     parser.add_argument("--max-train-batches", type=int)
     parser.add_argument("--max-val-batches", type=int)
-    parser.add_argument("--route-dropout", type=float)
     parser.add_argument(
         "--progress-weight",
         type=float,
@@ -143,7 +142,6 @@ def main() -> None:
         checkpoint_path=args.checkpoint,
         resume_training_state=not args.finetune,
         device=args.device,
-        route_dropout_probability=args.route_dropout,
         random_seed=args.seed,
         score_only=args.score_only,
     )
