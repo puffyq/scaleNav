@@ -67,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="override wpath_mse, the ordered witness centerline guidance weight",
     )
     parser.add_argument("--centerline-weight", type=float)
+    parser.add_argument("--route-incompatible-score-cost", type=float)
     parser.add_argument(
         "--score-only", action="store_true",
         help="freeze trajectory generation and train only the final score channel",
@@ -126,6 +127,12 @@ def main() -> None:
         if args.centerline_weight < 0.0:
             raise ValueError("--centerline-weight must be non-negative")
         cfg["wcenterline"] = float(args.centerline_weight)
+    if args.route_incompatible_score_cost is not None:
+        if args.route_incompatible_score_cost < 0.0:
+            raise ValueError("--route-incompatible-score-cost must be non-negative")
+        cfg["route_incompatible_score_cost"] = float(
+            args.route_incompatible_score_cost
+        )
     configure_random_seed(args.seed)
     trainer = YopoTrainer(
         data_root=args.data,

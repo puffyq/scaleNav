@@ -54,6 +54,40 @@ class StateTransform:
         endstate = endstate.permute(0, 2, 1).reshape(B, 9, V, H)  # [B, 9, 3, 5]
         return endstate
 
+    def route_primitive_compatibility(self, frontier_body: torch.Tensor) -> torch.Tensor:
+        """Return the image-grid primitives whose angular sector covers the Route goal."""
+        if frontier_body.ndim != 2 or frontier_body.shape[1] != 3:
+            raise ValueError("frontier_body must have shape [B, 3]")
+        horizontal = torch.linalg.vector_norm(frontier_body[:, :2], dim=1)
+        yaw_goal = torch.atan2(frontier_body[:, 1], frontier_body[:, 0])
+        pitch_goal = torch.atan2(frontier_body[:, 2], horizontal)
+        yaw, pitch = self.lattice_primitive.getAngleLattice()
+        yaw = yaw.to(frontier_body).flip(0)[None, :]
+        pitch = pitch.to(frontier_body).flip(0)[None, :]
+        yaw_error = torch.atan2(
+            torch.sin(yaw_goal[:, None] - yaw),
+            torch.cos(yaw_goal[:, None] - yaw),
+        ).abs()
+        pitch_error = (pitch_goal[:, None] - pitch).abs()
+        compatible = (yaw_error <= self.lattice_primitive.yaw_diff) & (
+            pitch_error <= self.lattice_primitive.pitch_diff
+        )
+        # Keep supervision defined for a goal just outside the configured FOV.
+        missing = ~compatible.any(dim=1)
+        if torch.any(missing):
+            normalized_error = (
+                yaw_error / max(float(self.lattice_primitive.yaw_diff), 1.0e-6)
+                + pitch_error / max(float(self.lattice_primitive.pitch_diff), 1.0e-6)
+            )
+            nearest = normalized_error.argmin(dim=1)
+            compatible = compatible.clone()
+            compatible[missing, nearest[missing]] = True
+        return compatible.view(
+            frontier_body.shape[0],
+            self.lattice_primitive.vertical_num,
+            self.lattice_primitive.horizon_num,
+        )
+
     def pred_to_endstate_cpu(self, endstate_pred: np.ndarray, lattice_id: torch.Tensor) -> np.ndarray:
         """
             Used during test:

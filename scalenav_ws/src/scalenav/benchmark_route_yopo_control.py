@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model",
-        default=str(root / "train_scalenav/saved_corrected/YOPO_5/best.pth"),
+        default=str(root / "train_scalenav/saved_fixed_altitude/YOPO_0/best.pth"),
     )
     parser.add_argument("--train-root", default=str(root / "train_scalenav"))
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")

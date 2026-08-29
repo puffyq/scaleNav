@@ -17,7 +17,7 @@ ROOT="$(cd -- "$WS/.." && pwd)"
 SRC="$WS/src"
 TRAIN_ROOT="$ROOT/train_scalenav"
 PYTHON="$ROOT/../YOPO-Rally/.venv/bin/python"
-MODEL="$TRAIN_ROOT/saved_corrected/YOPO_5/best.pth"
+MODEL="${ROUTE_YOPO_MODEL:-$TRAIN_ROOT/saved_fixed_altitude/YOPO_0/best.pth}"
 LOG_ROOT="${LOG_ROOT:-${SCALENAV_LOG_DIR:-$ROOT/log_scalenav}}"
 
 while (($#)); do

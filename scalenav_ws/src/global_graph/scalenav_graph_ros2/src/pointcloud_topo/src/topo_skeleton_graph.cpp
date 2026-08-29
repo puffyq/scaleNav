@@ -115,6 +115,10 @@ void TopoGraph::init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, Parallel
 
   nh.param("max_update_region_num", max_update_region_num_, 0);
   nh.param("bubble_topo/semantic_node_match_distance", semantic_node_match_distance_, 2.5);
+  nh.param("bubble_topo/semantic_point_connection_candidates",
+           semantic_point_connection_candidates_, 4);
+  nh.param("bubble_topo/semantic_point_max_connections",
+           semantic_point_max_connections_, 2);
   nh.param("bubble_topo/semantic_point_influence_m",
            semantic_point_influence_m_, 5.0);
   nh.param("bubble_topo/clearance_cost_weight", clearance_cost_weight_, 2.0);
@@ -1031,10 +1035,24 @@ bool TopoGraph::goalDirectedSearch(
 
   constexpr float kGoalNodeToleranceM = 1.5F;
 
+  const auto isActiveSemanticFrontier = [&](const TopoNode::Ptr &node) {
+    return node && active_virtual_semantic_stamp_ns > 0 &&
+      node->geometry_state_ == TopoGeometryState::Unknown &&
+      node->semantic_observations_ > 0 &&
+      node->semantic_stamp_ns_ == active_virtual_semantic_stamp_ns;
+  };
+
   auto isFrontierEndpoint = [&](const TopoNode::Ptr &node, float route_dist) {
     return node != nullptr && node != start_node && !node->is_viewpoint_ &&
-           node->geometry_state_ == TopoGeometryState::Verified &&
+           (node->geometry_state_ == TopoGeometryState::Verified ||
+            isActiveSemanticFrontier(node)) &&
            route_dist + 1e-3F >= minimum_execution_path_m;
+  };
+
+  const auto isSearchNode = [&](const TopoNode::Ptr &node) {
+    return node &&
+      (node->geometry_state_ == TopoGeometryState::Verified ||
+       isActiveSemanticFrontier(node));
   };
 
   std::unordered_map<TopoNode::Ptr, float> g_score;
@@ -1066,6 +1084,8 @@ bool TopoGraph::goalDirectedSearch(
   TopoNode::Ptr best_frontier;
   float best_frontier_h = std::numeric_limits<float>::infinity();
   float best_frontier_route_distance = -std::numeric_limits<float>::infinity();
+  TopoNode::Ptr best_semantic_frontier;
+  float best_semantic_objective = std::numeric_limits<float>::infinity();
 
   const auto search_start = std::chrono::steady_clock::now();
   while (!open.empty()) {
@@ -1089,6 +1109,17 @@ bool TopoGraph::goalDirectedSearch(
 
     if (isFrontierEndpoint(entry.node, route_dist)) {
       const float h = goalDistance(entry.node);
+      const bool current_semantic_frontier = isActiveSemanticFrontier(entry.node);
+      if (current_semantic_frontier) {
+        const float objective = entry.g + heuristic(entry.node);
+        if (best_semantic_frontier == nullptr ||
+            objective < best_semantic_objective - 1e-5F ||
+            (std::abs(objective - best_semantic_objective) <= 1e-5F &&
+             h < goalDistance(best_semantic_frontier))) {
+          best_semantic_frontier = entry.node;
+          best_semantic_objective = objective;
+        }
+      }
       if (best_frontier == nullptr || h < best_frontier_h - 1e-5F ||
           (std::abs(h - best_frontier_h) <= 1e-5F &&
            route_dist > best_frontier_route_distance + 1e-3F)) {
@@ -1104,9 +1135,13 @@ bool TopoGraph::goalDirectedSearch(
       break;
     }
 
+    // A virtual semantic point extends the measured graph only as a frontier
+    // endpoint. Never use its two provisional anchors as an Unknown-space
+    // shortcut between otherwise unrelated Verified corridors.
+    if (isActiveSemanticFrontier(entry.node)) continue;
+
     for (const auto &neighbor : entry.node->neighbors_) {
-      if (!within_search_radius(neighbor) ||
-          neighbor->geometry_state_ != TopoGeometryState::Verified) continue;
+      if (!within_search_radius(neighbor) || !isSearchNode(neighbor)) continue;
       const auto weight_it = entry.node->weight_.find(neighbor);
       if (weight_it == entry.node->weight_.end() || !std::isfinite(weight_it->second))
         continue;
@@ -1117,20 +1152,23 @@ bool TopoGraph::goalDirectedSearch(
       // Without this gate A* can select an edge whose cached witness is at or
       // below the vehicle safety distance; the execution probe then rejects
       // the same route immediately after it was committed.
-      const auto edge_clearance_it = entry.node->edge_clearance_.find(neighbor);
-      if (edge_clearance_it != entry.node->edge_clearance_.end() &&
-          std::isfinite(edge_clearance_it->second) &&
-          parallel_bubble_astar_ &&
-          edge_clearance_it->second <=
-            static_cast<float>(parallel_bubble_astar_->safe_distance_) + 0.02F) {
-        continue;
-      }
-      if (parallel_bubble_astar_) {
-        const float live_witness_clearance = witnessMinimumClearance(witness_it->second);
-        if (std::isfinite(live_witness_clearance) &&
-            live_witness_clearance <=
+      const bool provisional_semantic_edge = isActiveSemanticFrontier(neighbor);
+      if (!provisional_semantic_edge) {
+        const auto edge_clearance_it = entry.node->edge_clearance_.find(neighbor);
+        if (edge_clearance_it != entry.node->edge_clearance_.end() &&
+            std::isfinite(edge_clearance_it->second) &&
+            parallel_bubble_astar_ &&
+            edge_clearance_it->second <=
               static_cast<float>(parallel_bubble_astar_->safe_distance_) + 0.02F) {
           continue;
+        }
+        if (parallel_bubble_astar_) {
+          const float live_witness_clearance = witnessMinimumClearance(witness_it->second);
+          if (std::isfinite(live_witness_clearance) &&
+              live_witness_clearance <=
+                static_cast<float>(parallel_bubble_astar_->safe_distance_) + 0.02F) {
+            continue;
+          }
         }
       }
       if (search_stats) ++search_stats->edge_evaluations;
@@ -1160,6 +1198,14 @@ bool TopoGraph::goalDirectedSearch(
         open.push({tentative_cost + h, h, tentative_cost, neighbor});
       }
     }
+  }
+
+  // A fresh semantic frame deliberately extends the normal frontier search
+  // to its fixed-depth endpoints. Prefer the lowest total-cost reachable
+  // endpoint; if none was connected, retain the measured Bubble fallback.
+  if (!prefer_mission_goal && best_semantic_frontier) {
+    if (search_stats) ++search_stats->candidate_frontier_goals;
+    return backtrackPath(best_semantic_frontier);
   }
 
   if (best_frontier == nullptr) {
@@ -1936,16 +1982,82 @@ size_t TopoGraph::insertSemanticNodes(
     updateNodeSemantic(node, score, 1.0F, stamp_ns, confidence);
     created.emplace_back(std::move(node));
   }
-  // Semantic points persist as continuous risk anchors. They intentionally do
-  // not create topology edges: edgeSemanticRisk() queries their spatial field,
-  // while only measured Bubble geometry is allowed to define connectivity.
-  if (created.empty()) return influenced_existing + updated_semantic;
+  // A current semantic endpoint is provisional geometry: attach it to the
+  // nearest measured graph backbone so the next normal frontier search can
+  // reach the configured virtual depth. Unknown-to-Unknown links are forbidden
+  // because they form isolated semantic-only components. When a measured
+  // Bubble reaches this position updateSkeleton() promotes the semantic state
+  // onto that Bubble and removes these provisional incident edges.
+  const auto isBackboneAnchor = [](const TopoNode::Ptr &node) {
+    return node && (node->role_ == TopoNodeRole::Odom ||
+                    node->geometry_state_ == TopoGeometryState::Verified);
+  };
+  vector<TopoNode::Ptr> nodes_to_connect = created;
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second) continue;
+    for (const auto &node : entry.second->topo_nodes_) {
+      if (!node || node->geometry_state_ != TopoGeometryState::Unknown ||
+          node->semantic_stamp_ns_ != stamp_ns ||
+          node->semantic_observations_ == 0) continue;
+      const size_t backbone_degree = std::count_if(
+        node->neighbors_.begin(), node->neighbors_.end(), isBackboneAnchor);
+      if (backbone_degree < static_cast<size_t>(
+            std::max(1, semantic_point_max_connections_)) &&
+          std::find(nodes_to_connect.begin(), nodes_to_connect.end(), node) ==
+            nodes_to_connect.end()) {
+        nodes_to_connect.push_back(node);
+      }
+    }
+  }
+
   size_t accepted = 0;
-  for (auto &node : created) {
+  for (auto &node : nodes_to_connect) {
+    vector<TopoNode::Ptr> anchors;
+    for (const auto &entry : reg_map_idx2ptr_) {
+      if (!entry.second) continue;
+      for (const auto &candidate : entry.second->topo_nodes_) {
+        if (!candidate || candidate == node || candidate->is_viewpoint_ ||
+            candidate->geometry_state_ != TopoGeometryState::Verified ||
+            node->neighbors_.count(candidate)) continue;
+        anchors.push_back(candidate);
+      }
+    }
+    // Prefer the measured frontier. A long odom-to-semantic chord can tie the
+    // measured route in distance but fail the final Bubble-overlap witness
+    // check. Odom is only the bootstrap fallback before any Verified anchor is
+    // available.
+    if (anchors.empty() && odom_node_ && !node->neighbors_.count(odom_node_)) {
+      anchors.push_back(odom_node_);
+    }
+    std::sort(anchors.begin(), anchors.end(),
+      [&node](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
+        return (left->center_ - node->center_).squaredNorm() <
+               (right->center_ - node->center_).squaredNorm();
+      });
+    anchors.erase(std::unique(anchors.begin(), anchors.end()), anchors.end());
+
     vector<TopoNode::Ptr> neighbors;
     vector<vector<Eigen::Vector3f>> paths;
+    const size_t existing_backbone_degree = std::count_if(
+      node->neighbors_.begin(), node->neighbors_.end(), isBackboneAnchor);
+    const size_t desired_connections = static_cast<size_t>(
+      std::max(1, semantic_point_max_connections_));
+    const size_t missing_connections = existing_backbone_degree < desired_connections ?
+      desired_connections - existing_backbone_degree : 0U;
+    const size_t candidate_limit = std::min<size_t>(
+      anchors.size(), static_cast<size_t>(
+        std::max(1, semantic_point_connection_candidates_)));
+    for (size_t i = 0; i < candidate_limit && neighbors.size() < missing_connections; ++i) {
+      const auto &anchor = anchors[i];
+      if (!anchor || (anchor->center_ - node->center_).norm() <= 1e-3F) continue;
+      // The far endpoint is intentionally assumed traversable until measured
+      // geometry arrives. The final published witness is still checked against
+      // all currently known obstacles before it can become executable.
+      neighbors.push_back(anchor);
+      paths.push_back({node->center_, anchor->center_});
+    }
     insertNode(node, neighbors, paths);
-    ++accepted;
+    if (std::find(created.begin(), created.end(), node) != created.end()) ++accepted;
   }
   return accepted + influenced_existing + updated_semantic;
 }
@@ -2624,6 +2736,25 @@ size_t TopoGraph::normalizeConnectivity() {
     }
   }
   return removed;
+}
+
+bool TopoGraph::removeEdge(const TopoNode::Ptr &from, const TopoNode::Ptr &to) {
+  if (!from || !to) return false;
+  const bool existed = from->neighbors_.count(to) != 0 ||
+    to->neighbors_.count(from) != 0 || from->paths_.count(to) != 0 ||
+    to->paths_.count(from) != 0 || from->weight_.count(to) != 0 ||
+    to->weight_.count(from) != 0;
+  from->neighbors_.erase(to);
+  to->neighbors_.erase(from);
+  from->paths_.erase(to);
+  to->paths_.erase(from);
+  from->weight_.erase(to);
+  to->weight_.erase(from);
+  from->edge_clearance_.erase(to);
+  to->edge_clearance_.erase(from);
+  from->unreachable_nbrs_.erase(to);
+  to->unreachable_nbrs_.erase(from);
+  return existed;
 }
 
 void TopoGraph::removeNode(TopoNode::Ptr &node) {

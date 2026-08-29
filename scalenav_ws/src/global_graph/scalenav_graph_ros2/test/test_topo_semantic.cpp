@@ -184,6 +184,33 @@ TEST(TopoGraphM2Contract, TcM2016InsertNodeCreatesSymmetricEdgesAndWitnesses)
   }
 }
 
+TEST(TopoGraphM2Contract, TcM2018RemoveEdgeClearsBothDirections)
+{
+  TopoGraph graph;
+  auto left = std::make_shared<TopoNode>();
+  auto right = std::make_shared<TopoNode>();
+  left->neighbors_.insert(right);
+  right->neighbors_.insert(left);
+  left->paths_[right] = {Eigen::Vector3f::Zero(), Eigen::Vector3f::UnitX()};
+  right->paths_[left] = {Eigen::Vector3f::UnitX(), Eigen::Vector3f::Zero()};
+  left->weight_[right] = right->weight_[left] = 1.0F;
+  left->edge_clearance_[right] = right->edge_clearance_[left] = 2.0F;
+  left->unreachable_nbrs_[right] = right->unreachable_nbrs_[left] = 1;
+
+  EXPECT_TRUE(graph.removeEdge(left, right));
+  EXPECT_TRUE(left->neighbors_.empty());
+  EXPECT_TRUE(right->neighbors_.empty());
+  EXPECT_TRUE(left->paths_.empty());
+  EXPECT_TRUE(right->paths_.empty());
+  EXPECT_TRUE(left->weight_.empty());
+  EXPECT_TRUE(right->weight_.empty());
+  EXPECT_TRUE(left->edge_clearance_.empty());
+  EXPECT_TRUE(right->edge_clearance_.empty());
+  EXPECT_TRUE(left->unreachable_nbrs_.empty());
+  EXPECT_TRUE(right->unreachable_nbrs_.empty());
+  EXPECT_FALSE(graph.removeEdge(left, right));
+}
+
 TEST(TopoGraphM2Contract, TcM2017RemoveNodeIsIdempotent)
 {
   for (int repetition = 0; repetition < 100; ++repetition) {
@@ -752,6 +779,103 @@ TEST(TopoGraphSemanticPrune, AstarNeverUsesUnknownAsTransitTopology)
   ASSERT_EQ(path.size(), 3U);
   EXPECT_EQ(path[1], detour);
   EXPECT_EQ(path.back(), goal);
+}
+
+TEST(TopoGraphSemanticFrontier, CurrentGenerationExtendsNormalFrontierSearch)
+{
+  TopoGraph graph;
+  graph.lidar_map_interface_ = std::make_shared<fast_planner::LIOInterface>();
+  graph.lidar_map_interface_->configureBounds(
+    Eigen::Vector3f(-200.0F, -200.0F, -50.0F),
+    Eigen::Vector3f(200.0F, 200.0F, 50.0F));
+  graph.parallel_bubble_astar_ = std::make_shared<ParallelBubbleAstar>();
+  graph.parallel_bubble_astar_->lidar_map_interface_ = graph.lidar_map_interface_;
+  graph.parallel_bubble_astar_->safe_distance_ = 1.0;
+  auto start = std::make_shared<TopoNode>();
+  auto measured_frontier = std::make_shared<TopoNode>();
+  auto semantic_frontier = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  measured_frontier->center_ = Eigen::Vector3f(20.0F, 0.0F, 1.6F);
+  semantic_frontier->center_ = Eigen::Vector3f(30.0F, 0.0F, 1.6F);
+  start->geometry_state_ = TopoGeometryState::Verified;
+  measured_frontier->geometry_state_ = TopoGeometryState::Verified;
+  semantic_frontier->geometry_state_ = TopoGeometryState::Unknown;
+  semantic_frontier->semantic_score_ = 0.8F;
+  semantic_frontier->semantic_confidence_ = 1.0F;
+  semantic_frontier->semantic_observations_ = 1;
+  semantic_frontier->semantic_stamp_ns_ = 42;
+
+  auto connect = [](const TopoNode::Ptr &left, const TopoNode::Ptr &right,
+                    float clearance) {
+    const float length = (left->center_ - right->center_).norm();
+    left->neighbors_.insert(right);
+    right->neighbors_.insert(left);
+    left->paths_[right] = {left->center_, right->center_};
+    right->paths_[left] = {right->center_, left->center_};
+    left->weight_[right] = length;
+    right->weight_[left] = length;
+    left->edge_clearance_[right] = clearance;
+    right->edge_clearance_[left] = clearance;
+  };
+  connect(start, measured_frontier, 2.0F);
+  connect(start, semantic_frontier, 0.0F);
+
+  std::vector<TopoNode::Ptr> path;
+  TopoGraphSearchStats stats;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(100.0F, 0.0F, 1.6F), path, 0.2,
+    1.0F, 1.0F, {}, 0.0F, 50.0F, &start->center_, 0.0F, false,
+    std::numeric_limits<float>::infinity(), 0.0F, nullptr, 90.0F,
+    0.0F, 0.0F, 0.0F, 0.0F, &stats, 42));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), semantic_frontier);
+
+  path.clear();
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(100.0F, 0.0F, 1.6F), path, 0.2,
+    1.0F, 1.0F, {}, 0.0F, 50.0F, &start->center_, 0.0F, false,
+    std::numeric_limits<float>::infinity(), 0.0F, nullptr, 90.0F,
+    0.0F, 0.0F, 0.0F, 0.0F, nullptr, 43));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), measured_frontier);
+}
+
+TEST(TopoGraphSemanticFrontier, InsertionConnectsOnlyToMeasuredBackbone)
+{
+  TopoGraph graph;
+  graph.min_bd = Eigen::Vector3f(-50.0F, -50.0F, -50.0F);
+  graph.init_region_size_x_ = 5.0;
+  graph.init_region_size_y_ = 5.0;
+  graph.init_region_size_z_ = 5.0;
+  graph.lidar_map_interface_ = std::make_shared<fast_planner::LIOInterface>();
+  graph.lidar_map_interface_->configureBounds(
+    Eigen::Vector3f(-50.0F, -50.0F, -50.0F),
+    Eigen::Vector3f(50.0F, 50.0F, 50.0F));
+  graph.parallel_bubble_astar_ = std::make_shared<ParallelBubbleAstar>();
+  graph.parallel_bubble_astar_->lidar_map_interface_ = graph.lidar_map_interface_;
+
+  graph.odom_node_ = std::make_shared<TopoNode>();
+  graph.odom_node_->role_ = TopoNodeRole::Odom;
+  graph.odom_node_->center_ = Eigen::Vector3f::Zero();
+  auto measured = std::make_shared<TopoNode>();
+  measured->center_ = Eigen::Vector3f(20.0F, 0.0F, 1.6F);
+  measured->geometry_state_ = TopoGeometryState::Verified;
+  graph.getRegionNode(Eigen::Vector3i(14, 10, 10))->topo_nodes_.insert(measured);
+
+  ASSERT_EQ(graph.insertSemanticNodes(
+    {Eigen::Vector3f(30.0F, -4.0F, 1.6F), Eigen::Vector3f(30.0F, 4.0F, 1.6F)},
+    {0.8F, 0.7F}, 0.5F, Eigen::Vector3f::Zero(), 42), 2U);
+  const auto semantic_nodes = graph.semanticNodes(nullptr, 0.0F, 42);
+  ASSERT_EQ(semantic_nodes.size(), 2U);
+  for (const auto &semantic : semantic_nodes) {
+    ASSERT_EQ(semantic->neighbors_.size(), 1U);
+    for (const auto &neighbor : semantic->neighbors_) {
+      ASSERT_TRUE(neighbor);
+      EXPECT_EQ(neighbor->geometry_state_, TopoGeometryState::Verified);
+    }
+  }
+  EXPECT_EQ(semantic_nodes[0]->neighbors_.count(semantic_nodes[1]), 0U);
+  EXPECT_EQ(semantic_nodes[1]->neighbors_.count(semantic_nodes[0]), 0U);
 }
 
 TEST(TopoGraphM3Contract, TcM3018FixedLayerDoesNotFlattenSemanticRows)
@@ -1334,7 +1458,7 @@ TEST(TopoGraphM4Contract, TcM4018EquivalentRiskDensityKeepsFrontierGoalRanking)
   }
 }
 
-TEST(TopoGraphM4Contract, TcM4022OnlyVerifiedBubbleCanBeFrontierGoal)
+TEST(TopoGraphM4Contract, TcM4022OnlyVerifiedBubbleWithoutActiveSemanticFrame)
 {
   for (int repetition = 0; repetition < 1000; ++repetition) {
     TopoGraph graph;

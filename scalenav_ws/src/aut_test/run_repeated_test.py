@@ -84,9 +84,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--timeout",
-        type=finite_positive,
+        type=finite_nonnegative,
         default=90.0,
-        help="mission timeout after publishing the goal in seconds (default: 90)",
+        help="mission timeout in seconds; 0 disables the limit (default: 90)",
     )
     parser.add_argument(
         "--startup-timeout",
@@ -156,6 +156,29 @@ def parse_args() -> argparse.Namespace:
         "--no-semantic",
         action="store_true",
         help="pass --no-semantic to ScaleNav start.sh",
+    )
+    parser.add_argument(
+        "--prompt",
+        default="tree, blocks, wall, line",
+        help="open-vocabulary query passed to the semantic front end",
+    )
+    parser.add_argument(
+        "--semantic-cost-weight",
+        type=finite_nonnegative,
+        default=2.0,
+        help="semantic route-cost weight (default: 2.0)",
+    )
+    parser.add_argument(
+        "--semantic-route-influence-m",
+        type=finite_nonnegative,
+        default=5.0,
+        help="route semantic influence radius in metres (default: 5.0)",
+    )
+    parser.add_argument(
+        "--semantic-point-influence-m",
+        type=finite_nonnegative,
+        default=5.0,
+        help="far-field semantic-node influence radius in metres (default: 5.0)",
     )
     parser.add_argument(
         "--dry-run",
@@ -302,6 +325,11 @@ def start_stack(
         ]
     environment = os.environ.copy()
     environment["SCALENAV_LOG_DIR"] = str(args.log_root.resolve())
+    if args.stack == "scalenav":
+        environment["PROMPT"] = args.prompt
+        environment["SEMANTIC_COST_WEIGHT"] = str(args.semantic_cost_weight)
+        environment["SEMANTIC_ROUTE_INFLUENCE_M"] = str(args.semantic_route_influence_m)
+        environment["SEMANTIC_POINT_INFLUENCE_M"] = str(args.semantic_point_influence_m)
     console = console_path.open("w", encoding="utf-8", buffering=1)
     process = subprocess.Popen(
         command,
@@ -531,11 +559,15 @@ class MissionMonitor:
         max_speed = 0.0
         samples = 0
         outcome = "timeout"
-        detail = f"mission exceeded {args.timeout:.1f} s"
+        detail = (
+            f"mission exceeded {args.timeout:.1f} s"
+            if args.timeout > 0.0
+            else "mission ended without a timeout limit"
+        )
 
         while not STOP_REQUESTED:
             elapsed = time.monotonic() - mission_start
-            if elapsed >= args.timeout:
+            if args.timeout > 0.0 and elapsed >= args.timeout:
                 break
             stack_error = self.stack_error()
             if stack_error:
@@ -715,6 +747,10 @@ def configuration(args: argparse.Namespace) -> dict[str, Any]:
         "speed_tolerance_mps": args.speed_tolerance,
         "airsim": f"{args.airsim_host}:{args.airsim_port}",
         "semantic": not args.no_semantic,
+        "prompt": args.prompt,
+        "semantic_cost_weight": args.semantic_cost_weight,
+        "semantic_route_influence_m": args.semantic_route_influence_m,
+        "semantic_point_influence_m": args.semantic_point_influence_m,
         "log_root": str(args.log_root.resolve()),
         "results_root": str(args.results_root.resolve()),
     }

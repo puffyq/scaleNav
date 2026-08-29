@@ -45,6 +45,7 @@ route_progress_error_scale_m: 2.0
 dense_route_points: 128
 dense_route_step_m: 0.25
 route_dropout_probability: 0.1
+route_incompatible_score_cost: 10.0  # score-only penalty outside the route goal sector
 robot_radius_m: 0.3
 safety_margin_m: 0.2
 route_start_tolerance_m: 1.0

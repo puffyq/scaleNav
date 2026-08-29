@@ -531,8 +531,11 @@ public:
   // adjacent topology vertices and removes valid branches.
   size_t deduplicateNearbyNodes(float tolerance_m = 0.05F);
   // Remove stale one-way neighbor references left by an incremental diff.
-  // EPIC edges are undirected; a half-edge is never a valid planning edge.
+  // ScaleNav edges are undirected; a half-edge is never a valid planning edge.
   size_t normalizeConnectivity();
+  // Remove one undirected edge and all cached edge state.  This is used when
+  // a provisional semantic connection is disproved by the live witness check.
+  bool removeEdge(const TopoNode::Ptr &from, const TopoNode::Ptr &to);
   void removeNode(TopoNode::Ptr &node);
   std::vector<TopoNode::Ptr> semanticNodes(
       const Eigen::Vector3f *origin = nullptr,
@@ -560,6 +563,11 @@ private:
   bool use_prior_map_;
   double update_connection_timeout, insert_node_timeout;
   double semantic_node_match_distance_ = 2.5;
+  // Current-generation virtual semantic endpoints extend the observable
+  // topology beyond the measured Bubble frontier.  They attach only to the
+  // verified graph backbone and are replaced when measured geometry arrives.
+  int semantic_point_connection_candidates_ = 4;
+  int semantic_point_max_connections_ = 2;
   // Virtual-depth semantic points influence nearby ordinary edges too;
   // otherwise A* can pass beside a risk node without ever visiting it.
   double semantic_point_influence_m_ = 5.0;

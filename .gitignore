@@ -84,4 +84,13 @@ scalenav_ws/src/**/install/
 scalenav_ws/src/**/log/
 train_scalenav/saved_corrected/
 train_scalenav/saved_large/
+train_scalenav/saved_fixed_altitude/
 scalenav_ws/src/aut_test/results/
+
+# Local replay diagnostics and generated semantic demo outputs.
+train_scalenav/*replay*.json
+train_scalenav/_*.json
+train_scalav_tmp.json
+scalenav_ws/scalenav_flight_statistics.csv
+powerline_pearl_real.png
+powerline_semantic_demo/

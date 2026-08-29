@@ -33,14 +33,19 @@ from route_yopo_control_core import (
     LocalRouteId,
     RouteMode,
     build_route_features,
+    clip_goal_to_camera_fov,
+    enforce_route_progress,
     conservative_depth_reduce,
     decide_route_mode,
     project_endstates_to_altitude,
     quaternion_xyzw_to_matrix,
+    reanchor_route_path,
     route_signature,
+    route_timestamps_coherent,
     sample_poly5_candidate_states,
     select_first_certified,
     validate_depth_trajectory,
+    validate_route_corridor,
     world_to_body_flu,
 )
 
@@ -391,10 +396,11 @@ class RouteYopoController(Node):
         )
         route_coherent = False
         if frontier_fresh and route_fresh:
-            source_stamps = [frontier_record[2], path_record[2], clearance_record[2]]
-            positive_stamps = [stamp for stamp in source_stamps if stamp > 0.0]
-            route_coherent = len(positive_stamps) == 3 and (
-                max(positive_stamps) - min(positive_stamps) <= self.args.compat_stamp_slop
+            route_coherent = route_timestamps_coherent(
+                path_record[2],
+                clearance_record[2],
+                frontier_record[2],
+                stamp_slop_s=self.args.compat_stamp_slop,
             )
 
         route_valid = False
@@ -436,7 +442,12 @@ class RouteYopoController(Node):
         route_features = np.zeros((count, 4), dtype=np.float32)
         sample_distances = self.anchors.copy()
         if decision.mode == RouteMode.ROUTE:
-            point_radii = np.full(len(route_path), safe_radius_m, dtype=np.float32)
+            # Preserve the training-time route feature distribution when the
+            # compatibility clearance is temporarily below the robot margin.
+            # The floor is guidance only; corridor certification remains
+            # disabled for non-positive safe radii below.
+            feature_radius = max(safe_radius_m, 0.25)
+            point_radii = np.full(len(route_path), feature_radius, dtype=np.float32)
             centers_world, sampled_radii, route_mask, sample_distances = (
                 self.sample_route_bubbles(route_path, point_radii, self.anchors)
             )
@@ -451,9 +462,11 @@ class RouteYopoController(Node):
             )
             route_id = self.route_ids.observe(route_signature(frontier_world, route_path))
 
-        frontier_body = world_to_body_flu(frontier_world, position_world, rotation).astype(
-            np.float32
-        )
+        frontier_body = clip_goal_to_camera_fov(
+            world_to_body_flu(frontier_world, position_world, rotation),
+            horizontal_fov_deg=self.args.source_horizontal_fov,
+            vertical_fov_deg=self.args.source_vertical_fov,
+        ).astype(np.float32)
         motion_body = np.concatenate(
             (rotation.T @ velocity_world, rotation.T @ acceleration_world)
         ).astype(np.float32)
@@ -486,6 +499,13 @@ class RouteYopoController(Node):
             endstate[0].permute(1, 2, 0).reshape(-1, 9).detach().cpu().numpy()
         )
         scores = score[0].reshape(-1).detach().cpu().numpy()
+        if decision.mode == RouteMode.ROUTE:
+            endstates_body = enforce_route_progress(
+                endstates_body,
+                frontier_body,
+                minimum_forward_m=2.0,
+                maximum_forward_m=8.0,
+            )
         raw_endpoint_world = position_world[None] + endstates_body[:, :3] @ rotation.T
         if decision.mode == RouteMode.ROUTE:
             endstates_body = project_endstates_to_altitude(
@@ -523,6 +543,16 @@ class RouteYopoController(Node):
                 route_altitude_m=route_altitude_m
                 if decision.mode == RouteMode.ROUTE
                 else None,
+                route_path_world=route_path
+                if decision.mode == RouteMode.ROUTE
+                and math.isfinite(safe_radius_m)
+                and safe_radius_m > 0.0
+                else None,
+                route_safe_radius_m=safe_radius_m
+                if decision.mode == RouteMode.ROUTE
+                and math.isfinite(safe_radius_m)
+                and safe_radius_m > 0.0
+                else None,
             )
             for trajectory in trajectories
         ]
@@ -549,7 +579,9 @@ class RouteYopoController(Node):
             "mask": route_mask.tolist(),
             "anchor_or_feature_distances_m": sample_distances.tolist(),
             "radius_source": "scalenav_path_min_clearance_broadcast",
+            "corridor_map": "polyline_capsule_sdf",
             "path_safe_radius_m": safe_radius_m if math.isfinite(safe_radius_m) else None,
+            "tracking_tolerance_m": self.args.route_corridor_tracking_tolerance,
             "fixed_altitude_m": route_altitude_m
             if math.isfinite(route_altitude_m)
             else None,
@@ -622,8 +654,18 @@ class RouteYopoController(Node):
             return False, "path_not_fixed_altitude", path, math.nan, math.nan
         start_error = float(np.linalg.norm(path[0] - position))
         if start_error > self.args.route_start_tolerance:
-            return False, "path_start_discontinuous", path, math.nan, math.nan
-        if start_error > 1.0e-3:
+            anchored, nearest_error = reanchor_route_path(
+                path,
+                position,
+                maximum_distance_m=float(
+                getattr(self.args, "route_reanchor_tolerance", 5.0)
+                ),
+            )
+            if anchored is None:
+                return False, "path_start_discontinuous", path, math.nan, math.nan
+            path = anchored
+            start_error = nearest_error
+        elif start_error > 1.0e-3:
             path = np.concatenate((position[None], path), axis=0)
         if float(np.linalg.norm(path[-1] - frontier)) > self.args.route_terminal_tolerance:
             return False, "path_terminal_mismatch", path, math.nan, math.nan
@@ -631,8 +673,12 @@ class RouteYopoController(Node):
         if length < self.args.minimum_route_length:
             return False, "path_too_short", path, math.nan, math.nan
         safe_radius = path_clearance_m - self.args.robot_radius - self.args.safety_margin
+        # Keep the route geometry and fixed-altitude contract usable even when
+        # the compatibility clearance topic reports a transiently small
+        # radius.  A non-positive radius disables corridor-map fallback; the
+        # live depth gate remains authoritative for collision certification.
         if safe_radius <= 0.0:
-            return False, "path_safe_space_insufficient", path, safe_radius, math.nan
+            return True, "valid_fixed_altitude_route_without_corridor", path, 0.0, route_altitude
         return True, "valid_fixed_altitude_route", path, safe_radius, route_altitude
 
     def _validate_trajectory(
@@ -643,8 +689,20 @@ class RouteYopoController(Node):
         rotation_body_to_world: np.ndarray,
         *,
         route_altitude_m: float | None = None,
+        route_path_world: np.ndarray | None = None,
+        route_safe_radius_m: float | None = None,
     ) -> dict[str, Any]:
-        return validate_depth_trajectory(
+        corridor: dict[str, Any] | None = None
+        if route_path_world is not None or route_safe_radius_m is not None:
+            if route_path_world is None or route_safe_radius_m is None:
+                raise ValueError("route path and safe radius must be provided together")
+            corridor = validate_route_corridor(
+                trajectory_world,
+                route_path_world,
+                route_safe_radius_m,
+                self.args.route_corridor_tracking_tolerance,
+            )
+        result = validate_depth_trajectory(
             query,
             trajectory_world,
             position_world
@@ -660,6 +718,28 @@ class RouteYopoController(Node):
             if route_altitude_m is not None
             else None,
         )
+        # The corridor is a route guide, not a second local obstacle planner.
+        # A trajectory may leave it to avoid a newly observed obstacle, so a
+        # corridor violation must not discard an otherwise depth-certified
+        # candidate.  Conversely, an unknown depth sample can only fall back
+        # to the corridor map when the trajectory remains inside the map.
+        if (
+            result["state"] == "UNVALIDATED"
+            and corridor is not None
+            and corridor["state"] == "CERTIFIED"
+        ):
+            result = dict(result)
+            result["state"] = "CERTIFIED"
+            result["validation_source"] = "route_corridor_map_unknown_depth"
+        if corridor is not None:
+            result.update(
+                {
+                    name: value
+                    for name, value in corridor.items()
+                    if name != "state"
+                }
+            )
+        return result
 
     def _publish_path(self, trajectory: np.ndarray, source: Image) -> None:
         message = PathMsg()
@@ -693,6 +773,7 @@ class RouteYopoController(Node):
             "INVALID": (0.90, 0.15, 0.12, 0.60),
             "ALTITUDE": (0.72, 0.20, 0.75, 0.60),
             "ROUTE_ALTITUDE": (0.85, 0.35, 0.75, 0.65),
+            "ROUTE_CORRIDOR": (0.95, 0.45, 0.10, 0.65),
             "NON_FINITE": (0.35, 0.35, 0.35, 0.50),
         }
         for index, trajectory in enumerate(trajectories):
@@ -881,7 +962,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default=str(root / "train_scalenav/saved_corrected/YOPO_5/best.pth"),
+        default=str(root / "train_scalenav/saved_fixed_altitude/YOPO_0/best.pth"),
     )
     parser.add_argument("--train-root", default=str(root / "train_scalenav"))
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -900,9 +981,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--route-timeout", type=float, default=1.0)
     parser.add_argument("--compat-stamp-slop", type=float, default=0.20)
     parser.add_argument("--route-start-tolerance", type=float, default=1.5)
+    parser.add_argument("--route-reanchor-tolerance", type=float, default=5.0)
     parser.add_argument("--route-terminal-tolerance", type=float, default=2.0)
     parser.add_argument("--route-planarity-tolerance", type=float, default=0.05)
     parser.add_argument("--route-altitude-tolerance", type=float, default=0.25)
+    parser.add_argument("--route-corridor-tracking-tolerance", type=float, default=0.1)
     parser.add_argument("--minimum-route-length", type=float, default=0.5)
     parser.add_argument("--robot-radius", type=float, default=0.3)
     parser.add_argument("--safety-margin", type=float, default=0.2)
@@ -927,6 +1010,8 @@ def parse_args() -> argparse.Namespace:
         or args.safety_samples < 101
         or args.route_planarity_tolerance <= 0.0
         or args.route_altitude_tolerance <= 0.0
+        or args.route_corridor_tracking_tolerance < 0.0
+        or args.route_corridor_tracking_tolerance > args.safety_margin
         or not all(math.isfinite(value) for value in args.camera_translation_flu)
     ):
         parser.error("update rate must be positive and safety samples must be at least 101")

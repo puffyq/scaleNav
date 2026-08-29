@@ -260,6 +260,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     declare_parameter<double>("bubble_topo/frontier_bubble_min_radius", 0.65);
     declare_parameter<double>("bubble_topo/cube_discrete_size", 0.40);
     declare_parameter<double>("bubble_topo/semantic_node_match_distance", 2.5);
+    declare_parameter<int>("bubble_topo/semantic_point_connection_candidates", 4);
+    declare_parameter<int>("bubble_topo/semantic_point_max_connections", 2);
     clearance_cost_weight_ = declare_parameter<double>(
       "bubble_topo/clearance_cost_weight", 2.0);
     clearance_target_m_ = declare_parameter<double>(
@@ -2556,6 +2558,24 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         static_cast<float>(std::max(0.45, semantic_point_radius_m_)),
         origin, frame->stamp_ns, semantic_confidences);
       semantic_candidates = semantic_centers.size();
+      std::unordered_set<TopoNode::Ptr> counted_semantic_nodes;
+      for (const auto &entry : topo->reg_map_idx2ptr_) {
+        if (!entry.second) continue;
+        for (const auto &node : entry.second->topo_nodes_) {
+          if (!node || !counted_semantic_nodes.insert(node).second ||
+              node->geometry_state_ != TopoGeometryState::Unknown ||
+              node->semantic_stamp_ns_ != frame->stamp_ns ||
+              node->semantic_observations_ == 0) continue;
+          const bool connected_to_backbone = std::any_of(
+            node->neighbors_.begin(), node->neighbors_.end(),
+            [](const TopoNode::Ptr &neighbor) {
+              return neighbor &&
+                (neighbor->role_ == TopoNodeRole::Odom ||
+                 neighbor->geometry_state_ == TopoGeometryState::Verified);
+            });
+          if (connected_to_backbone) ++semantic_connected_nodes;
+        }
+      }
       if (virtual_semantic_prune_enabled_) {
         std::unordered_set<std::uint64_t> protected_ids;
         for (const auto &node : accepted_route_.topology_path) {
@@ -2804,7 +2824,16 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     witness_edges.points.clear();
     witness_edges.colors.clear();
 
+    visualization_msgs::msg::Marker semantic_links = edges_marker;
+    semantic_links.ns = "scalenav_semantic_links";
+    semantic_links.id = 4;
+    semantic_links.scale.x = 0.065;
+    setColor(semantic_links.color, kCandidate, 0.80F);
+    semantic_links.points.clear();
+    semantic_links.colors.clear();
+
     std::unordered_set<TopoNode::Ptr> visited;
+    const std::int64_t active_semantic_stamp_ns = activeVirtualSemanticStampNs();
     for (const auto &entry : topo->reg_map_idx2ptr_) {
       if (!entry.second) continue;
       for (const auto &node : entry.second->topo_nodes_) {
@@ -2826,6 +2855,15 @@ class ScaleNavGraphNode final : public rclcpp::Node {
           semantic_label_candidates.push_back(node);
           ++stats.virtual_semantic_nodes;
           stats.semantic_max = std::max(stats.semantic_max, node->semantic_score_);
+          if (node->semantic_stamp_ns_ == active_semantic_stamp_ns) {
+            for (const auto &neighbor : node->neighbors_) {
+              if (!neighbor ||
+                  (neighbor->role_ != TopoNodeRole::Odom &&
+                   neighbor->geometry_state_ != TopoGeometryState::Verified)) continue;
+              semantic_links.points.push_back(toPoint(node->center_));
+              semantic_links.points.push_back(toPoint(neighbor->center_));
+            }
+          }
           continue;
         }
         skeleton_nodes.points.push_back(toPoint(node->center_));
@@ -2903,6 +2941,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     for (auto &label : semantic_labels.markers) graph.markers.push_back(std::move(label));
     graph.markers.push_back(edges_marker);
     graph.markers.push_back(witness_edges);
+    graph.markers.push_back(semantic_links);
 
     visualization_msgs::msg::Marker path_marker = edges_marker;
     path_marker.ns = "scalenav_astar_topology_path";
@@ -3040,6 +3079,33 @@ class ScaleNavGraphNode final : public rclcpp::Node {
           witness_info.failed_point.z(), witness_info.clearance, witness_info.radius,
           witness_info.predecessor_index, witness_info.predecessor_distance,
           witness_info.predecessor_radius);
+        // A semantic endpoint is connected optimistically so it can extend
+        // the next frontier search.  Once the live witness check disproves
+        // that provisional chord, remove it immediately; otherwise A* keeps
+        // selecting the same unreachable semantic edge on every replan.
+        const auto isVirtualSemantic = [](const TopoNode::Ptr &node) {
+          return node && node->geometry_state_ == TopoGeometryState::Unknown &&
+            node->semantic_observations_ > 0;
+        };
+        const auto isBackbone = [](const TopoNode::Ptr &node) {
+          return node && (node->role_ == TopoNodeRole::Odom ||
+            node->geometry_state_ == TopoGeometryState::Verified);
+        };
+        std::size_t removed_semantic_edges = 0;
+        for (std::size_t i = 1; i < path_nodes.size(); ++i) {
+          const auto &from = path_nodes[i - 1];
+          const auto &to = path_nodes[i];
+          if ((isVirtualSemantic(from) && isBackbone(to)) ||
+              (isBackbone(from) && isVirtualSemantic(to))) {
+            if (topo->removeEdge(from, to)) ++removed_semantic_edges;
+          }
+        }
+        if (removed_semantic_edges > 0) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "[ScaleNav semantic edge] detached_unreachable=%zu after witness failure",
+            removed_semantic_edges);
+        }
         selected_witness_path.clear();
         stats.witness_points = 0;
         witness_rejected = true;

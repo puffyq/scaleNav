@@ -23,6 +23,7 @@ PYTHONPATH="$ROOT" "$PYTHON" train_yopo.py \
   --bubble-weight "${BUBBLE_WEIGHT:-0.01}" \
   --path-mse-weight "${PATH_MSE_WEIGHT:-0.2}" \
   --centerline-weight "${CENTERLINE_WEIGHT:-0.1}" \
+  --route-incompatible-score-cost "${ROUTE_INCOMPATIBLE_SCORE_COST:-10.0}" \
   --progress-weight "${PROGRESS_WEIGHT:-0.1}" \
   --progress-floor-weight 0.0 \
   --score-ranking-weight "${SCORE_RANKING_WEIGHT:-1.0}" \

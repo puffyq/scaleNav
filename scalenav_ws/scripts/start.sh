@@ -2,9 +2,11 @@
 set -Eeo pipefail
 
 # ── Tuning ─────────────────────────────────────────────────────────────────
-PROMPT="tree, blocks, wall"   # PEARL prompt (higher score = higher risk)
+PROMPT="${PROMPT:-tree, blocks, wall}"   # PEARL prompt (higher score = higher risk)
 SEMANTIC=1                    # 1=text heatmap on, 0=geometry only
-SEMANTIC_COST_WEIGHT="2.0"    # A* semantic repulsion; 0=off
+SEMANTIC_COST_WEIGHT="${SEMANTIC_COST_WEIGHT:-2.0}"    # A* semantic repulsion; 0=off
+SEMANTIC_ROUTE_INFLUENCE_M="${SEMANTIC_ROUTE_INFLUENCE_M:-5.0}"
+SEMANTIC_POINT_INFLUENCE_M="${SEMANTIC_POINT_INFLUENCE_M:-5.0}"
 GRAPH_FIXED_LAYER="${GRAPH_FIXED_LAYER:-true}"  # graph topology: true=single layer, false=3D
 DEVICE="cuda"
 RATE="2"                      # heatmap Hz
@@ -38,10 +40,27 @@ while (($#)); do
       RATE="$2"
       shift 2
       ;;
+    --semantic-cost-weight)
+      if (($# < 2)); then echo "--semantic-cost-weight needs a value" >&2; exit 2; fi
+      SEMANTIC_COST_WEIGHT="$2"
+      shift 2
+      ;;
+    --semantic-route-influence-m)
+      if (($# < 2)); then echo "--semantic-route-influence-m needs a value" >&2; exit 2; fi
+      SEMANTIC_ROUTE_INFLUENCE_M="$2"
+      shift 2
+      ;;
+    --semantic-point-influence-m)
+      if (($# < 2)); then echo "--semantic-point-influence-m needs a value" >&2; exit 2; fi
+      SEMANTIC_POINT_INFLUENCE_M="$2"
+      shift 2
+      ;;
     --no-semantic) SEMANTIC=0; shift ;;
     --capture-depth) SAVE_DEPTH=1; shift ;;
     -h|--help)
       echo "Usage: $0 [--prompt TEXT] [--rate HZ] [--no-semantic] [--capture-depth]"
+      echo "       [--semantic-cost-weight VALUE] [--semantic-route-influence-m VALUE]"
+      echo "       [--semantic-point-influence-m VALUE]"
       echo "       GRAPH_FIXED_LAYER=true|false $0 ... (default: true)"
       echo "       SCALENAV_LOG_DIR=/path/to/logs $0 ... (default: $WS/../log_scalenav)"
       exit 0
@@ -99,7 +118,9 @@ run ros2 launch scalenav_graph_ros2 scalenav_graph.launch.py \
   odom_twist_frame:=body semantic_heatmap_topic:=/scalenav/text_heatmap_raw \
   flight_statistics_file:=/dev/null graph_log_file:=/dev/null \
   trajectory_speed_color_max_mps:="$MAXIMUM_TRAJECTORY_SPEED_MPS" \
-  semantic_cost_weight:="$SEMANTIC_COST_WEIGHT"
+  semantic_cost_weight:="$SEMANTIC_COST_WEIGHT" \
+  semantic_route_influence_m:="$SEMANTIC_ROUTE_INFLUENCE_M" \
+  semantic_point_influence_m:="$SEMANTIC_POINT_INFLUENCE_M"
 
 if ((SEMANTIC)); then
   run "$PYTHON" "$SRC/scalenav/text_heatmap_ros2.py" \
@@ -125,5 +146,5 @@ else
   start_planner
 fi
 
-echo "started; goal=/goal_pose semantic=$SEMANTIC semantic_cost_weight=$SEMANTIC_COST_WEIGHT graph_fixed_layer=$GRAPH_FIXED_LAYER maximum_trajectory_speed_mps=$MAXIMUM_TRAJECTORY_SPEED_MPS ignore_collision=$IGNORE_COLLISION airsim_reset=$AIRSIM_RESET_ON_START recorded_logs=$LOG_ROOT"
+echo "started; goal=/goal_pose semantic=$SEMANTIC prompt=$PROMPT semantic_cost_weight=$SEMANTIC_COST_WEIGHT semantic_route_influence_m=$SEMANTIC_ROUTE_INFLUENCE_M semantic_point_influence_m=$SEMANTIC_POINT_INFLUENCE_M graph_fixed_layer=$GRAPH_FIXED_LAYER maximum_trajectory_speed_mps=$MAXIMUM_TRAJECTORY_SPEED_MPS ignore_collision=$IGNORE_COLLISION airsim_reset=$AIRSIM_RESET_ON_START recorded_logs=$LOG_ROOT"
 wait -n $PIDS

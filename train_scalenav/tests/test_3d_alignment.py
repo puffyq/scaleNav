@@ -120,6 +120,16 @@ def test_route_altitude_projection_preserves_xy_and_frontier_fallback():
     torch.testing.assert_close(projected[2][1], acceleration[1])
 
 
+def test_route_supervision_targets_only_angularly_compatible_primitive():
+    transform = StateTransform()
+    compatible = transform.route_primitive_compatibility(
+        torch.tensor([[10.0, 0.0, 0.0], [10.0, 20.0, 0.0]])
+    )
+    assert compatible.shape == (2, 3, 5)
+    assert torch.nonzero(compatible[0], as_tuple=False).tolist() == [[1, 2]]
+    assert compatible[1].sum() >= 1
+
+
 def test_observation_3d_primitive_transform_matches_frozen_baseline():
     """Body-frame v/a/goal preprocessing must preserve all axes and order."""
     transform = StateTransform()

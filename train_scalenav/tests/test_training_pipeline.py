@@ -130,6 +130,7 @@ def test_one_training_batch_backpropagates_all_costs(
     after = trainer.policy.yopo_head.model[0].weight.detach()
     assert np.isfinite(list(metrics.values())).all()
     assert metrics["path_progress"] > 0.0
+    assert metrics["route_compatible_primitives"] >= 1.0
     assert not torch.equal(before, after)
     trainer.save_checkpoint(trainer.output_path / "smoke.pth")
     checkpoint = torch.load(

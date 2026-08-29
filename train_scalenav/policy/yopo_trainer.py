@@ -214,6 +214,9 @@ class YopoTrainer:
         )
         route_active = (batch["dense_route_mask"] > 0.5).any(dim=1)
         route_active_expanded = route_active.repeat_interleave(self.traj_num)
+        route_compatible = self.policy.state_transform.route_primitive_compatibility(
+            batch["frontier_body"]
+        ).reshape(batch_size * self.traj_num)
         raw_route_altitude_error = torch.abs(
             end_position_world[:, 2] - frontier_expanded[:, 2]
         )
@@ -253,9 +256,16 @@ class YopoTrainer:
         # the only additional route supervision. Bubble violation is retained
         # as a diagnostic rather than a separate total-loss component.
         route_weight = batch["route_quality_weight"].repeat_interleave(self.traj_num)
-        costs["path_corridor"] = costs["path_corridor"] * route_weight
-        costs["path_mse"] = costs["path_mse"] * route_weight
-        costs["path_progress"] = costs["path_progress"] * route_weight
+        route_supervision_weight = route_weight * route_compatible.to(route_weight.dtype)
+        for name in (
+            "path_corridor",
+            "path_mse",
+            "path_progress",
+            "path_progress_floor",
+            "path_centerline",
+            "path_tangent",
+        ):
+            costs[name] = costs[name] * route_supervision_weight
         costs["safety"] = costs["safety"] + costs["path_corridor"]
         total_names = (
             "smooth", "safety", "frontier", "acceleration",
@@ -263,10 +273,14 @@ class YopoTrainer:
         )
         total_cost = torch.stack(tuple(costs[name] for name in total_names), dim=0).sum(dim=0)
         trajectory_loss = total_cost.mean()
-        score_loss = F.smooth_l1_loss(score_flat, total_cost.detach())
+        incompatible = route_active_expanded & ~route_compatible
+        score_target_cost = total_cost.detach() + incompatible.to(total_cost.dtype) * float(
+            cfg["route_incompatible_score_cost"]
+        )
+        score_loss = F.smooth_l1_loss(score_flat, score_target_cost)
         score_ranking_loss = self._score_ranking_loss(
             score_flat.view(batch_size, self.traj_num),
-            total_cost.detach().view(batch_size, self.traj_num),
+            score_target_cost.view(batch_size, self.traj_num),
         )
         # Candidate generation remains governed by the original YOPO score
         # regression.  Keep the old ranking metric for opt-in ablations, but
@@ -284,11 +298,15 @@ class YopoTrainer:
             + float(cfg["safety_ranking_weight"]) * safety_score_loss
         )
 
-        total_by_sample = total_cost.view(batch_size, self.traj_num)
+        total_by_sample = score_target_cost.view(batch_size, self.traj_num)
+        physical_by_sample = total_cost.view(batch_size, self.traj_num)
         score_by_sample = score_flat.view(batch_size, self.traj_num)
         selected_index = score_by_sample.argmin(dim=1)
         oracle_cost, oracle_index = total_by_sample.min(dim=1)
         selected_cost = torch.gather(total_by_sample, 1, selected_index[:, None]).squeeze(1)
+        selected_physical_cost = torch.gather(
+            physical_by_sample, 1, selected_index[:, None]
+        ).squeeze(1)
         metrics = {
             "total_loss": float(total_loss.detach()),
             "trajectory_loss": float(trajectory_loss.detach()),
@@ -298,7 +316,11 @@ class YopoTrainer:
             "selected_total_cost": float(selected_cost.mean().detach()),
             "oracle_total_cost": float(oracle_cost.mean().detach()),
             "selection_regret": float((selected_cost - oracle_cost).mean().detach()),
+            "selected_physical_cost": float(selected_physical_cost.mean().detach()),
             "top1": float((selected_index == oracle_index).float().mean().detach()),
+            "route_compatible_primitives": float(
+                route_compatible.view(batch_size, self.traj_num).float().sum(dim=1).mean()
+            ),
             "raw_route_altitude_error": float(
                 raw_route_altitude_error[route_active_expanded].mean().detach()
             )
@@ -409,6 +431,9 @@ class YopoTrainer:
                 "route_anchor_distances_m": list(cfg["route_anchor_distances_m"]),
                 "local_subgoal_distance_m": float(cfg["local_subgoal_distance_m"]),
                 "fixed_route_altitude_projection": True,
+                "route_incompatible_score_cost": float(
+                    cfg["route_incompatible_score_cost"]
+                ),
                 "loss_weights": {
                     name: float(cfg[name])
                     for name in (
@@ -461,6 +486,9 @@ class YopoTrainer:
             "route_dataset_version": int(cfg["route_dataset_version"]),
             "local_subgoal_distance_m": float(cfg["local_subgoal_distance_m"]),
             "fixed_route_altitude_projection": True,
+            "route_incompatible_score_cost": float(
+                cfg["route_incompatible_score_cost"]
+            ),
             "loss_weights": {
                 name: float(cfg[name])
                 for name in (

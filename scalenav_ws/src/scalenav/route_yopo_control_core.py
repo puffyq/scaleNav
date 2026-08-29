@@ -23,6 +23,31 @@ class ModeDecision:
     reason: str
 
 
+def route_timestamps_coherent(
+    path_stamp_s: float,
+    clearance_stamp_s: float,
+    frontier_stamp_s: float,
+    *,
+    stamp_slop_s: float,
+) -> bool:
+    """Validate route source stamps, allowing legacy graph markers without stamps."""
+    values = (float(path_stamp_s), float(clearance_stamp_s), float(frontier_stamp_s))
+    if not math.isfinite(stamp_slop_s) or stamp_slop_s < 0.0:
+        raise ValueError("stamp slop must be finite and non-negative")
+    if not all(math.isfinite(value) for value in values):
+        return False
+    if path_stamp_s <= 0.0 or clearance_stamp_s <= 0.0:
+        return False
+    if abs(path_stamp_s - clearance_stamp_s) > stamp_slop_s:
+        return False
+    # MarkerArray publishers in the compatibility stack leave marker.header
+    # unset. Path and clearance are emitted atomically, so their matching
+    # stamps are the authoritative coherence check in that case.
+    if frontier_stamp_s <= 0.0:
+        return True
+    return max(values) - min(values) <= stamp_slop_s
+
+
 def decide_route_mode(
     *,
     frontier_fresh: bool,
@@ -72,6 +97,38 @@ def world_to_body_flu(
     if not all(np.isfinite(value).all() for value in (points, position, rotation)):
         raise ValueError("world/body transform inputs must be finite")
     return (points - position) @ rotation
+
+
+def clip_goal_to_camera_fov(
+    goal_body_flu: np.ndarray,
+    *,
+    horizontal_fov_deg: float,
+    vertical_fov_deg: float,
+    margin_deg: float = 1.0,
+) -> np.ndarray:
+    """Clamp a model goal direction to the camera/lattice FOV boundary."""
+    goal = np.asarray(goal_body_flu, dtype=np.float64).copy()
+    if goal.shape[-1:] != (3,) or not np.isfinite(goal).all():
+        raise ValueError("goal_body_flu must contain finite 3-D vectors")
+    if not all(
+        math.isfinite(value) and value > 0.0
+        for value in (horizontal_fov_deg, vertical_fov_deg)
+    ) or not math.isfinite(margin_deg) or margin_deg < 0.0:
+        raise ValueError("FOV values are invalid")
+    half_yaw = math.radians(max(1.0, horizontal_fov_deg * 0.5 - margin_deg))
+    half_pitch = math.radians(max(1.0, vertical_fov_deg * 0.5 - margin_deg))
+    forward = np.maximum(goal[..., 0], 1.0e-4)
+    yaw = np.arctan2(goal[..., 1], forward)
+    horizontal = np.linalg.norm(goal[..., :2], axis=-1)
+    pitch = np.arctan2(goal[..., 2], np.maximum(horizontal, 1.0e-4))
+    distance = np.linalg.norm(goal, axis=-1)
+    yaw = np.clip(yaw, -half_yaw, half_yaw)
+    pitch = np.clip(pitch, -half_pitch, half_pitch)
+    cos_pitch = np.cos(pitch)
+    goal[..., 0] = distance * cos_pitch * np.cos(yaw)
+    goal[..., 1] = distance * cos_pitch * np.sin(yaw)
+    goal[..., 2] = distance * np.sin(pitch)
+    return goal
 
 
 def conservative_depth_reduce(
@@ -249,6 +306,127 @@ def project_endstates_to_altitude(
     states[:, 3:6] = end_velocity_world @ rotation
     states[:, 6:9] = end_acceleration_world @ rotation
     return states.astype(np.float32)
+
+
+def enforce_route_progress(
+    endstates_body: np.ndarray,
+    frontier_body: np.ndarray,
+    *,
+    minimum_forward_m: float,
+    maximum_forward_m: float,
+) -> np.ndarray:
+    """Prevent a Route primitive head from collapsing to a near-zero step."""
+    states = np.asarray(endstates_body, dtype=np.float64).copy()
+    frontier = np.asarray(frontier_body, dtype=np.float64)
+    if states.ndim != 2 or states.shape[1:] != (9,) or frontier.shape != (3,):
+        raise ValueError("invalid Route progress shapes")
+    if not np.isfinite(states).all() or not np.isfinite(frontier).all():
+        raise ValueError("Route progress inputs must be finite")
+    if minimum_forward_m <= 0.0 or maximum_forward_m < minimum_forward_m:
+        raise ValueError("Route progress limits are invalid")
+    direction = frontier / max(float(np.linalg.norm(frontier)), 1.0e-6)
+    forward = states[:, :3] @ direction
+    target = np.clip(np.maximum(forward, minimum_forward_m), minimum_forward_m, maximum_forward_m)
+    states[:, :3] += (target - forward)[:, None] * direction[None, :]
+    return states.astype(np.float32)
+
+
+def reanchor_route_path(
+    route_path_world: np.ndarray,
+    position_world: np.ndarray,
+    *,
+    maximum_distance_m: float,
+) -> tuple[np.ndarray | None, float]:
+    """Trim a lagging path to the vehicle's nearest point on its polyline."""
+    route = np.asarray(route_path_world, dtype=np.float64)
+    position = np.asarray(position_world, dtype=np.float64)
+    limit = float(maximum_distance_m)
+    if route.ndim != 2 or route.shape[1:] != (3,) or len(route) < 2:
+        raise ValueError("route path must contain at least two 3-D points")
+    if position.shape != (3,) or not np.isfinite(route).all() or not np.isfinite(position).all():
+        raise ValueError("route reanchor inputs must be finite")
+    if not math.isfinite(limit) or limit <= 0.0:
+        raise ValueError("maximum route reanchor distance must be positive")
+    starts = route[:-1]
+    vectors = route[1:] - starts
+    lengths_sq = np.sum(vectors * vectors, axis=1)
+    valid = lengths_sq > 1.0e-12
+    if not np.any(valid):
+        return None, math.inf
+    indices = np.flatnonzero(valid)
+    starts, vectors, lengths_sq = starts[valid], vectors[valid], lengths_sq[valid]
+    alpha = np.clip(((position[None, :] - starts) * vectors).sum(axis=1) / lengths_sq, 0.0, 1.0)
+    closest = starts + alpha[:, None] * vectors
+    distances = np.linalg.norm(closest - position[None, :], axis=1)
+    best = int(np.argmin(distances))
+    distance = float(distances[best])
+    if distance > limit:
+        return None, distance
+    segment_index = int(indices[best])
+    projected = closest[best]
+    pieces = [position[None, :]]
+    if float(np.linalg.norm(projected - position)) > 1.0e-3:
+        pieces.append(projected[None, :])
+    suffix = route[segment_index + 1 :]
+    if len(suffix):
+        pieces.append(suffix)
+    anchored = np.concatenate(pieces, axis=0)
+    keep = np.concatenate(([True], np.linalg.norm(np.diff(anchored, axis=0), axis=1) > 1.0e-4))
+    return anchored[keep], distance
+
+
+def validate_route_corridor(
+    trajectory_world: np.ndarray,
+    route_path_world: np.ndarray,
+    safe_radius_m: float,
+    tracking_tolerance_m: float = 0.0,
+) -> dict[str, Any]:
+    """Query a polyline-capsule corridor SDF for one sampled trajectory."""
+    trajectory = np.asarray(trajectory_world, dtype=np.float64)
+    route = np.asarray(route_path_world, dtype=np.float64)
+    radius = float(safe_radius_m)
+    tracking_tolerance = float(tracking_tolerance_m)
+    if trajectory.ndim != 2 or trajectory.shape[1:] != (3,):
+        raise ValueError("trajectory_world must have shape [S, 3]")
+    if route.ndim != 2 or route.shape[1:] != (3,) or len(route) < 2:
+        raise ValueError("route_path_world must contain at least two 3-D points")
+    if not math.isfinite(radius) or radius <= 0.0:
+        raise ValueError("safe corridor radius must be positive and finite")
+    if not math.isfinite(tracking_tolerance) or tracking_tolerance < 0.0:
+        raise ValueError("corridor tracking tolerance must be non-negative and finite")
+    if not np.isfinite(trajectory).all() or not np.isfinite(route).all():
+        return {
+            "state": "NON_FINITE",
+            "minimum_corridor_margin_m": None,
+            "maximum_corridor_violation_m": None,
+        }
+
+    segment_start = route[:-1]
+    segment_vector = route[1:] - segment_start
+    segment_length_squared = np.sum(segment_vector * segment_vector, axis=1)
+    valid = segment_length_squared > 1.0e-12
+    if not np.any(valid):
+        raise ValueError("route_path_world has no non-degenerate segment")
+    segment_start = segment_start[valid]
+    segment_vector = segment_vector[valid]
+    segment_length_squared = segment_length_squared[valid]
+    offset = trajectory[:, None, :] - segment_start[None, :, :]
+    alpha = np.sum(offset * segment_vector[None, :, :], axis=2)
+    alpha = np.clip(alpha / segment_length_squared[None, :], 0.0, 1.0)
+    closest = segment_start[None, :, :] + alpha[:, :, None] * segment_vector[None, :, :]
+    distance = np.linalg.norm(trajectory[:, None, :] - closest, axis=2).min(axis=1)
+    nominal_margin = radius - distance
+    minimum_nominal_margin = float(np.min(nominal_margin))
+    minimum_margin = minimum_nominal_margin + tracking_tolerance
+    maximum_violation = float(max(0.0, -minimum_margin))
+    return {
+        "state": "CERTIFIED" if minimum_margin >= -1.0e-9 else "ROUTE_CORRIDOR",
+        "minimum_corridor_margin_m": minimum_margin,
+        "minimum_nominal_corridor_margin_m": minimum_nominal_margin,
+        "maximum_corridor_violation_m": maximum_violation,
+        "tracking_tolerance_m": tracking_tolerance,
+        "corridor_query": "polyline_capsule_sdf",
+    }
 
 
 def build_route_features(

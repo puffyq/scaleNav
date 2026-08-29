@@ -126,19 +126,22 @@ cost, never edge validity.}
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{RELATED WORK}
 Reactive planners trade global consistency for latency: RAPPIDS queries a
-depth image \cite{rappids}, EGO-Planner avoids ESDF construction
-\cite{egoplanner}, and YOPO directly generates motion \cite{yopo}.  FASTER
-combines safe search with trajectory optimization \cite{faster}; SUPER advances
-this line with safety-assured point-cloud corridors above $20$~m/s
-\cite{super}.
+depth image \cite{rappids}, NanoMap retains a short range-history
+\cite{nanomap}, EGO-Planner avoids ESDF construction \cite{egoplanner}, and
+learned policies directly generate motion \cite{yopo,loquercio}.  Fast-Planner
+and FASTER combine online search with trajectory optimization
+\cite{fastplanner,faster}; SUPER advances this line with safety-assured
+point-cloud corridors above $20$~m/s \cite{super}.
 ScaleNav does not reproduce SUPER's guarantee or speed.  It adds the orthogonal
 interface of text-conditioned route memory above a local executor.
 
-Persistent maps include hierarchical roadmaps \cite{tare}, distance fields
-\cite{voxblox}, and receding or clustered free-space corridors
-\cite{bubble,epic}.  Their costs remain geometric.  ScaleNav instead preserves
-a selected witness across graph replacement and attaches open-vocabulary risk
-without changing collision validity.
+Persistent exploration begins with frontier selection \cite{yamauchi} and
+extends to incremental frontiers and hierarchical roadmaps \cite{fuel,tare}.
+OctoMap stores probabilistic occupancy \cite{octomap}, Voxblox stores distance
+fields \cite{voxblox}, and receding or clustered free-space corridors provide
+lighter planning structure \cite{bubble,epic}.  Their costs remain geometric.
+ScaleNav instead preserves a selected witness across graph replacement and
+attaches open-vocabulary risk without changing collision validity.
 
 Open-vocabulary models align text with image regions \cite{clip,pearl} and can
 be lifted into 3-D maps \cite{openscene}.  VLFM selects
@@ -576,9 +579,9 @@ $(x,y,z)=(0.0,140.0,1.6)$~m; each trial is a single one-way flight and no
 return leg is included in its time, distance, or success metrics.  The offline
 and graph-reuse protocols are specified separately in their subsections.
 The topological planner operates on a 1.6-m horizontal graph layer.
-Each closed-loop condition contains at
-least 20 paired trials with identical initial states, goals, scenes, and random
-seeds across methods.  We report the mean, standard deviation, and 95\%
+Each closed-loop condition contains 10 paired trials with identical initial
+states, goals, scenes, and random seeds across methods.  We report the mean,
+standard deviation, and 95\%
 confidence interval.
 Paired continuous metrics use a two-sided Wilcoxon signed-rank test.
 Success proportions use paired bootstrap intervals.
@@ -656,23 +659,19 @@ partial online map.
 
 \subsubsection{Metrics}
 Following the benchmark conventions of EGO-Planner and SUPER, the primary
-closed-loop metrics are success rate (goal reached without collision or
-timeout), safe rate (no collision or dynamically infeasible trajectory),
-collision/failure rate, path length,
-flight time, average flight speed, and planning time.  These metrics are
-reported for every external baseline and ScaleNav under identical starts and
-goals.  For shortest mission length $L^\star$, flown length $L$, and binary
-success $S$, we report the all-trial path efficiency
-$\eta_{\rm SPL}=S L^\star/\max(L,L^\star)$.  Completion time $T$ runs from
-the goal command until the vehicle enters the goal tolerance with admissible
-speed, and $\bar v=L/T$.  Raw $L$, $T$, and $\bar v$ are reported over
-successful trials; failures remain represented by success, collision,
-$\eta_{\rm SPL}$, and the fixed timeout.  This prevents early failures from
-appearing artificially short or fast.  Minimum clearance at the executed
-vehicle position is retained as a secondary safety diagnostic.  Clearance of
-the ScaleNav global witness is reported only as a guide-quality diagnostic:
-YOPO performs local obstacle avoidance around that guide, so witness clearance
-is neither executed-flight clearance nor collision ground truth.
+closed-loop metrics are success rate, collision rate, path length, flight
+time, average speed, and maximum speed.  These metrics are reported for every
+external baseline and ScaleNav under identical starts and goals.  Completion
+time $T$ runs from the goal command until the vehicle reaches the goal with
+admissible speed, and average speed is $\bar v=L/T$.  For a collision or
+timeout, $L$ and $T$ are measured up to that terminal event and the outcome is
+retained in the success and collision columns; these observed-flight values
+are not presented as completion statistics.  Minimum clearance at the
+executed vehicle position is retained as a secondary safety diagnostic.
+Clearance of the ScaleNav global witness is reported only as a guide-quality
+diagnostic: YOPO performs local obstacle avoidance around that guide, so
+witness clearance is neither executed-flight clearance nor collision ground
+truth.
 
 The language comparison additionally reports the change in selected route,
 query compliance, decision distance, route-switch count, and semantic exposure
@@ -701,37 +700,141 @@ respectively.}
 \label{fig:map2_speed_trajectories}
 \end{figure}
 
-The current Map2 logs provide the single-run integration check in
-Table~\ref{tab:single_run_validation}.  These values verify the common
-simulator and logging pipeline only and do not support an aggregate ranking.
-All four runs use the same validated initial view.  EGO-Planner's observation
-ends at its first latched collision.  SUPER completes the mission using the
-released 5~m/s trajectory limit, with backup trajectories enabled and the
-ROS2 backup-penalty key synchronized to the released ROS1 configuration.  A
-separate 6~m/s-limit stress run collided and is not mixed with this row.
+The ten-trial Map2 comparison is summarized in
+Table~\ref{tab:single_run_validation}.  All rows use the same validated
+initial view and mission; the additional 5~m/s SUPER row is a separate
+ten-trial batch.  For EGO-Planner and SUPER, path and time are measured up to
+collision or timeout when the goal is not reached, so they are observed-flight
+statistics rather than completion statistics.
 
 \begin{table}[t]
-\caption{Single-Run Map2 Pipeline Validation}
+\caption{Ten-Trial Map2 Closed-Loop Comparison Using Conventional Flight Metrics}
 \label{tab:single_run_validation}
 \centering
 \small
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{lccccccc}
 \toprule
-Method & Goal & Coll. & $L_{\rm obs}$ (m) & $T_{\rm obs}$ (s) & $\bar v$ (m/s) & $v_{\max}$ (m/s) & Goal SPL (\%) \\
+Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
 \midrule
-YOPO            & yes & \blank & 158.583 & 42.264 & 3.752 & 5.913 & 88.282 \\
-EGO-Planner     & no  & yes    & 12.488 & 4.552  & 2.743 & 4.325 & 0.000 \\
-SUPER (5 m/s limit) & yes & no  & 145.068 & 30.556 & 4.748 & 5.084 & 96.506 \\
-ScaleNav (ours) & yes & no & 156.489 & 30.765 & 5.087 & 5.996 & 89.463 \\
+YOPO            & 100 & 0 & 0 & $158.678\pm0.169$ & $42.210\pm0.128$ & $3.759\pm0.009$ & $5.913\pm0.060$ \\
+EGO-Planner     & 0   & 100 & 0 & $79.987\pm18.176$ & $58.877\pm13.880$ & $1.365\pm0.034$ & $2.609\pm0.254$ \\
+SUPER & 0 & 80 & 20 & $32.705\pm28.100$ & $24.839\pm34.703$ & $3.247\pm1.670$ & $5.490\pm0.276$ \\
+SUPER (5 m/s) & 10 & 60 & 30 & $32.526\pm39.659$ & $33.608\pm39.657$ & $2.598\pm1.695$ & $5.085\pm0.005$ \\
+ScaleNav (ours) & 100 & 0 & 0 & $154.311\pm2.887$ & $30.980\pm0.631$ & $4.982\pm0.081$ & $5.893\pm0.118$ \\
 \bottomrule
 \end{tabular}
 }
 \end{table}
 
-The final paired evaluation will use the same protocol for the external
-comparison, language conditions, component ablations, and runtime profiling;
-we do not present incomplete aggregate entries as results.
+All entries are means $\pm$ sample standard deviations over ten trials.  The
+5~m/s SUPER batch had one startup-failed attempt, which was excluded and
+replaced before computing its ten-trial statistics.  Failures remain included
+in the success and collision columns; path and time for failed trials are
+measured only to the terminal event.
+The ScaleNav row uses the complete semantic ten-trial batch under the 6~m/s
+configuration; the later 10~m/s stress batch is excluded from this comparison.
+
+\subsubsection{Language-Condition Comparison}
+The language protocol holds the Map2 geometry, initial state, planner weights,
+and random seed fixed while changing only the open-vocabulary query.  Each
+condition uses ten paired trials.  The reserved result table reports route
+choice and semantic exposure in addition to the standard safety outcomes;
+\blank{} denotes a condition that has not yet been replayed under this
+protocol.
+
+\begin{table}[t]
+\caption{Reserved Language-Condition Comparison (Ten Paired Trials)}
+\label{tab:language_comparison}
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccccc}
+\toprule
+Query & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
+\midrule
+No query & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
+Avoid buildings & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
+Avoid trees & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
+Avoid power lines & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\subsubsection{Component Ablation}
+The ablation removes one route-level component at a time while retaining the
+same local policy, graph geometry, start, goal, and ten-trial seed set.  The
+full system is compared with a no-target condition containing no
+task-relevant semantic target, and variants without persistent far-field
+nodes, world-frame route memory, or the ordered witness corridor.  In the
+no-target condition, PEARL remains active but the ``tree'' query has no
+corresponding object; it therefore tests operation without
+task-relevant semantic guidance rather than semantic-front-end runtime.  The
+last variant uses the unconstrained YOPO primitive generator with the same
+frontier goal.  Unmeasured matched conditions remain reserved below.
+
+\begin{table}[t]
+\caption{Component Ablation over Ten Paired Trials. SE: semantic front end;
+FF: far-field semantic nodes; RM: world-frame route memory; WC: ordered
+witness corridor.  The no-target condition retains the semantic front end.}
+\label{tab:component_ablation}
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}l cccc cccccc@{}}
+\toprule
+& \multicolumn{4}{c}{Component} & \multicolumn{6}{c}{Closed-Loop Performance} \\
+\cmidrule(lr){2-5} \cmidrule(lr){6-11}
+Variant & SE & FF & RM & WC & Succ. (\%)$\uparrow$ & Coll. (\%)$\downarrow$ & T/O (\%)$\downarrow$ & Path (m) & $\bar v$ (m/s) & $v_{\max}$ (m/s) \\
+\midrule
+\textbf{Full ScaleNav} & \checkmark & \checkmark & \checkmark & \checkmark & 100 & 0 & 0 & 154.311$\pm$2.887 & 4.982$\pm$0.081 & 5.893$\pm$0.118 \\
+\midrule
+w/o semantic front end  & $\times$   & $\times$   & \checkmark & \checkmark & 100 & 0 & 0 & 154.815$\pm$4.042 & 2.841$\pm$0.091 & 4.571$\pm$0.220 \\
+No task-relevant semantics & \checkmark & \checkmark & \checkmark & \checkmark & 80 & 20 & 0 & 127.680$\pm$55.997 & 3.110$\pm$0.203 & 4.564$\pm$0.316 \\
+w/o far-field nodes     & \checkmark & $\times$   & \checkmark & \checkmark & \blank & \blank & \blank & \blank & \blank & \blank \\
+w/o route memory        & \checkmark & \checkmark & $\times$   & \checkmark & \blank & \blank & \blank & \blank & \blank & \blank \\
+w/o witness corridor    & \checkmark & \checkmark & \checkmark & $\times$   & \blank & \blank & \blank & \blank & \blank & \blank \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+The same ten ScaleNav trials provide the online resource profile in
+Table~\ref{tab:online_profile}.  Rates are computed per trial from source
+timestamps and reported as mean $\pm$ sample standard deviation.  Latencies
+pool all recorded events across the ten trials and report the mean and P95.
+The A* row is the search portion of the planner tick rather than an additional
+serial stage.
+
+\begin{table}[t]
+\caption{ScaleNav Online Resource Profile over Ten Map2 Trials}
+\label{tab:online_profile}
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lrrrr}
+\toprule
+Stage & Samples & Rate (Hz) & Mean (ms) & P95 (ms) \\
+\midrule
+Point-cloud update & 2,892 & $7.99\pm0.13$ & 3.06 & 5.43 \\
+Incremental graph construction & 1,634 & $4.98\pm0.05$ & 60.60 & 94.94 \\
+Topological planning tick & 3,259 & $9.95\pm0.06$ & 25.69 & 61.27 \\
+Rolling A* portion & 3,259 & $9.95\pm0.06$ & 11.28 & 21.94 \\
+PEARL inference & 652 & $1.994\pm0.008$ & 60.08 & 80.00 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+At the final planning sample, the graph contains $522.0\pm19.0$ nodes and
+$1965.6\pm98.7$ edges.  Of its $81.5\pm17.4$ semantic nodes,
+$22.0\pm4.0$ are verified and $59.5\pm16.2$ remain virtual.  PEARL publishes
+652 heatmaps and coalesces 2,026 older RGB frames in its latest-frame queue
+under the configured 2-Hz cap, a $75.7\%$ input-frame coalescing rate rather
+than 2,026 inference failures.  This flight batch does not record process RSS,
+peak GPU memory, or per-tick YOPO inference latency, so those quantities are
+not estimated from topic rates.
 
 \subsection{Offline Local-Policy Evaluation}
 \textit{Protocol.} The corridor-conditioned checkpoint is trained on $2{,}250$ routes and
@@ -874,11 +977,21 @@ N. Bucki, J. Lee, and M. W. Mueller,
 \emph{IEEE Robotics and Automation Letters}, vol. 5, no. 3,
 pp. 4626--4633, 2020.
 
+\bibitem{nanomap}
+P. R. Florence, J. Carter, J. Ware, and R. Tedrake,
+``NanoMap: Fast, Uncertainty-Aware Proximity Queries With Lazy Search of Local 3-D Data,''
+in \emph{Proc. IEEE Int. Conf. Robot. Autom.}, 2018, pp. 7631--7638.
+
 \bibitem{egoplanner}
 X. Zhou, Z. Wang, H. Ye, C. Xu, and F. Gao,
 ``EGO-Planner: An ESDF-Free Gradient-Based Local Planner for Quadrotors,''
 \emph{IEEE Robotics and Automation Letters}, vol. 6, no. 2,
 pp. 478--485, 2021.
+
+\bibitem{loquercio}
+A. Loquercio, E. Kaufmann, R. Ranftl, M. M\"uller, V. Koltun, and D. Scaramuzza,
+``Learning High-Speed Flight in the Wild,''
+\emph{Science Robotics}, vol. 6, no. 59, 2021.
 
 \bibitem{bubble}
 Y. Ren, F. Zhu, W. Liu, Z. Wang, Y. Lin, F. Gao, and F. Zhang,
@@ -922,6 +1035,22 @@ C. Cao, H. Zhu, H. Choset, and J. Zhang,
 ``TARE: A hierarchical framework for efficiently exploring complex 3D environments,''
 in \emph{Proc. Robot.: Sci. Syst.}, 2021.
 
+\bibitem{fuel}
+B. Zhou, Y. Zhang, X. Chen, and S. Shen,
+``FUEL: Fast UAV Exploration Using Incremental Frontier Structure and Hierarchical Planning,''
+\emph{IEEE Robotics and Automation Letters}, vol. 6, no. 2,
+pp. 779--786, 2021.
+
+\bibitem{yamauchi}
+B. Yamauchi,
+``A Frontier-Based Approach for Autonomous Exploration,'' in \emph{Proc.
+IEEE Int. Symp. Comput. Intell. Robot. Autom.}, 1997, pp. 146--151.
+
+\bibitem{octomap}
+K. M. Wurm, A. Hornung, M. Bennewitz, C. Stachniss, and W. Burgard,
+``OctoMap: An Efficient Probabilistic 3D Mapping Framework Based on Octrees,''
+\emph{Autonomous Robots}, vol. 34, pp. 189--206, 2013.
+
 \bibitem{wildos}
 H. Shah, E. Tevere, D. Atha, M. Kaufmann, S. Khattak, M. Patel, M. Hutter, J. Frey, and P. Spieler,
 ``WildOS: Open-vocabulary object search in the wild,''
@@ -932,6 +1061,12 @@ J. Tordesillas, B. T. Lopez, J. P. How, and L. Carlone,
 ``FASTER: A Robust Fast-Planner for Safe Autonomous Navigation in Unknown
 Environments,'' \emph{IEEE Trans. Robot.}, vol. 38, no. 2, pp. 1112--1131,
 2022.
+
+\bibitem{fastplanner}
+X. Zhou, J. Gao, C. Wang, Z. Wang, H. Ye, and F. Gao,
+``Fast-Planner: A Robust and Efficient Trajectory Planner for Autonomous
+Quadrotor Flight,'' in \emph{Proc. IEEE/RSJ Int. Conf. Intell. Robots Syst.},
+2019, pp. 8455--8461.
 
 \bibitem{voxblox}
 H. Oleynikova, Z. Taylor, M. Fehr, R. Siegwart, and J. Nieto,

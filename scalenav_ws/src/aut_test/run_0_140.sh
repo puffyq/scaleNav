@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 WS="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
 # Default batch size. Change this value to adjust runs without passing --count.
-TEST_COUNT=2
+TEST_COUNT=10
 
 [[ -f /opt/ros/humble/setup.bash ]] || {
   echo "ROS2 Humble not found: /opt/ros/humble/setup.bash" >&2
