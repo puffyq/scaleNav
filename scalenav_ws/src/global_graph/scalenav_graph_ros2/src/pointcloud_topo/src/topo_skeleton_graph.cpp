@@ -42,7 +42,8 @@ public:
 
   void queryEdgeNeighborhood(
       const std::vector<Eigen::Vector3f> &witness, float radius_m,
-      std::vector<TopoNode::Ptr> &candidates) const {
+      std::vector<TopoNode::Ptr> &candidates,
+      std::size_t maximum_candidates = 0) const {
     candidates.clear();
     if (witness.size() < 2 || cells_.empty()) return;
 
@@ -66,6 +67,41 @@ public:
         }
       }
     }
+    if (maximum_candidates == 0 || candidates.size() <= maximum_candidates) return;
+
+    // A dense history can put many semantic spheres inside one edge's
+    // influence tube. Keep the strongest approximate fields first; the
+    // exact polyline distance is still evaluated by edgeSemanticRisk().
+    const float sigma = std::max(0.5F, 0.5F * std::max(0.5F, radius_m));
+    const float sigma_sq = sigma * sigma;
+    Eigen::Vector3f witness_min = witness.front();
+    Eigen::Vector3f witness_max = witness.front();
+    for (const auto &point : witness) {
+      if (!point.allFinite()) continue;
+      witness_min = witness_min.cwiseMin(point);
+      witness_max = witness_max.cwiseMax(point);
+    }
+    std::vector<std::pair<float, TopoNode::Ptr>> ranked;
+    ranked.reserve(candidates.size());
+    for (const auto &node : candidates) {
+      if (!node) continue;
+      // This is only a ranking heuristic. The exact polyline distance is
+      // evaluated once, below, for the retained candidates.
+      const Eigen::Vector3f outside =
+        (witness_min - node->center_).cwiseMax(Eigen::Vector3f::Zero()) +
+        (node->center_ - witness_max).cwiseMax(Eigen::Vector3f::Zero());
+      const float distance_sq = outside.squaredNorm();
+      const float utility = std::clamp(
+        node->semantic_score_ * node->semantic_confidence_, 0.0F, 1.0F);
+      const float field = utility * std::exp(-0.5F * distance_sq / sigma_sq);
+      ranked.emplace_back(field, node);
+    }
+    const std::size_t keep = std::min(maximum_candidates, ranked.size());
+    std::partial_sort(ranked.begin(), ranked.begin() + keep, ranked.end(),
+      [](const auto &left, const auto &right) { return left.first > right.first; });
+    candidates.clear();
+    candidates.reserve(keep);
+    for (std::size_t i = 0; i < keep; ++i) candidates.push_back(ranked[i].second);
   }
 
 private:
@@ -121,6 +157,8 @@ void TopoGraph::init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, Parallel
            semantic_point_max_connections_, 2);
   nh.param("bubble_topo/semantic_point_influence_m",
            semantic_point_influence_m_, 5.0);
+  nh.param("bubble_topo/semantic_edge_candidate_limit",
+           semantic_edge_candidate_limit_, 8);
   nh.param("bubble_topo/clearance_cost_weight", clearance_cost_weight_, 2.0);
   nh.param("bubble_topo/clearance_target_m", clearance_target_m_, 1.2);
   update_idx_vec_.reserve(100);
@@ -393,7 +431,9 @@ float TopoGraph::edgeSemanticRisk(
   const auto &semantic_snapshot = semantic_nodes == nullptr ? snapshot : *semantic_nodes;
   std::vector<TopoNode::Ptr> nearby_candidates;
   if (semantic_index != nullptr) {
-    semantic_index->queryEdgeNeighborhood(witness, influence, nearby_candidates);
+    semantic_index->queryEdgeNeighborhood(
+      witness, influence, nearby_candidates,
+      static_cast<std::size_t>(std::max(0, semantic_edge_candidate_limit_)));
   }
   const auto &candidates = semantic_index == nullptr ? semantic_snapshot : nearby_candidates;
   for (const auto &candidate : candidates) {

@@ -153,17 +153,16 @@ route_weight, search_length_m, search_min_safe_radius_m
 
 ### 2.7 S6 Dataset 与模型输入
 
-`YOPODataset.__getitem__` 输出 depth、motion、frontier、固定 route bubbles、route geometry、
-dense witness、dense safe radius 和 dense route geometry。训练/验证按 frame group 切分，同一深度帧
-的多条路线不得跨 split。route validity 同时清空固定和 dense route geometry，但保留
-frontier 与几何安全项。
+`YOPODataset.__getitem__` 输出 depth、motion、frontier、固定 route bubbles、dense witness
+和 dense safe radius。训练/验证按 frame group 切分，同一深度帧的多条路线不得跨 split。
+无效路线样本不进入训练；在线无效路线使用零 route geometry，并保留 frontier 与安全项。
 
 ### 2.8 S7 模型与 S8 Loss
 
 Route-Conditioned YOPO 保留 3x5 共 15 个 primitive 的排列和 9-D endstate + 1-D score
 输出，在 state transform 后融合相对 frontier 和 route features。总损失由安全、平滑、
 加速度、corridor、progress、tangent 和 score regression 构成；score label 使用各项
-cost 的 detached 加权和。route validity 时路线三项为零，基础安全损失仍生效。
+cost 的 detached 加权和。无效路线时路线三项为零，基础安全损失仍生效。
 
 ### 2.9 S9 评测
 
@@ -176,7 +175,7 @@ corridor violation、平均最小安全空间、进度、安全半径分桶和�
 
 ```text
 RouteCondition(route_id, stamp, frame_id,
-               frontier[3], centers[K,3], radii[K] ,
+               frontier[3], centers[K,3], radii[K],
                remaining_length_m, quality_flags, valid)
 ```
 
@@ -312,9 +311,9 @@ checkpoint 固定为 `train_scalenav/saved_corrected/YOPO_5/best.pth`，加载�
 | UT-RC-016 | `_read_depth` | EXR/NaN/Inf -> 归一化深度 | 每个样本 | 裁剪 `[0,1]`，无效值取最大深度 | 30 张 | P0 | 已有代码：`test_snapshot_dataset.py` |
 | UT-RC-017 | `_random_motion` | seed/速度配置 -> motion | 每个样本 | 范围满足且 seed 可复现 | 1000 次 | P1 | 测试设计已定义 |
 | UT-RC-018 | route 坐标预处理 | world route/位姿 -> body-FLU route | 每个样本 | 训练在线同变换、方向一致 | 100 组 | P0 | 已有代码：`test_training_pipeline.py` |
-| UT-RC-019 | route validity | route 与概率 0/1 -> 几何 | 每个 batch | route geometry 同时清零、frontier 保留 | 每种 20 batch | P0 | 已有代码：`test_training_pipeline.py` |
+| UT-RC-019 | route 有效性 | 有效/无效 route 几何 -> 几何 | 每个 batch | 无效路线几何置零、frontier 保留 | 每种 20 batch | P0 | 已有代码：`test_training_pipeline.py` |
 | UT-RC-020 | `RouteLoss.forward` | primitive/dense route -> 三项 loss | 每个 batch | `[B]`、越界轨迹代价更高 | 20 batch | P0 | 已有代码：`test_route_loss.py` |
-| UT-RC-021 | dropout loss | 无效路线几何 -> 三项 loss | dropout batch | 路线项全零、基础损失不变 | 20 batch | P0 | 已有代码：`test_route_loss.py` |
+| UT-RC-021 | 无效路线 loss | 无效路线几何 -> 三项 loss | 无效路线 batch | 路线项全零、基础损失不变 | 20 batch | P0 | 已有代码：`test_route_loss.py` |
 | UT-RC-022 | 多项式重建 | 导数/时间 -> 位置 | 每个 batch | 边界条件满足、无 NaN | 20 batch | P0 | 测试设计已定义 |
 | UT-RC-023 | `StateTransform` route branch | frontier/Bubble/primitive -> route feature | 每次 forward | 每个 primitive 相对特征与 shape 正确 | 50 batch | P0 | 测试设计已定义 |
 | UT-RC-024 | `YOPONetwork.forward` | 标准 batch -> 15 个 endstate/score | 每次推理 | 输出维度与有限性正确 | 100 batch | P0 | 测试设计已定义 |
@@ -359,7 +358,7 @@ checkpoint 固定为 `train_scalenav/saved_corrected/YOPO_5/best.pth`，加载�
 | MT-RC-003 | EPIC labeler/质量门 | JSONL witness/点云 -> routes/report | 日志标注 | 只消费 accepted witness，审计一致 | 100 route | P0 | 已有代码，待场景复核 |
 | MT-RC-004 | Dataset/route transform | 两场景数据 -> 模型与 loss batch | 每 epoch | 固定/dense route 同源、split 无泄漏 | 10 epoch | P0 | 已有代码，待场景复核 |
 | MT-RC-005 | Dataset/network | batch/左右 route -> endstate/score | validation epoch | route 可区分、shape/finite 保持 | 5 epoch | P0 | 测试设计已定义 |
-| MT-RC-006 | network/全部 loss | primitive/ESDF/route -> cost/gradient | 每 epoch | 可反传、dropout 无路线梯度 | 5 epoch | P0 | 已有代码，待场景复核 |
+| MT-RC-006 | network/全部 loss | primitive/ESDF/route -> cost/gradient | 每 epoch | 可反传、无效路线无路线梯度 | 5 epoch | P0 | 已有代码，待场景复核 |
 | MT-RC-007 | Trainer/checkpoint | 配置/batch/旧模型 -> best model | 模型发布 | 版本/route/loss 参数可 reload | 3 次 | P1 | 已有代码，待场景复核 |
 | MT-RC-008 | 校验器/viewer | 合法非法场景 -> 报告/路线图 | 数据发布 | reason 可定位、三维字段保留 | 100 route | P1 | 测试设计已定义 |
 
@@ -370,7 +369,7 @@ checkpoint 固定为 `train_scalenav/saved_corrected/YOPO_5/best.pth`，加载�
 | IT-RC-001 | 场景到 backward | 双场景 depth/route/ESDF -> gradient/checkpoint | 每次提交 | forward/backward/save 无 NaN | 5 次 | P0 | 已有代码，待场景复核 |
 | IT-RC-002 | route 文件闭环 | 100 条有效/失败 route -> Dataset 统计 | 每次 pilot | 比例、flags、安全空间统计可复现 | 3 次 | P0 | 测试设计已定义 |
 | IT-RC-003 | EPIC 日志标注 | accepted witness JSONL -> route 表/报告 | 每批日志 | 不重写生产搜索、原始 witness 可追溯 | 2 批 | P0 | 已有测试，待场景复核 |
-| IT-RC-004 | route validity | 正常/dropout batch -> 输出/loss | 训练回归 | 仅路线被屏蔽，frontier/安全项工作 | 10 对 | P0 | 已有代码，待场景复核 |
+| IT-RC-004 | route 有效/无效 | 有效/无效 route -> 输出/loss | 训练回归 | 无效路线不影响 frontier/安全项 | 10 对 | P0 | 已有代码，待场景复核 |
 | IT-RC-005 | ROS2 原子接口 | route id/stamp/bubbles/flags -> 三级状态 | 每 tick | 过期/回退/非连续 route 拒绝 | 每状态 20 次 | P0 | 测试设计已定义 |
 | IT-RC-006 | export/reload | checkpoint/固定 batch -> 导出输出 | 模型发布 | 前后 shape、finite、排列一致 | 3 模型 | P1 | 测试设计已定义 |
 | IT-RC-007 | 在线闭环 | 语义噪声/左右路线 -> 轨迹/状态 | 每条任务 | 不振荡、失效有 reason、到达终点 | 3 往返 | P0 | 测试设计已定义 |
@@ -383,7 +382,7 @@ checkpoint 固定为 `train_scalenav/saved_corrected/YOPO_5/best.pth`，加载�
 | PERF-RC-001 | ESDF/tile 内存 | 点云/0.2 m/tile -> 字节/误差 | 场景版本 | 不载入超预算全图、边界误差受限 | 2 场景 x 3 | P0 | 测试设计已定义 |
 | PERF-RC-002 | Dataset RSS | batch 1/8/32、K 8/12/16 -> RSS/时间 | 训练版本 | 内存增长可解释、无 route 全量复制 | 每组 5 次 | P1 | 测试设计已定义 |
 | PERF-RC-003 | YOPO latency | 固定 batch -> P50/P95/max | 模型发布 | P95 `<=` 控制周期 25% | 1000 tick | P0 | 基准通过：RTX 3090 纯模型 P50/P95/max `1.743/2.935/4.785 ms`；真实在线分布待复核 |
-| PERF-RC-004 | RouteLoss 资源 | primitive/M -> 时间/显存/梯度 | 训练版本 | M 增长无失控、dropout 可完成 | 每组 100 batch | P1 | 测试设计已定义 |
+| PERF-RC-004 | RouteLoss 资源 | primitive/M -> 时间/显存/梯度 | 训练版本 | M 增长无失控 | 每组 100 batch | P1 | 测试设计已定义 |
 | PERF-RC-005 | 在线 route 预处理 | K/切换/过期 -> 延迟/字节/状态 | ROS2 tick | 不阻塞控制、超时明确降级 | 1000 tick | P0 | 部分通过：合成自由深度 100 tick 完整 P50/P95/max `36.139/64.460/68.883 ms`；真实场景和 1000 tick 待执行 |
 
 性能记录必须包含场景、route 数、点云点数、CPU/GPU、峰值内存以及 P50/P95/最大值；

@@ -51,8 +51,8 @@ class YopoNetwork(nn.Module):
                 f"{depth_features.shape[-2:]} vs {observation_features.shape[-2:]}"
             )
         # Preserve the original YOPO-Simple head contract: observation
-        # channels first, depth channels second.  Route channels are appended
-        # after the legacy 73 channels so old checkpoints remain compatible.
+        # channels first, depth channels second.  Route geometry is appended
+        # after those 73 base channels.
         features = torch.cat((observation_features, depth_features, route_features), dim=1)
         output = self.yopo_head(features)
         endstate_prediction = torch.tanh(output[:, :9])
@@ -61,7 +61,7 @@ class YopoNetwork(nn.Module):
         return endstate, score
 
     def load_yopo_simple_state_dict(self, state_dict: dict[str, torch.Tensor]) -> None:
-        """Load the old backbone and compatible head slices into the larger V1 head."""
+        """Load the old backbone and compatible head slices into the route head."""
         current = self.state_dict()
         with torch.no_grad():
             for name, value in state_dict.items():

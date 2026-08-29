@@ -273,6 +273,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     declare_parameter<double>("bubble_topo/semantic_node_match_distance", 2.5);
     declare_parameter<int>("bubble_topo/semantic_point_connection_candidates", 4);
     declare_parameter<int>("bubble_topo/semantic_point_max_connections", 2);
+    declare_parameter<int>("bubble_topo/semantic_edge_candidate_limit", 8);
     clearance_cost_weight_ = declare_parameter<double>(
       "bubble_topo/clearance_cost_weight", 2.0);
     clearance_target_m_ = declare_parameter<double>(
@@ -316,13 +317,14 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       "ScaleNav config: clearance_target=%.2f m clearance_weight=%.2f "
       "geometry_map=%s reuse_previous_route=%d semantic_radius=%.2f m "
       "semantic_visual_max=%.2f pearl_risk_threshold=%.2f baseline_q=%.2f "
-      "diagnostic_period=%d ms",
+      "semantic_edge_candidate_limit=%d diagnostic_period=%d ms",
       clearance_target_m_, clearance_cost_weight_,
       map_history_radius_m_ <= 0.0 ? "CURRENT_FRAME" : "SLIDING_WINDOW",
       static_cast<int>(reuse_previous_route_),
       semantic_point_radius_m_, semantic_visualization_max_score_,
       semantic_point_min_score_,
       semantic_baseline_quantile_,
+      static_cast<int>(get_parameter("bubble_topo/semantic_edge_candidate_limit").as_int()),
       diagnostic_log_period_ms_);
     RCLCPP_INFO(get_logger(), "ScaleNav graph snapshots: file=%s period=%d ms",
       graph_log_file_.c_str(), diagnostic_log_period_ms_);

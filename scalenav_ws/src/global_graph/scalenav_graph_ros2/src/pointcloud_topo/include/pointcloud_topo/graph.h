@@ -571,6 +571,9 @@ private:
   // Virtual-depth semantic points influence nearby ordinary edges too;
   // otherwise A* can pass beside a risk node without ever visiting it.
   double semantic_point_influence_m_ = 5.0;
+  // Bound per-edge semantic field evaluation when a long-lived map contains
+  // many overlapping risk spheres. Zero disables the bound.
+  int semantic_edge_candidate_limit_ = 8;
   double clearance_cost_weight_ = 2.0;
   double clearance_target_m_ = 1.2;
   mutable std::mutex semantic_memory_mutex_;

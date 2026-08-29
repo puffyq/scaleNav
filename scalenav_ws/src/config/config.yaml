@@ -14,6 +14,8 @@ scalenav_graph:
     # only to nearby measured topology; a real Bubble later replaces it.
     "bubble_topo/semantic_point_connection_candidates": 4
     "bubble_topo/semantic_point_max_connections": 2
+    # Maximum semantic spheres evaluated for one A* edge; zero disables the cap.
+    "bubble_topo/semantic_edge_candidate_limit": 8
 
 scalenav_online_planner:
   ros__parameters:

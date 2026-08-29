@@ -393,11 +393,6 @@ class YopoTrainer:
         try:
             if isinstance(checkpoint, dict) and "route_bubble_count" in checkpoint:
                 applied_order = self.policy.load_route_checkpoint(checkpoint)
-                if resume_training_state and "feature_order" not in checkpoint:
-                    raise ValueError(
-                        "legacy depth-first Route-YOPO checkpoint was migrated; "
-                        "use --finetune because its optimizer moments cannot be safely permuted"
-                    )
                 print(f"feature order: {applied_order}")
             else:
                 self.policy.load_state_dict(state_dict)

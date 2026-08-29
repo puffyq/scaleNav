@@ -63,6 +63,7 @@ def generate_launch_description():
         DeclareLaunchArgument("semantic_visualization_max_score", default_value="0.4"),
         DeclareLaunchArgument("semantic_baseline_quantile", default_value="0.25"),
         DeclareLaunchArgument("semantic_point_influence_m", default_value="5.0"),
+        DeclareLaunchArgument("semantic_edge_candidate_limit", default_value="8"),
         DeclareLaunchArgument("bubble_topo/clearance_cost_weight", default_value="2.0"),
         DeclareLaunchArgument("bubble_topo/clearance_target_m", default_value="1.2"),
         DeclareLaunchArgument("previous_path_cost_factor", default_value="1.0"),
@@ -157,6 +158,8 @@ def generate_launch_description():
                     "semantic_baseline_quantile"),
                 "bubble_topo/semantic_point_influence_m": LaunchConfiguration(
                     "semantic_point_influence_m"),
+                "bubble_topo/semantic_edge_candidate_limit": LaunchConfiguration(
+                    "semantic_edge_candidate_limit"),
                 "bubble_topo/clearance_cost_weight": LaunchConfiguration(
                     "bubble_topo/clearance_cost_weight"),
                 "bubble_topo/clearance_target_m": LaunchConfiguration(
