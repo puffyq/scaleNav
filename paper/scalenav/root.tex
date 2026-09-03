@@ -77,7 +77,7 @@ ordered-bubble MPC; offline, a corridor-conditioned network trained on the
 same contract.  Semantic observations modify route costs but do not certify free
 space; geometric verification and depth-based local execution remain
 authoritative.  In 140-m closed-loop missions, ScaleNav completes all ten
-trials at $4.439\pm0.118$~m/s, compared with $3.759\pm0.009$~m/s for YOPO.  On
+trials at $4.134\pm0.141$~m/s, compared with $3.759\pm0.009$~m/s for YOPO.  On
 a paired 1,479-route offline benchmark, corridor conditioning reduces
 collision from $8.05\%$ to $0.14\%$ and corridor violation from $50.10\%$ to
 $25.22\%$, while raising average progress from $6.225$ to $6.502$~m.
@@ -682,7 +682,7 @@ YOPO            & 100 & 0 & 0 & $158.678\pm0.169$ & $42.210\pm0.128$ & $3.759\pm
 EGO-Planner     & 0   & 100 & 0 & \blank & \blank & \blank & \blank \\
 SUPER & 0 & 80 & 20 & \blank & \blank & \blank & \blank \\
 SUPER (5 m/s) & 10 & 60 & 30 & 144.658 & 30.614 & 4.725 & 5.082 \\
-ScaleNav (ours) & 100 & 0 & 0 & $157.403\pm5.194$ & $35.495\pm1.752$ & $4.439\pm0.118$ & $5.221\pm0.165$ \\
+ScaleNav (ours) & 100 & 0 & 0 & $196.850\pm6.843$ & $47.679\pm2.573$ & $4.134\pm0.141$ & $5.476\pm0.117$ \\
 \bottomrule
 \end{tabular}
 }
@@ -690,8 +690,9 @@ ScaleNav (ours) & 100 & 0 & 0 & $157.403\pm5.194$ & $35.495\pm1.752$ & $4.439\pm
 
 Outcome rates use all trials; continuous entries are mean $\pm$ standard
 deviation over successes.  SUPER at 5~m/s succeeded once, so it has no
-dispersion estimate; one startup failure was replaced.  ScaleNav completed all
-trials with query ``tree, blocks, wall, line.''  All closed-loop ScaleNav rows
+dispersion estimate; one startup failure was replaced.  The latest ScaleNav
+batch completed all ten trials with the deployed semantic query.  All
+closed-loop ScaleNav rows
 use the deployed execution variant---frontier-conditioned YOPO with
 ordered-bubble MPC refinement---not the corridor-trained network evaluated
 offline below.
@@ -738,7 +739,7 @@ witness corridor.  The no-target condition retains the semantic front end.}
 \cmidrule(lr){2-5} \cmidrule(lr){6-12}
 Variant & SE & FF & RM & WC & Succ. (\%)$\uparrow$ & Coll. (\%)$\downarrow$ & T/O (\%)$\downarrow$ & Path (m) & Time (s) & $\bar v$ (m/s) & $v_{\max}$ (m/s) \\
 \midrule
-\textbf{Full ScaleNav} & \checkmark & \checkmark & \checkmark & \checkmark & 100 & 0 & 0 & 157.403$\pm$5.194 & 35.495$\pm$1.752 & 4.439$\pm$0.118 & 5.221$\pm$0.165 \\
+\textbf{Full ScaleNav} & \checkmark & \checkmark & \checkmark & \checkmark & 100 & 0 & 0 & 196.850$\pm$6.843 & 47.679$\pm$2.573 & 4.134$\pm$0.141 & 5.476$\pm$0.117 \\
 \midrule
 w/o semantic front end  & $\times$   & $\times$   & \checkmark & \checkmark & 70 & 30 & 0 & 156.510$\pm$3.339 & 33.620$\pm$0.856 & 4.656$\pm$0.071 & 5.445$\pm$0.121 \\
 No task-relevant semantics & \checkmark & \checkmark & \checkmark & \checkmark & 80 & 20 & 0 & 154.205$\pm$1.591 & 49.981$\pm$1.247 & 3.087$\pm$0.093 & 4.491$\pm$0.290 \\

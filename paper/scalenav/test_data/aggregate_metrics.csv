@@ -1,5 +1,6 @@
 method,batch,n,success,collision,timeout,success_rate_percent,collision_rate_percent,successful_duration_mean_s,successful_duration_sd_s,successful_path_mean_m,successful_path_sd_m,successful_average_speed_mean_mps,successful_average_speed_sd_mps,successful_max_speed_mean_mps,successful_max_speed_sd_mps,failure_observed_duration_mean_s,failure_observed_path_mean_m,failure_observed_average_speed_mean_mps,failure_observed_max_speed_mean_mps
 ScaleNav semantic,run_20260829_171743_48724,10,10,0,0,100,0,35.494790,1.752367,157.403497,5.194207,4.438555,0.117974,5.221139,0.164892,,,,
+ScaleNav semantic latest,run_20260903_204517_1504786,10,10,0,0,100,0,47.679093,2.573168,196.850369,6.842869,4.134045,0.140685,5.476203,0.116730,,,,
 ScaleNav semantic latest analyzed,run_20260830_105607_424081,10,8,1,1,80,10,28.896925,0.784638,155.861612,4.581659,5.393782,0.064670,6.161246,0.025069,,,,
 ScaleNav no semantic,run_20260829_172657_72293,10,7,3,0,70,30,33.619609,0.855869,156.510243,3.338954,4.656181,0.071222,5.444703,0.120877,5.597807,20.087800,3.589797,5.107136
 YOPO-Simple,run_20260903_085045_1991187,10,0,10,0,0,100,,,,,,,,,61.463090,129.785141,2.111619,6.457595

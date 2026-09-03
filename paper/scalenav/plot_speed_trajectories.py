@@ -131,7 +131,13 @@ def load_flight(
     collision_stamps_ns = []
     with path.open(encoding="utf-8") as stream:
         for line in stream:
-            event = json.loads(line)
+            # Planner timing records may contain non-standard JSON ``inf``
+            # values for unavailable objectives; they are irrelevant to the
+            # odometry/collision fields used by this plot.
+            line = (line.replace(":-inf", ":-Infinity")
+                    .replace(":inf", ":Infinity")
+                    .replace(":nan", ":NaN"))
+            event = json.loads(line, parse_constant=lambda value: float(value))
             if event.get("kind") == "mission":
                 mission_event = (event.get("data") or {}).get("event")
                 if mission_event == "start" and mission_start_ns is None:

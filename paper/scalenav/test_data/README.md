@@ -13,6 +13,7 @@ error at most 0.5 m and settling speed at most 0.3 m/s. The mission timeout is
 | Directory | Source run | Condition | Outcomes |
 | --- | --- | --- | --- |
 | `closed_loop/scalenav_semantic_20260829_171743` | `run_20260829_171743_48724` | ScaleNav, semantic enabled, prompt `tree, blocks, wall, line` | 10 success |
+| `closed_loop/scalenav_semantic_20260903_204517` | `run_20260903_204517_1504786` | ScaleNav, semantic enabled, prompt `blocks, wall` | 10 success |
 | `closed_loop/scalenav_semantic_20260830_105607` | `run_20260830_105607_424081` | Latest previously analyzed ScaleNav semantic batch | 8 success, 1 collision, 1 timeout |
 | `closed_loop/scalenav_no_semantic_20260829_172657` | `run_20260829_172657_72293` | ScaleNav, semantic disabled | 7 success, 3 collision |
 | `closed_loop/yopo_simple_20260903_085045` | `run_20260903_085045_1991187` | Original YOPO-Simple, direct mission-goal input | 10 collision |
@@ -24,7 +25,7 @@ Each directory contains:
 - `summary.csv`: one row per trial, copied from the automated test output.
 - `config.json`: mission and test-run configuration.
 
-`aggregate_metrics.csv` is derived from these six `summary.csv` files.
+`aggregate_metrics.csv` is derived from these seven `summary.csv` files.
 Completion time, path length, average speed, and maximum speed in the
 `successful_*` columns use successful trials only. Early collision duration
 and path must not be interpreted as completion performance; they are retained
