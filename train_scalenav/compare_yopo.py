@@ -1,6 +1,6 @@
 """Paired offline benchmark for current/previous Route-YOPO and YOPO-Simple.
 
-All policies consume the same depth, pose, zero motion state and frontier goal.
+All policies consume the same depth, pose, motion state and frontier goal.
 Route-YOPO policies additionally consume the witness bubbles stored in each
 route record. Outputs and aggregate metrics are written together so that every
 comparison remains auditable.
@@ -26,7 +26,12 @@ from policy.state_transform import rotate_body2world, state_body2world
 from policy.yopo_dataset import YOPODataset
 from policy.yopo_network import YopoNetwork
 from policy.yopo_simple_baseline import YopoSimpleBaseline
-from evaluate_yopo import _centerline_metrics, _corridor_metrics, _sample_trajectory
+from evaluate_yopo import (
+    _centerline_metrics,
+    _corridor_metrics,
+    _guide_angle_rad,
+    _sample_trajectory,
+)
 
 
 def _load_baseline(path: Path, device: torch.device) -> YopoSimpleBaseline:
@@ -54,6 +59,7 @@ def _single_metrics(
     minimum_clearance = float(np.min(clearance))
     trajectory_length = float(np.linalg.norm(np.diff(trajectory, axis=0), axis=1).sum())
     endpoint_distance = float(np.linalg.norm(trajectory[-1] - trajectory[0]))
+    guide_angle = _guide_angle_rad(trajectory, route_path)
     return {
         "path": trajectory.round(4).tolist(),
         "minimumClearanceM": round(minimum_clearance, 4),
@@ -66,6 +72,8 @@ def _single_metrics(
         "trajectoryLengthM": round(trajectory_length, 4),
         "endpointDistanceM": round(endpoint_distance, 4),
         "averageSpeedMps": round(trajectory_length / float(cfg["sgm_time"]), 4),
+        "guideAngleRad": round(guide_angle, 6),
+        "guideAngleDeg": round(math.degrees(guide_angle), 4),
     }
 
 
@@ -102,6 +110,10 @@ def _aggregate(values: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "progressP05M": float(np.percentile([item["routeProgressM"] for item in values], 5)),
         "progressMedianM": float(np.percentile([item["routeProgressM"] for item in values], 50)),
+        "meanGuideAngleRad": float(np.mean([item["guideAngleRad"] for item in values])),
+        "meanGuideAngleDeg": float(np.mean([item["guideAngleDeg"] for item in values])),
+        "guideAngleP95Deg": float(np.percentile([item["guideAngleDeg"] for item in values], 95)),
+        "guideAngleOver90Rate": float(np.mean([item["guideAngleDeg"] > 90.0 for item in values])),
     }
 
 
@@ -116,11 +128,14 @@ def evaluate_comparison(
     workers: int = 0,
     device: str | None = None,
     max_samples: int | None = None,
+    split: str = "all",
+    build_viewer: bool = True,
+    safety_shield: bool = False,
 ) -> Path:
     data_root = Path(data_root).resolve()
     output_dir = Path(output_dir).resolve()
     selected_device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    dataset = YOPODataset("all", data_root=data_root)
+    dataset = YOPODataset(split, data_root=data_root)
     samples = dataset.samples if max_samples is None else dataset.samples[:max_samples]
     dataset.samples = list(samples)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers)
@@ -151,7 +166,7 @@ def evaluate_comparison(
         for batch in loader:
             count = batch["depth"].shape[0]
             depth = batch["depth"].to(selected_device)
-            motion = torch.zeros((count, 6), dtype=torch.float32, device=selected_device)
+            motion = batch["motion_body"].to(selected_device)
             frontier = batch["frontier_body"].to(selected_device)
             route_end, route_score = route_policy(
                 depth,
@@ -183,10 +198,48 @@ def evaluate_comparison(
             previous_index = (
                 previous_scores.argmin(dim=1) if previous_scores is not None else None
             )
-            simple_index = simple_scores.argmin(dim=1)
             row = torch.arange(count, device=selected_device)
             position = batch["position_world"].to(selected_device)
             rotation = batch["rotation_world_body"].to(selected_device)
+            start_velocity = rotate_body2world(rotation, motion[:, :3])
+            start_acceleration = rotate_body2world(rotation, motion[:, 3:])
+            starts = torch.stack((position, start_velocity, start_acceleration), dim=1).cpu().numpy()
+            simple_index = simple_scores.argmin(dim=1)
+            if safety_shield:
+                # Match the online controller: reject candidates whose sampled
+                # polynomial intersects the point-cloud safety radius before
+                # using the learned score for selection.
+                route_all_pos, route_all_vel, route_all_acc = state_body2world(
+                    position.repeat_interleave(route_flat.shape[1], dim=0),
+                    rotation.repeat_interleave(route_flat.shape[1], dim=0),
+                    route_flat.reshape(-1, 9)[:, :3],
+                    route_flat.reshape(-1, 9)[:, 3:6],
+                    route_flat.reshape(-1, 9)[:, 6:9],
+                )
+                simple_all_pos, simple_all_vel, simple_all_acc = state_body2world(
+                    position.repeat_interleave(simple_flat.shape[1], dim=0),
+                    rotation.repeat_interleave(simple_flat.shape[1], dim=0),
+                    simple_flat.reshape(-1, 9)[:, :3],
+                    simple_flat.reshape(-1, 9)[:, 3:6],
+                    simple_flat.reshape(-1, 9)[:, 6:9],
+                )
+                route_all = torch.stack((route_all_pos, route_all_vel, route_all_acc), dim=1).cpu().numpy().reshape(count, -1, 3, 3)
+                simple_all = torch.stack((simple_all_pos, simple_all_vel, simple_all_acc), dim=1).cpu().numpy().reshape(count, -1, 3, 3)
+                route_safe = np.zeros((count, route_all.shape[1]), dtype=bool)
+                simple_safe = np.zeros((count, simple_all.shape[1]), dtype=bool)
+                for local in range(count):
+                    scene_index = samples[cursor + local][0]
+                    for candidate in range(route_all.shape[1]):
+                        route_safe[local, candidate] = obstacle_trees[scene_index].query(
+                            _sample_trajectory(starts[local], route_all[local, candidate]), k=1
+                        )[0].min() >= float(cfg["robot_radius_m"] + cfg["safety_margin_m"])
+                        simple_safe[local, candidate] = obstacle_trees[scene_index].query(
+                            _sample_trajectory(starts[local], simple_all[local, candidate]), k=1
+                        )[0].min() >= float(cfg["robot_radius_m"] + cfg["safety_margin_m"])
+                route_safe_t = torch.from_numpy(route_safe).to(selected_device)
+                simple_safe_t = torch.from_numpy(simple_safe).to(selected_device)
+                route_index = route_scores.masked_fill(~route_safe_t, float("inf")).argmin(dim=1)
+                simple_index = simple_scores.masked_fill(~simple_safe_t, float("inf")).argmin(dim=1)
             route_body = route_flat[row, route_index]
             previous_body = (
                 previous_flat[row, previous_index]
@@ -208,9 +261,6 @@ def evaluate_comparison(
             simple_end_pos, simple_end_vel, simple_end_acc = state_body2world(
                 position, rotation, simple_body[:, :3], simple_body[:, 3:6], simple_body[:, 6:9]
             )
-            starts = torch.stack(
-                (position, torch.zeros_like(position), torch.zeros_like(position)), dim=1
-            ).cpu().numpy()
             route_ends = torch.stack((route_end_pos, route_end_vel, route_end_acc), dim=1).cpu().numpy()
             previous_ends = (
                 torch.stack((previous_end_pos, previous_end_vel, previous_end_acc), dim=1)
@@ -308,7 +358,8 @@ def evaluate_comparison(
         ),
         "dataset": str(data_root),
         "sampleCount": len(route_values),
-        "motionInput": "zero velocity and zero acceleration",
+        "split": split,
+        "motionInput": "paired deterministic dataset velocity and acceleration",
         "inputContract": {
             "pairedDepthPoseMotionGoal": True,
             "localSubgoalDistanceM": float(cfg["goal_length"]),
@@ -349,7 +400,14 @@ def evaluate_comparison(
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "comparison_report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (output_dir / "comparison_predictions.json").write_text(json.dumps({f"{scene}/{route}": value for (scene, route), value in predictions.items()}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    build_dataset_viewer(data_root, output_dir=output_dir / "viewer", overwrite=True, predictions=predictions, evaluation_report=report)
+    if build_viewer:
+        build_dataset_viewer(
+            data_root,
+            output_dir=output_dir / "viewer",
+            overwrite=True,
+            predictions=predictions,
+            evaluation_report=report,
+        )
     print(json.dumps(report, indent=2, sort_keys=True))
     return output_dir / "comparison_report.json"
 
@@ -365,10 +423,26 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--device", choices=("cpu", "cuda"))
     parser.add_argument("--max-samples", type=int)
+    parser.add_argument("--split", choices=("all", "train", "valid"), default="all")
+    parser.add_argument("--report-only", action="store_true")
+    parser.add_argument("--safety-shield", action="store_true")
     args = parser.parse_args()
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda requested but CUDA is unavailable")
-    evaluate_comparison(args.data, args.route_checkpoint, args.simple_checkpoint, args.output, previous_route_checkpoint=args.previous_route_checkpoint, batch_size=args.batch_size, workers=args.workers, device=args.device, max_samples=args.max_samples)
+    evaluate_comparison(
+        args.data,
+        args.route_checkpoint,
+        args.simple_checkpoint,
+        args.output,
+        previous_route_checkpoint=args.previous_route_checkpoint,
+        batch_size=args.batch_size,
+        workers=args.workers,
+        device=args.device,
+        max_samples=args.max_samples,
+        split=args.split,
+        build_viewer=not args.report_only,
+        safety_shield=args.safety_shield,
+    )
 
 
 if __name__ == "__main__":

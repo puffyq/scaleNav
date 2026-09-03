@@ -3,6 +3,18 @@
 本文件按修改批次记录，不按日期聚合。每次代码更新新增一个独立变更编号；后续补充测试、
 数据生成和模型评测结果时更新对应记录，不把不同修改合并到同一天的章节中。
 
+<a id="chg-0031"></a>
+## CHG-0031 收敛为 corridor barrier-only 路线条件
+
+- 关闭 angle、centerline MSE 和 SafetyLoss route attraction；`wp` 与 `wcenterline` 仅保留
+  兼容字段并默认为 0。
+- RouteLoss 改为对 ordered Bubble union 计算 `relu(min_k(||p-c_k||-r_k))^2`，仅惩罚
+  轨迹越出安全走廊，不把 witness 当作带时间参数的专家轨迹。
+- trainer 将真实 `route_radii_world` 传入 loss，corridor barrier 进入候选 score target；
+  五次多项式、15 个 primitive 和原版 YOPO cost 保持不变。
+- SafetyLoss 与 corridor 使用配置中的 `safety_eval_points=100`，与离线 101 点审计保持同量级。
+- 定向/完整测试：`66 passed`；`train_large_001` GPU 单 epoch smoke 和 900-route 离线评测已完成。
+
 <a id="chg-0030"></a>
 ## CHG-0030 固定高度 Route 训练合同与可复现验证
 

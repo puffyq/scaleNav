@@ -17,6 +17,8 @@
 
 namespace depth2points_ros2 {
 
+constexpr double kPi = 3.14159265358979323846;
+
 class DepthPlanarToPointCloudNode final : public rclcpp::Node {
  public:
   DepthPlanarToPointCloudNode() : Node("depth_planar_to_pointcloud") {
@@ -39,6 +41,8 @@ class DepthPlanarToPointCloudNode final : public rclcpp::Node {
     default_fy_ = declare_parameter<double>("fy", 0.0);
     default_cx_ = declare_parameter<double>("cx", 0.0);
     default_cy_ = declare_parameter<double>("cy", 0.0);
+    horizontal_fov_deg_ = declare_parameter<double>("horizontal_fov_deg", 90.0);
+    vertical_fov_deg_ = declare_parameter<double>("vertical_fov_deg", 60.0);
     camera_tx_ = declare_parameter<double>("camera_translation_flu.x", 0.0);
     camera_ty_ = declare_parameter<double>("camera_translation_flu.y", 0.0);
     camera_tz_ = declare_parameter<double>("camera_translation_flu.z", 0.0);
@@ -88,14 +92,16 @@ class DepthPlanarToPointCloudNode final : public rclcpp::Node {
 
     CameraModel model = camera_;
     if (!have_camera_info_) {
-      if (default_fx_ <= 0.0 || default_fy_ <= 0.0) {
-        RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 5000,
-            "Waiting for CameraInfo before projecting DepthPlanar");
-        return;
-      }
-      model.fx = default_fx_;
-      model.fy = default_fy_;
+      // CameraInfo is optional so a bag containing only odom/RGB/depth can be
+      // replayed. Explicit focal lengths win; otherwise derive them from FOV.
+      model.fx = default_fx_ > 0.0
+                     ? default_fx_
+                     : (image->width * 0.5) /
+                         std::tan(horizontal_fov_deg_ * kPi / 360.0);
+      model.fy = default_fy_ > 0.0
+                     ? default_fy_
+                     : (image->height * 0.5) /
+                         std::tan(vertical_fov_deg_ * kPi / 360.0);
       model.cx = default_cx_ > 0.0 ? default_cx_ : (image->width - 1) * 0.5;
       model.cy = default_cy_ > 0.0 ? default_cy_ : (image->height - 1) * 0.5;
     }
@@ -197,6 +203,8 @@ class DepthPlanarToPointCloudNode final : public rclcpp::Node {
   double default_fy_ = 0.0;
   double default_cx_ = 0.0;
   double default_cy_ = 0.0;
+  double horizontal_fov_deg_ = 90.0;
+  double vertical_fov_deg_ = 60.0;
   double camera_tx_ = 0.0;
   double camera_ty_ = 0.0;
   double camera_tz_ = 0.0;

@@ -55,9 +55,7 @@ def _corridor_metrics(
     route_points: np.ndarray,
     route_radii: np.ndarray,
 ) -> tuple[float, float, float]:
-    safe_radii = np.clip(
-        route_radii, 0.0, float(cfg["route_corridor_width_cap_m"])
-    )
+    safe_radii = np.maximum(np.asarray(route_radii), 0.0)
     bubble_distance = np.linalg.norm(
         prediction[:, None, :] - route_points[None, :, :], axis=2
     )
@@ -94,6 +92,24 @@ def _centerline_metrics(prediction: np.ndarray, route_points: np.ndarray) -> tup
     closest = segment_start[None, :, :] + alpha[:, :, None] * segment[None, :, :]
     distances = np.linalg.norm(prediction[:, None, :] - closest, axis=2).min(axis=1)
     return float(np.mean(distances)), float(np.max(distances))
+
+
+def _guide_angle_rad(prediction: np.ndarray, route_points: np.ndarray) -> float:
+    """Match RouteLoss: angle from start-to-guide-end to start-to-prediction-end."""
+    guide = np.asarray(route_points[-1] - prediction[0], dtype=np.float64)
+    predicted = np.asarray(prediction[-1] - prediction[0], dtype=np.float64)
+    guide_norm = float(np.linalg.norm(guide))
+    predicted_norm = float(np.linalg.norm(predicted))
+    if guide_norm <= 1.0e-6 or predicted_norm <= 1.0e-6:
+        return 0.0
+    guide /= guide_norm
+    predicted /= predicted_norm
+    return float(
+        math.atan2(
+            float(np.linalg.norm(np.cross(guide, predicted))),
+            float(np.clip(np.dot(guide, predicted), -1.0, 1.0)),
+        )
+    )
 
 
 def evaluate(
@@ -175,6 +191,7 @@ def evaluate(
                     trajectory, path, radii
                 )
                 mean_centerline, maximum_centerline = _centerline_metrics(trajectory, path)
+                guide_angle = _guide_angle_rad(trajectory, path)
                 minimum_clearance = float(np.min(clearance))
                 predictions[(scene.path.name, route_index)] = {
                     "path": trajectory.round(4).tolist(),
@@ -189,6 +206,8 @@ def evaluate(
                     "meanCenterlineDistanceM": round(mean_centerline, 4),
                     "maximumCenterlineDistanceM": round(maximum_centerline, 4),
                     "routeProgressM": round(progress, 4),
+                    "guideAngleRad": round(guide_angle, 6),
+                    "guideAngleDeg": round(math.degrees(guide_angle), 4),
                 }
             cursor += count
             print(f"evaluated {cursor}/{len(samples)} routes", flush=True)
@@ -216,6 +235,10 @@ def evaluate(
             np.mean([item["maximumCenterlineDistanceM"] for item in values])
         ),
         "meanRouteProgressM": float(np.mean([item["routeProgressM"] for item in values])),
+        "meanGuideAngleRad": float(np.mean([item["guideAngleRad"] for item in values])),
+        "meanGuideAngleDeg": float(np.mean([item["guideAngleDeg"] for item in values])),
+        "guideAngleP95Deg": float(np.percentile([item["guideAngleDeg"] for item in values], 95)),
+        "guideAngleOver90Rate": float(np.mean([item["guideAngleDeg"] > 90.0 for item in values])),
     }
     output_dir = Path(output_dir).resolve()
     if build_viewer:

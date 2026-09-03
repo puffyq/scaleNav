@@ -121,6 +121,14 @@
     .route-table th, .route-table td { padding: 8px 9px; border-bottom: 1px solid #262b30; text-align: right; }
     .route-table th:first-child, .route-table td:first-child { text-align: left; }
     .route-table th { color: var(--muted); font-weight: 600; background: #15181a; }
+    .comparison-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 10px; }
+    .comparison-table th, .comparison-table td { padding: 7px 3px; border-bottom: 1px solid #262b30; text-align: right; overflow-wrap: anywhere; line-height: 1.2; }
+    .comparison-table th:first-child, .comparison-table td:first-child { text-align: left; }
+    .comparison-table th:first-child, .comparison-table td:first-child { width: 24%; }
+    .comparison-table th:not(:first-child), .comparison-table td:not(:first-child) { width: 15.2%; }
+    .comparison-table th { color: var(--muted); font-weight: 600; background: #15181a; }
+    .comparison-table td.model-route { color: #f28e2b; font-weight: 650; }
+    .comparison-table td.model-simple { color: #b07ce8; font-weight: 650; }
     .route-table tr.selected { background: #203129; }
     .empty { display: grid; place-items: center; min-height: 240px; color: var(--muted); }
     @media (max-width: 1050px) {
@@ -206,6 +214,17 @@
         <div class="quality" style="margin-top: 11px">
           <i class="quality-dot" id="qualityDot"></i><span id="qualityText">-</span>
         </div>
+      </section>
+
+      <section class="section" id="comparisonSummary" hidden>
+        <h2 class="section-title">Paired model comparison · all routes</h2>
+        <table class="comparison-table">
+          <thead><tr><th>Model</th><th title="Collision rate">Collision</th><th title="Mean minimum clearance (m)">Clear.</th><th title="Mean maximum corridor violation (m)">Viol.</th><th title="Mean route progress (m)">Progress</th><th title="Mean guide angle (degrees)">Angle</th></tr></thead>
+          <tbody>
+            <tr><td class="model-route">Route-YOPO</td><td id="summaryRouteCollision">-</td><td id="summaryRouteClearance">-</td><td id="summaryRouteViolation">-</td><td id="summaryRouteProgress">-</td><td id="summaryRouteAngle">-</td></tr>
+            <tr><td class="model-simple">YOPO-Simple</td><td id="summarySimpleCollision">-</td><td id="summarySimpleClearance">-</td><td id="summarySimpleViolation">-</td><td id="summarySimpleProgress">-</td><td id="summarySimpleAngle">-</td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section class="section" id="predictionMetrics">
@@ -329,6 +348,23 @@
       byId("baselineToggle").hidden = !hasBaseline;
       byId("baselineMetrics").hidden = !hasBaseline;
       byId("baselineLegend").hidden = !hasBaseline;
+      const pairedModels = hasEvaluation && data.evaluationReport.models && data.evaluationReport.models.yopoSimple;
+      byId("comparisonSummary").hidden = !pairedModels;
+      if (pairedModels) {
+        const routeSummary = data.evaluationReport.models.routeYopo;
+        const simpleSummary = data.evaluationReport.models.yopoSimple;
+        const percent = value => `${(100 * Number(value)).toFixed(2)}%`;
+        byId("summaryRouteCollision").textContent = percent(routeSummary.collisionRate);
+        byId("summarySimpleCollision").textContent = percent(simpleSummary.collisionRate);
+        byId("summaryRouteClearance").textContent = fixed(routeSummary.meanMinimumClearanceM);
+        byId("summarySimpleClearance").textContent = fixed(simpleSummary.meanMinimumClearanceM);
+        byId("summaryRouteViolation").textContent = fixed(routeSummary.meanMaximumCorridorViolationM);
+        byId("summarySimpleViolation").textContent = fixed(simpleSummary.meanMaximumCorridorViolationM);
+        byId("summaryRouteProgress").textContent = fixed(routeSummary.meanRouteProgressM);
+        byId("summarySimpleProgress").textContent = fixed(simpleSummary.meanRouteProgressM);
+        byId("summaryRouteAngle").textContent = fixed(routeSummary.meanGuideAngleDeg, 2);
+        byId("summarySimpleAngle").textContent = fixed(simpleSummary.meanGuideAngleDeg, 2);
+      }
       if (hasEvaluation) {
         byId("viewerTitle").textContent = "ScaleNav Model Offline Evaluation";
         byId("routePanelTitle").textContent = "Witness and model output";

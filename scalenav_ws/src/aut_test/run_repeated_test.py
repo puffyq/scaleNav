@@ -23,6 +23,7 @@ WS = SCRIPT_DIR.parent.parent
 PROJECT_ROOT = WS.parent
 START_SCRIPT = WS / "scripts" / "start.sh"
 ROUTE_YOPO_SCRIPT = WS / "scripts" / "start_route_yopo.sh"
+YOPO_SIMPLE_SCRIPT = WS / "scripts" / "start_yopo_simple_control.sh"
 BASELINE_ROOT = PROJECT_ROOT / "bc" / "third_party" / "compare"
 BASELINE_SCRIPTS = {
     "ego": BASELINE_ROOT / "run_ego_map2.sh",
@@ -78,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stack",
-        choices=("scalenav", "route_yopo", "ego", "super"),
+        choices=("scalenav", "yopo_simple", "route_yopo", "ego", "super"),
         default="scalenav",
         help="planner stack to launch for each isolated trial (default: scalenav)",
     )
@@ -159,7 +160,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--prompt",
-        default="tree, blocks, wall, line",
+        default="blocks, wall",
         help="open-vocabulary query passed to the semantic front end",
     )
     parser.add_argument(
@@ -249,6 +250,8 @@ def conflicting_processes() -> list[tuple[int, str]]:
 def validate_environment(args: argparse.Namespace) -> None:
     if args.stack == "scalenav":
         launcher = START_SCRIPT
+    elif args.stack == "yopo_simple":
+        launcher = YOPO_SIMPLE_SCRIPT
     elif args.stack == "route_yopo":
         launcher = ROUTE_YOPO_SCRIPT
     else:
@@ -294,6 +297,34 @@ def reset_airsim(args: argparse.Namespace) -> None:
         client.close()
 
 
+def wait_for_airsim_and_reset(args: argparse.Namespace) -> None:
+    """Wait for the externally managed AirSim RPC server, then reset it.
+
+    Unreal can briefly stop accepting RPC connections while a level is
+    loading. Treat that as startup readiness, not as a completed failed trial.
+    """
+    deadline = time.monotonic() + args.startup_timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline and not STOP_REQUESTED:
+        try:
+            reset_airsim(args)
+            return
+        except (ConnectionError, OSError, TimeoutError) as error:
+            last_error = error
+            remaining = deadline - time.monotonic()
+            if remaining > 0.0:
+                time.sleep(min(0.25, remaining))
+    if STOP_REQUESTED:
+        raise InterruptedError("test interrupted")
+    detail = "unknown RPC error" if last_error is None else (
+        f"{type(last_error).__name__}: {last_error}"
+    )
+    raise TimeoutError(
+        f"AirSim RPC {args.airsim_host}:{args.airsim_port} was not ready "
+        f"within {args.startup_timeout:.1f} s ({detail})"
+    )
+
+
 def session_directories(log_root: Path) -> set[Path]:
     return {path.resolve() for path in log_root.glob("session_*") if path.is_dir()}
 
@@ -312,10 +343,14 @@ def newest_new_session(log_root: Path, previous: set[Path]) -> str:
 def start_stack(
     args: argparse.Namespace, console_path: Path
 ) -> tuple[subprocess.Popen[str], Any]:
-    if args.stack in {"scalenav", "route_yopo"}:
-        launcher = START_SCRIPT if args.stack == "scalenav" else ROUTE_YOPO_SCRIPT
+    if args.stack in {"scalenav", "yopo_simple", "route_yopo"}:
+        launcher = {
+            "scalenav": START_SCRIPT,
+            "yopo_simple": YOPO_SIMPLE_SCRIPT,
+            "route_yopo": ROUTE_YOPO_SCRIPT,
+        }[args.stack]
         command = [str(launcher)]
-        if args.no_semantic:
+        if args.no_semantic and args.stack in {"scalenav", "route_yopo"}:
             command.append("--no-semantic")
     else:
         command = [
@@ -377,6 +412,7 @@ class MissionMonitor:
         self.rclpy = rclpy
         self.PoseStamped = PoseStamped
         self.Trigger = Trigger
+        self.Bool = Bool
         rclpy.init(args=[], signal_handler_options=SignalHandlerOptions.NO)
         self.node = rclpy.create_node("scalenav_automated_test")
         self.stack = stack
@@ -386,7 +422,7 @@ class MissionMonitor:
         self.collision_received_at = 0.0
         self.goal_topic = (
             "/goal_pose"
-            if args.stack in {"scalenav", "route_yopo"}
+            if args.stack in {"scalenav", "yopo_simple", "route_yopo"}
             else "/move_base_simple/goal"
         )
         # Every benchmark launch has one planner and one structured logger on
@@ -553,6 +589,11 @@ class MissionMonitor:
         if self.collision is not False:
             raise RuntimeError("collision is not clear immediately before goal publish")
         self.publish_goal(args)
+        print(
+            "goal published; Route-YOPO mission is running "
+            f"toward ({args.goal_x:.2f}, {args.goal_y:.2f}, {args.goal_z:.2f})",
+            flush=True,
+        )
         mission_start = time.monotonic()
         previous_position: tuple[float, float, float] | None = None
         path_m = 0.0
@@ -660,6 +701,7 @@ def run_trial(
     args: argparse.Namespace, run_dir: Path, summary_path: Path, trial: int
 ) -> dict[str, Any]:
     started_at = timestamp()
+    trial_started_monotonic = time.monotonic()
     console_path = run_dir / f"trial_{trial:04d}_stack.log"
     known_sessions = session_directories(args.log_root)
     stack: subprocess.Popen[str] | None = None
@@ -674,7 +716,7 @@ def run_trial(
                 "controller processes remained before AirSim reset: "
                 + ", ".join(str(pid) for pid, _ in conflicts)
             )
-        reset_airsim(args)
+        wait_for_airsim_and_reset(args)
         deadline = time.monotonic() + args.reset_settle
         while time.monotonic() < deadline and not STOP_REQUESTED:
             time.sleep(min(0.1, deadline - time.monotonic()))
@@ -693,7 +735,26 @@ def run_trial(
         while time.monotonic() < terminal_deadline:
             monitor.spin_once(min(0.05, terminal_deadline - time.monotonic()))
     except InterruptedError as error:
-        result = {"outcome": "interrupted", "detail": str(error)}
+        result = {
+            "outcome": "interrupted",
+            "detail": f"{error} during startup",
+            "duration_s": time.monotonic() - trial_started_monotonic,
+        }
+        if monitor is not None:
+            position, speed = monitor.odom_state()
+            if all(math.isfinite(value) for value in (*position, speed)):
+                result.update(
+                    {
+                        "final_x": position[0],
+                        "final_y": position[1],
+                        "final_z": position[2],
+                        "final_error_m": math.dist(
+                            position, (args.goal_x, args.goal_y, args.goal_z)
+                        ),
+                        "final_speed_mps": speed,
+                        "collision": monitor.collision is True,
+                    }
+                )
     except Exception as error:
         result = {
             "outcome": "startup_failed" if monitor is None else "failed",

@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Replay one Route-YOPO planning frame from a scalenav_log.v2 session.
-
-The demo compares the current unconstrained 3-D primitives with the same model
-outputs projected onto the fixed route altitude. It does not publish ROS
-commands or modify the recorded session.
-"""
+"""Replay one Route-YOPO planning frame from a scalenav_log.v2 session."""
 
 from __future__ import annotations
 
@@ -22,14 +17,10 @@ from graph.depth_query import DepthSafeVolumeQuery
 from route_yopo_control_core import (
     build_route_features,
     clip_goal_to_camera_fov,
-    enforce_route_progress,
-    project_endstates_to_altitude,
     quaternion_xyzw_to_matrix,
     reanchor_route_path,
     sample_poly5_candidate_states,
-    select_first_certified,
     validate_depth_trajectory,
-    validate_route_corridor,
     world_to_body_flu,
 )
 
@@ -187,8 +178,6 @@ def safety_summary(safety: Sequence[dict[str, Any]]) -> dict[str, int]:
         "INVALID",
         "UNVALIDATED",
         "ALTITUDE",
-        "ROUTE_ALTITUDE",
-        "ROUTE_CORRIDOR",
         "NON_FINITE",
     )
     return {name: sum(item["state"] == name for item in safety) for name in names}
@@ -207,7 +196,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seconds-after-goal", type=float, default=3.0)
     parser.add_argument(
         "--model",
-        default=str(root / "train_scalenav/saved_fixed_altitude/YOPO_0/best.pth"),
+        default=str(root / "train_scalenav/saved_route_centerline_w01_train_large_001/YOPO_0/epoch12.pth"),
     )
     parser.add_argument("--train-root", default=str(root / "train_scalenav"))
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -222,16 +211,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--route-start-tolerance", type=float, default=1.5)
     parser.add_argument("--route-reanchor-tolerance", type=float, default=5.0)
     parser.add_argument("--route-terminal-tolerance", type=float, default=2.0)
-    parser.add_argument("--route-altitude-tolerance", type=float, default=0.25)
-    parser.add_argument("--route-corridor-tracking-tolerance", type=float, default=0.1)
     parser.add_argument("--output", help="optional JSON output path")
     args = parser.parse_args()
     if args.seconds_after_goal < 0.0:
         parser.error("seconds after goal must be non-negative")
     if args.robot_radius <= 0.0 or args.safety_margin < 0.0:
         parser.error("robot radius and safety margin are invalid")
-    if not 0.0 <= args.route_corridor_tracking_tolerance <= args.safety_margin:
-        parser.error("route corridor tracking tolerance must be within the safety margin")
     return args
 
 
@@ -270,7 +255,10 @@ def main() -> None:
     clearance_m = float(clearance_record["data"]["global_witness_min_m"])
     frontier_world, graph_record = load_frontier(session, records, stamp_ns)
 
-    route_safe_radius = clearance_m - args.robot_radius - args.safety_margin
+    # Match the online controller: use the original ScaleNav route clearance
+    # as the bubble constraint radius. Vehicle dimensions are applied only by
+    # the separate depth collision certification below.
+    route_safe_radius = clearance_m
     route_start_error = float(np.linalg.norm(path_world[0] - position))
     route_terminal_error = float(np.linalg.norm(path_world[-1] - frontier_world))
     route_valid = bool(
@@ -291,14 +279,13 @@ def main() -> None:
         else:
             path_world = anchored
             route_start_error = 0.0
-    route_corridor_enabled = route_valid and route_safe_radius > 0.0
     if route_valid and route_start_error > 1.0e-3:
         # Match the online adapter: the live vehicle pose is the first cell of
         # the corridor map, so the short hand-off into the witness is covered.
         path_world = np.concatenate((position[None], path_world), axis=0)
     anchors = np.asarray(cfg["route_anchor_distances_m"], dtype=np.float32)
     if route_valid:
-        point_radii = np.full(len(path_world), max(route_safe_radius, 0.25), dtype=np.float32)
+        point_radii = np.full(len(path_world), max(route_safe_radius, 0.0), dtype=np.float32)
         centers, radii, distances = sample_route_bubbles(
             path_world, point_radii, anchors
         )
@@ -330,105 +317,51 @@ def main() -> None:
         raise RuntimeError("--device cuda requested but CUDA is unavailable")
     device = torch.device(requested_device)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model = YopoNetwork().to(device).eval()
-    feature_order = model.load_route_checkpoint(checkpoint)
+    depth_tensor = torch.from_numpy(prepared_depth[None, None]).to(device)
+    motion_tensor = torch.from_numpy(motion_body[None]).to(device)
+    frontier_tensor = torch.from_numpy(frontier_body[None]).to(device)
+    route_tensor = torch.from_numpy(route_features[None]).to(device)
     with torch.inference_mode():
+        model = YopoNetwork().to(device).eval()
+        feature_order = model.load_route_checkpoint(checkpoint)
         endstate, score = model(
-            torch.from_numpy(prepared_depth[None, None]).to(device),
-            torch.from_numpy(motion_body[None]).to(device),
-            torch.from_numpy(frontier_body[None]).to(device),
-            torch.from_numpy(route_features[None]).to(device),
+            depth_tensor, motion_tensor, frontier_tensor, route_tensor
         )
-    endstates = endstate[0].permute(1, 2, 0).reshape(-1, 9).cpu().numpy()
-    scores = score[0].reshape(-1).cpu().numpy()
-    if route_valid:
-        endstates = enforce_route_progress(
-            endstates,
-            frontier_body,
-            minimum_forward_m=2.0,
-            maximum_forward_m=8.0,
-        )
-    route_altitude = float(frontier_world[2])
-    fixed_endstates = project_endstates_to_altitude(
-        endstates, position, rotation, route_altitude
-    )
-    fixed_endpoints_world = position[None] + fixed_endstates[:, :3] @ rotation.T
-
-    def evaluate(states: np.ndarray, *, enforce_route_altitude: bool):
-        trajectories, _, _ = sample_poly5_candidate_states(
-            position,
-            velocity,
-            acceleration,
-            states,
-            rotation,
-            segment_time_s=float(cfg["sgm_time"]),
-            sample_count=101,
-        )
-        query = DepthSafeVolumeQuery(
-            raw_depth,
-            horizontal_fov_deg=args.source_horizontal_fov,
-            vertical_fov_deg=args.source_vertical_fov,
-            robot_radius_m=args.robot_radius,
-            safety_margin_m=args.safety_margin,
-            sample_step_m=0.2,
-            far_depth_m=args.max_depth,
-            max_unknown_fraction=0.2,
-        )
-        camera_world = position + rotation @ np.asarray(
-            args.camera_translation_flu, dtype=np.float64
-        )
-        safety = []
-        for trajectory in trajectories:
-            corridor = (
-                validate_route_corridor(
-                    trajectory,
-                    path_world,
-                    route_safe_radius,
-                    args.route_corridor_tracking_tolerance,
-                )
-                if enforce_route_altitude and route_corridor_enabled
-                else None
-            )
-            result = validate_depth_trajectory(
-                query,
-                trajectory,
-                camera_world,
+        endstates = endstate[0].permute(1, 2, 0).reshape(-1, 9).cpu().numpy()
+        trajectories, trajectory_velocities, trajectory_accelerations = (
+            sample_poly5_candidate_states(
+                position,
+                velocity,
+                acceleration,
+                endstates,
                 rotation,
-                minimum_altitude_m=args.minimum_altitude,
-                route_altitude_m=route_altitude if enforce_route_altitude else None,
-                route_altitude_tolerance_m=args.route_altitude_tolerance
-                if enforce_route_altitude
-                else None,
+                segment_time_s=float(cfg["sgm_time"]),
+                sample_count=101,
             )
-            if result["state"] == "UNVALIDATED" and corridor is not None and corridor["state"] == "CERTIFIED":
-                result = dict(result)
-                result["state"] = "CERTIFIED"
-                result["validation_source"] = "route_corridor_map_unknown_depth"
-            if corridor is not None:
-                result.update(
-                    {
-                        name: value
-                        for name, value in corridor.items()
-                        if name != "state"
-                    }
-                )
-            safety.append(result)
-        selected = select_first_certified(
-            scores,
-            trajectories,
-            [item["state"] for item in safety],
+        )
+    scores = score[0].reshape(-1).cpu().numpy()
+    query = DepthSafeVolumeQuery(
+        raw_depth,
+        horizontal_fov_deg=args.source_horizontal_fov,
+        vertical_fov_deg=args.source_vertical_fov,
+        robot_radius_m=args.robot_radius,
+        safety_margin_m=args.safety_margin,
+        sample_step_m=0.2,
+        far_depth_m=args.max_depth,
+        max_unknown_fraction=0.2,
+    )
+    camera_world = position + rotation @ np.asarray(args.camera_translation_flu, dtype=np.float64)
+    safety = [
+        validate_depth_trajectory(
+            query, trajectory, camera_world, rotation,
             minimum_altitude_m=args.minimum_altitude,
         )
-        return trajectories, safety, selected
-
-    free_trajectories, free_safety, free_selected = evaluate(
-        endstates, enforce_route_altitude=False
-    )
-    fixed_trajectories, fixed_safety, fixed_selected = evaluate(
-        fixed_endstates, enforce_route_altitude=True
-    )
-    fixed_altitude_errors = np.max(
-        np.abs(fixed_trajectories[:, :, 2] - route_altitude), axis=1
+        for trajectory in trajectories
+    ]
+    score_selected = int(np.argmin(scores))
+    selected = next(
+        (int(index) for index in np.argsort(scores) if safety[int(index)]["state"] == "CERTIFIED"),
+        None,
     )
     candidates = []
     for index, candidate_score in enumerate(scores):
@@ -436,35 +369,21 @@ def main() -> None:
             {
                 "primitive": index,
                 "score": float(candidate_score),
-                "unconstrained_endpoint_z_m": float(free_trajectories[index, -1, 2]),
-                "fixed_endpoint_z_m": float(fixed_trajectories[index, -1, 2]),
-                "fixed_endpoint_world_m": fixed_endpoints_world[index].tolist(),
-                "fixed_endpoint_forward_m": float(
-                    np.dot(
-                        fixed_endpoints_world[index] - position,
-                        frontier_world - position,
-                    )
-                    / max(float(np.linalg.norm(frontier_world - position)), 1.0e-6)
+                "endpoint_world_m": trajectories[index, -1].tolist(),
+                "depth_safety": safety[index]["state"],
+                "minimum_clearance_m": safety[index].get("minimum_clearance_m"),
+                "known_fraction": safety[index].get("known_fraction"),
+                "maximum_speed_mps": float(
+                    np.linalg.norm(trajectory_velocities[index], axis=1).max()
                 ),
-                "unconstrained_safety": free_safety[index]["state"],
-                "fixed_safety": fixed_safety[index]["state"],
-                "fixed_minimum_corridor_margin_m": fixed_safety[index].get(
-                    "minimum_corridor_margin_m"
+                "maximum_acceleration_mps2": float(
+                    np.linalg.norm(trajectory_accelerations[index], axis=1).max()
                 ),
-                "fixed_maximum_corridor_violation_m": fixed_safety[index].get(
-                    "maximum_corridor_violation_m"
-                ),
-                "fixed_minimum_clearance_m": fixed_safety[index].get(
-                    "minimum_clearance_m"
-                ),
-                "fixed_known_fraction": fixed_safety[index].get("known_fraction"),
-                "fixed_checked_samples": fixed_safety[index].get("checked_samples"),
-                "fixed_swept_radius_m": fixed_safety[index].get("swept_radius_m"),
             }
         )
 
     report = {
-        "demo": "Route-YOPO logged-frame fixed-altitude comparison",
+        "demo": "Route-YOPO logged-frame replay",
         "session": str(session),
         "depth_frame": depth_record["file"],
         "stamp_ns": stamp_ns,
@@ -481,18 +400,16 @@ def main() -> None:
             "velocity_world_mps": velocity.tolist(),
             "acceleration_world_mps2": acceleration.tolist(),
             "frontier_world_m": frontier_world.tolist(),
-            "route_altitude_m": route_altitude,
             "path_altitude_min_max_m": [
                 float(np.min(path_world[:, 2])),
                 float(np.max(path_world[:, 2])),
             ],
             "global_witness_clearance_m": clearance_m,
             "route_safe_radius_m": route_safe_radius,
-            "route_corridor_tracking_tolerance_m": args.route_corridor_tracking_tolerance,
+            "route_radius_vehicle_subtraction_m": 0.0,
             "route_start_error_m": route_start_error,
             "route_terminal_error_m": route_terminal_error,
             "route_features_active": route_valid,
-            "route_corridor_enabled": route_corridor_enabled,
             "depth_to_odom_stamp_delta_ms": (
                 stamp_ns - int(odom_record["stamp_ns"])
             )
@@ -503,32 +420,20 @@ def main() -> None:
                 "depth": depth_record["file"],
             },
         },
-        "unconstrained": {
-            "score_argmin": int(np.argmin(scores)),
-            "selected_certified": free_selected,
-            "selected_endpoint_z_m": None
-            if free_selected is None
-            else float(free_trajectories[free_selected, -1, 2]),
+        "selection": {
+            "score_argmin": score_selected,
+            "first_certified_by_score": selected,
+            "selected_endpoint_world_m": None
+            if selected is None
+            else trajectories[selected, -1].tolist(),
+            "selected_depth_safety": None
+            if selected is None
+            else safety[selected]["state"],
             "endpoint_z_min_max_m": [
-                float(np.min(free_trajectories[:, -1, 2])),
-                float(np.max(free_trajectories[:, -1, 2])),
+                float(np.min(trajectories[:, -1, 2])),
+                float(np.max(trajectories[:, -1, 2])),
             ],
-            "safety_counts": safety_summary(free_safety),
-        },
-        "fixed_altitude": {
-            "selected_certified": fixed_selected,
-            "selected_endpoint_z_m": None
-            if fixed_selected is None
-            else float(fixed_trajectories[fixed_selected, -1, 2]),
-            "endpoint_z_min_max_m": [
-                float(np.min(fixed_trajectories[:, -1, 2])),
-                float(np.max(fixed_trajectories[:, -1, 2])),
-            ],
-            "trajectory_altitude_error_min_max_m": [
-                float(np.min(fixed_altitude_errors)),
-                float(np.max(fixed_altitude_errors)),
-            ],
-            "safety_counts": safety_summary(fixed_safety),
+            "safety_counts": safety_summary(safety),
         },
         "candidates": candidates,
     }

@@ -29,3 +29,21 @@ def test_sdf_query_permutates_world_xyz_to_storage_zyx():
     position = torch.tensor([[[0.2, 0.4, 0.2]]], dtype=torch.float32)
     _, distance = loss.get_distance_cost(position, torch.tensor([0]))
     assert torch.allclose(distance, torch.tensor([[121.0]]), atol=1.0e-4)
+
+
+def test_route_attraction_is_zero_on_guide_and_pulls_offset_toward_it():
+    loss = SafetyLoss.__new__(SafetyLoss)
+    loss.goal_length = 2.0
+    start = torch.zeros((1, 3), dtype=torch.float32)
+    route = torch.tensor([[[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]])
+    aligned = route.clone()
+    assert loss.route_attraction_cost(aligned, start, route).item() == 0.0
+
+    offset = torch.tensor(
+        [[[1.0, 0.5, 0.0], [2.0, 0.5, 0.0]]], requires_grad=True
+    )
+    cost = loss.route_attraction_cost(offset, start, route)
+    cost.backward()
+    assert cost.item() > 0.0
+    assert torch.all(offset.grad[..., 1] > 0.0)
+    assert torch.allclose(offset.grad[..., 0], torch.zeros_like(offset.grad[..., 0]))

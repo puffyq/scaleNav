@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <mutex>
 #include <vector>
@@ -165,11 +166,8 @@ inline float semanticFrameBaseline(std::vector<float> scores,
   return std::clamp(*middle, 0.0F, 1.0F);
 }
 
-// Project an image location with a fixed optical Z depth into FLU, matching
-// the ordinary depth-camera projection.  Off-axis samples are farther than
-// depth_m in Euclidean range, but every sample remains depth_m in front of the
-// camera image plane.
-inline Eigen::Vector3f virtualSemanticPointFlu(
+// Project synchronized camera depth using its optical-Z convention.
+inline Eigen::Vector3f semanticPointFluAtOpticalDepth(
     float normalized_u, float normalized_v,
     float horizontal_fov_deg, float vertical_fov_deg,
     float depth_m, const Eigen::Vector3f &camera_translation) {
@@ -178,11 +176,26 @@ inline Eigen::Vector3f virtualSemanticPointFlu(
     std::clamp(horizontal_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
   const float vertical_tangent = std::tan(
     std::clamp(vertical_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
-  const Eigen::Vector3f depth_ray(
+  Eigen::Vector3f depth_ray(
     1.0F,
     -(2.0F * std::clamp(normalized_u, 0.0F, 1.0F) - 1.0F) * horizontal_tangent,
     -(2.0F * std::clamp(normalized_v, 0.0F, 1.0F) - 1.0F) * vertical_tangent);
   return camera_translation + std::max(0.0F, depth_m) * depth_ray;
+}
+
+inline Eigen::Vector3f virtualSemanticPointFlu(
+    float normalized_u, float normalized_v,
+    float horizontal_fov_deg, float vertical_fov_deg,
+    float distance_m, const Eigen::Vector3f &camera_translation) {
+  // Virtual alternatives use radial range instead: all five columns must be
+  // equally far from the camera or the outer columns can silently fall
+  // outside the local A* radius.
+  const Eigen::Vector3f optical_point = semanticPointFluAtOpticalDepth(
+    normalized_u, normalized_v, horizontal_fov_deg, vertical_fov_deg,
+    1.0F, Eigen::Vector3f::Zero());
+  const Eigen::Vector3f direction = optical_point.norm() > 1e-6F ?
+    optical_point.normalized() : Eigen::Vector3f::UnitX();
+  return camera_translation + std::max(0.0F, distance_m) * direction;
 }
 
 inline bool retainGeometryAfterMiss(
@@ -216,6 +229,19 @@ public:
   float semantic_confidence_ = 0.0F;
   std::uint32_t semantic_observations_ = 0;
   std::int64_t semantic_stamp_ns_ = 0;
+  // True only for a fixed-depth projection created as one of the five
+  // semantic frontier alternatives. A measured depth projection is an
+  // annotation on ordinary geometry and must never become a frontier merely
+  // because its geometry is not currently Verified.
+  bool is_virtual_semantic_ = false;
+  // Heatmap-frame identity retained so the five horizontal rays from one
+  // observation can be compared as relative alternatives during frontier
+  // selection. A negative column denotes legacy data without this metadata.
+  std::int64_t semantic_frame_stamp_ns_ = 0;
+  std::int8_t semantic_column_ = -1;
+  // Prevent an edge detached by live obstacle validation from being
+  // reinserted repeatedly during the same semantic frame.
+  std::int64_t semantic_edges_attempted_stamp_ns_ = 0;
   vector<BubbleNode::Ptr> bubbles_; // 过程量，计算出topoNode后会清空
   unordered_set<TopoNode::Ptr> neighbors_;
   unordered_map<TopoNode::Ptr, uint8_t> unreachable_nbrs_;
@@ -226,11 +252,143 @@ public:
   unordered_map<TopoNode::Ptr, float> edge_clearance_;
 };
 
+// Measured depth can annotate a Verified backbone node with semantic evidence.
+// That does not turn the node into a provisional semantic endpoint: only an
+// Unknown fixed-depth projection has the direct ordinary-semantic edge
+// contract used by insertion, A*, and live route validation.
+inline bool isVirtualSemanticEndpoint(const TopoNode::Ptr &node) {
+  return node && node->is_virtual_semantic_ &&
+         node->geometry_state_ == TopoGeometryState::Unknown &&
+         node->semantic_observations_ > 0;
+}
+
+inline bool isOrdinaryBackboneEndpoint(const TopoNode::Ptr &node) {
+  return node && (node->role_ == TopoNodeRole::Odom ||
+                  node->geometry_state_ == TopoGeometryState::Verified);
+}
+
+inline bool isOrdinarySemanticLink(const TopoNode::Ptr &left,
+                                   const TopoNode::Ptr &right) {
+  return (isVirtualSemanticEndpoint(left) &&
+          isOrdinaryBackboneEndpoint(right)) ||
+         (isVirtualSemanticEndpoint(right) &&
+          isOrdinaryBackboneEndpoint(left));
+}
+
+inline bool hasExecutableTopologyEdge(const TopoNode::Ptr &from,
+                                      const TopoNode::Ptr &to) {
+  if (!from || !to || !from->neighbors_.count(to)) return false;
+  const auto forward_path = from->paths_.find(to);
+  const auto forward_weight = from->weight_.find(to);
+  return forward_path != from->paths_.end() && forward_path->second.size() >= 2 &&
+         forward_weight != from->weight_.end() && std::isfinite(forward_weight->second);
+}
+
+struct AcceptedRouteConnectivity {
+  bool verified_prefix_reachable = false;
+  bool accepted_head_edge_usable = false;
+  bool accepted_stable_edges_usable = false;
+  bool has_terminal_unknown = false;
+  bool terminal_unknown_edge_usable = false;
+  std::size_t verified_nodes_visited = 0;
+  TopoNode::Ptr verified_anchor;
+
+  bool routeUsable() const {
+    // The accepted route is a progressing segment, not a requirement to keep
+    // the original odom-to-second-node edge attached forever.  The rolling
+    // odom vertex is reconnected as the vehicle moves, so that old head edge
+    // normally disappears even though the vehicle remains in the same
+    // Verified component.  Replanning on that transient pointer/edge change
+    // caused repeated left/right frontier switches.  Reachability to the
+    // accepted Verified anchor is the stable contract; an Unknown semantic
+    // endpoint still requires its live terminal edge.
+    return accepted_stable_edges_usable && verified_prefix_reachable &&
+           (!has_terminal_unknown || terminal_unknown_edge_usable);
+  }
+};
+
+// An Unknown semantic node is allowed only as the final frontier. It may be a
+// provisional execution target, but it must never bridge two disconnected
+// Verified components when an accepted route is checked from the current odom.
+inline AcceptedRouteConnectivity acceptedRouteConnectivity(
+    const TopoNode::Ptr &current_odom,
+    const std::vector<TopoNode::Ptr> &accepted_path) {
+  AcceptedRouteConnectivity result;
+  if (!isOrdinaryBackboneEndpoint(current_odom) || accepted_path.size() < 2) {
+    return result;
+  }
+  // The rolling odom node can be replaced as the vehicle moves. Keep the
+  // original head-edge result as a diagnostic, but do not make it a hold
+  // requirement: the stable check below is reachability to the accepted
+  // Verified anchor from the current odom node.
+  const bool accepted_head_is_odom = accepted_path.front() &&
+    accepted_path.front()->role_ == TopoNodeRole::Odom;
+  result.accepted_head_edge_usable =
+    (accepted_path.front() == current_odom || accepted_head_is_odom) &&
+    hasExecutableTopologyEdge(current_odom, accepted_path[1]);
+
+  // Only the rolling odom edge may legitimately disappear while a route is
+  // held. Every later edge is part of the accepted A* sequence; endpoint
+  // reachability through some other branch cannot make that stale sequence
+  // executable.
+  result.accepted_stable_edges_usable = true;
+  for (std::size_t i = 2; i < accepted_path.size(); ++i) {
+    if (!hasExecutableTopologyEdge(accepted_path[i - 1], accepted_path[i])) {
+      result.accepted_stable_edges_usable = false;
+      break;
+    }
+  }
+
+  const auto terminal = accepted_path.back();
+  if (isVirtualSemanticEndpoint(terminal)) {
+    result.has_terminal_unknown = true;
+    result.verified_anchor = accepted_path[accepted_path.size() - 2];
+    result.terminal_unknown_edge_usable =
+      isOrdinarySemanticLink(result.verified_anchor, terminal) &&
+      hasExecutableTopologyEdge(result.verified_anchor, terminal);
+  } else if (isOrdinaryBackboneEndpoint(terminal)) {
+    result.verified_anchor = terminal;
+  } else {
+    return result;
+  }
+  if (!isOrdinaryBackboneEndpoint(result.verified_anchor)) return result;
+
+  std::deque<TopoNode::Ptr> queue;
+  std::unordered_set<TopoNode::Ptr> visited;
+  queue.push_back(current_odom);
+  visited.insert(current_odom);
+  while (!queue.empty()) {
+    const auto current = queue.front();
+    queue.pop_front();
+    if (current == result.verified_anchor) {
+      result.verified_prefix_reachable = true;
+      break;
+    }
+    for (const auto &neighbor : current->neighbors_) {
+      if (!isOrdinaryBackboneEndpoint(neighbor) ||
+          !hasExecutableTopologyEdge(current, neighbor) ||
+          !visited.insert(neighbor).second) {
+        continue;
+      }
+      queue.push_back(neighbor);
+    }
+  }
+  result.verified_nodes_visited = visited.size();
+  return result;
+}
+
 inline bool semanticNodeActiveForPlanning(
     const TopoNode &node, std::int64_t active_virtual_stamp_ns) {
-  return node.geometry_state_ == TopoGeometryState::Verified ||
-         active_virtual_stamp_ns == 0 ||
-         node.semantic_stamp_ns_ == active_virtual_stamp_ns;
+  if (node.geometry_state_ == TopoGeometryState::Verified ||
+      active_virtual_stamp_ns == 0) {
+    return true;
+  }
+  if (active_virtual_stamp_ns < 0 || node.semantic_stamp_ns_ <= 0) return false;
+  // The active value is a current-time reference for virtual semantic memory.
+  // Keep observations from the preceding 1.5 s eligible for planning/frontiers.
+  constexpr std::int64_t kSemanticPlanningMemoryNs = 1'500'000'000LL;
+  const std::int64_t age_ns = active_virtual_stamp_ns - node.semantic_stamp_ns_;
+  return age_ns >= 0 && age_ns <= kSemanticPlanningMemoryNs;
 }
 
 struct PairPtrHash {
@@ -362,6 +520,9 @@ struct TopoSemanticRecord {
   float confidence = 0.0F;
   std::uint32_t observations = 0;
   std::int64_t stamp_ns = 0;
+  bool is_virtual = false;
+  std::int64_t frame_stamp_ns = 0;
+  std::int8_t column = -1;
 };
 
 struct VirtualSemanticPruneResult {
@@ -372,6 +533,17 @@ struct VirtualSemanticPruneResult {
   vector<std::uint64_t> removed_ids;
 };
 
+struct TopoFrontierCandidateStats {
+  std::uint64_t node_id = 0;
+  std::int64_t frame_stamp_ns = 0;
+  std::int8_t column = -1;
+  float semantic_risk = 0.0F;
+  float astar_cost = 0.0F;
+  float route_distance = 0.0F;
+  float mission_distance = 0.0F;
+  float objective = std::numeric_limits<float>::infinity();
+};
+
 struct TopoGraphSearchStats {
   size_t semantic_query_nodes = 0;
   size_t semantic_inactive_virtual_nodes_skipped = 0;
@@ -379,6 +551,20 @@ struct TopoGraphSearchStats {
   size_t edge_evaluations = 0;
   size_t semantic_candidate_checks = 0;
   size_t candidate_frontier_goals = 0;
+  size_t reverse_edges_skipped = 0;
+  size_t semantic_frontier_candidates = 0;
+  size_t ordinary_frontier_candidates = 0;
+  size_t semantic_frontier_edge_rejections = 0;
+  float best_semantic_frontier_objective = std::numeric_limits<float>::infinity();
+  float best_ordinary_frontier_objective = std::numeric_limits<float>::infinity();
+  std::uint64_t best_semantic_frontier_id = 0;
+  std::uint64_t best_ordinary_frontier_id = 0;
+  size_t semantic_mixed_frames = 0;
+  size_t semantic_all_low_frames = 0;
+  size_t semantic_all_high_frames = 0;
+  std::int64_t selected_semantic_frame_stamp_ns = 0;
+  std::int8_t selected_semantic_column = -1;
+  vector<TopoFrontierCandidateStats> semantic_frontier_ranking;
   bool timed_out = false;
 };
 
@@ -419,7 +605,14 @@ public:
       const vector<Eigen::Vector3f> &centers, const vector<float> &semantic_scores,
       float bubble_radius, const Eigen::Vector3f &odom_pos,
       std::int64_t stamp_ns,
-      const vector<float> &semantic_confidences = {});
+      const vector<float> &semantic_confidences = {},
+      const vector<std::uint8_t> &semantic_virtual_flags = {},
+      const vector<std::int8_t> &semantic_columns = {});
+
+  // Re-check every ordinary-to-semantic edge against the current obstacle
+  // map.  This must run independently of semantic-frame updates because the
+  // lidar map can discover a blocking obstacle between two semantic frames.
+  size_t revalidateSemanticEdges();
   Eigen::Vector3f min_bd, max_bd, map_bd_min, map_bd_max;
   double min_x_, min_y_, min_z_; // 最小格子尺寸
   double bubble_min_radius_, frt_bubble_radius_;
@@ -451,7 +644,8 @@ public:
                    TopoGraphSearchStats *search_stats = nullptr,
                    std::int64_t active_virtual_semantic_stamp_ns = 0,
                    float previous_path_cost_factor = 0.9F,
-                   float path_cost_weight = 1.0F);
+                   float path_cost_weight = 1.0F,
+                   const Eigen::Vector3f *mission_goal = nullptr);
   bool goalDirectedSearch(
       const TopoNode::Ptr &start_node, const Eigen::Vector3f &goal,
       std::vector<TopoNode::Ptr> &path, double time_out,
@@ -471,7 +665,9 @@ public:
       float fov_penalty_weight = 0.2F,
       float smoothness_penalty_weight = 0.35F,
       TopoGraphSearchStats *search_stats = nullptr,
-      std::int64_t active_virtual_semantic_stamp_ns = 0);
+      std::int64_t active_virtual_semantic_stamp_ns = 0,
+      float frontier_goal_distance_weight = 1.0F,
+      float frontier_semantic_score_weight = 1.0F);
   float semanticRiskForEdge(
       const TopoNode::Ptr &from, const TopoNode::Ptr &to,
       const std::vector<TopoNode::Ptr> *semantic_nodes = nullptr) const;

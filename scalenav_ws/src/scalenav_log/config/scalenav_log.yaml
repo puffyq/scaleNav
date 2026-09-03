@@ -8,6 +8,7 @@ scalenav_log_node:
     graph_topic: "/scalenav/graph"
     bubble_topic: "/scalenav/bubbles"
     path_topic: "/scalenav/path"
+    route_yopo_planned_path_topic: "/scalenav/route_yopo/planned_path"
     odom_topic: "/sim/odom"
     control_topic: "/scalenav/trajectory_point"
     semantic_topic: "/scalenav/text_heatmap_raw"

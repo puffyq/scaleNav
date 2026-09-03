@@ -203,4 +203,34 @@ TEST(EpicIntegration, EdgeCrossingObservedObstacleIsRejectedBetweenEndpoints)
   EXPECT_FALSE(astar.collisionCheck_shortenPath(path));
 }
 
+TEST(EpicIntegration, ObservedWallKeepsSemanticEdgeBlockedWhenNextFrameLooksAway)
+{
+  auto map = std::make_shared<LIOInterface>();
+  map->configureBounds(Eigen::Vector3f(-2.0F, -2.0F, 0.0F),
+                       Eigen::Vector3f(40.0F, 10.0F, 4.0F));
+  map->configureStorage(0.10F, 40.0F, 20000, 0.5F);
+  map->updateCloudWorld(singlePoint(PointType(12.0F, 0.0F, 1.6F)),
+                        Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity());
+
+  ParallelBubbleAstar astar;
+  astar.lidar_map_interface_ = map;
+  astar.resolution_ = 0.10;
+  astar.safe_distance_ = 0.61;
+  std::vector<Eigen::Vector3f> initial_edge = {p(0.0F, 0.0F), p(30.0F, 0.0F)};
+  EXPECT_FALSE(astar.collisionCheck_shortenPath(initial_edge));
+
+  // A later camera frame observes another direction and does not contain the
+  // wall. The sliding obstacle window must retain the earlier hit, otherwise
+  // the same ordinary-semantic chord is immediately recreated through it.
+  map->updateCloudWorld(singlePoint(PointType(5.0F, 6.0F, 1.6F)),
+                        Eigen::Vector3f(1.0F, 0.0F, 1.6F),
+                        Eigen::Quaternionf::Identity());
+  std::vector<Eigen::Vector3f> rechecked_edge = {p(0.0F, 0.0F), p(30.0F, 0.0F)};
+  ParallelBubbleAstar::CollisionCheckInfo info;
+  EXPECT_FALSE(astar.collisionCheck_shortenPath(rechecked_edge, &info));
+  EXPECT_LT(info.minimum_clearance, astar.safe_distance_);
+  EXPECT_LT(std::abs(info.minimum_clearance_point.x() - 12.0F),
+            astar.safe_distance_ + 0.05);
+}
+
 }  // namespace

@@ -111,6 +111,7 @@ public:
     initial_position_ = array3(
       declare_parameter("initial_position", std::vector<double>{5.28, -2.21, 2.0}),
       {5.28, -2.21, 2.0});
+    initial_yaw_ = declare_parameter("initial_yaw", 1.57);
     kp_ = array3(
       declare_parameter("position_gain", std::vector<double>{4.0, 4.0, 6.0}),
       {4.0, 4.0, 6.0});
@@ -127,8 +128,11 @@ public:
     if (simulation_rate_ <= 0.0 || odom_rate_ <= 0.0 || odom_rate_ > simulation_rate_) {
       throw std::invalid_argument("simulation_rate and odom_rate are inconsistent");
     }
-    if (!finite(initial_position_) || initial_position_.z() < minimum_altitude_) {
-      throw std::invalid_argument("initial_position is invalid or below minimum_altitude");
+    if (!finite(initial_position_) || initial_position_.z() < minimum_altitude_ ||
+      !std::isfinite(initial_yaw_))
+    {
+      throw std::invalid_argument(
+              "initial_position or initial_yaw is invalid, or altitude is too low");
     }
     if (maximum_linear_speed_ <= 0.0 || maximum_yaw_rate_ <= 0.0 ||
       maximum_command_acceleration_ <= 0.0 || maximum_yaw_acceleration_ <= 0.0)
@@ -186,7 +190,7 @@ private:
     Quadrotor::State state;
     state.x = initial_position_;
     state.v.setZero();
-    state.R.setIdentity();
+    state.R = Eigen::AngleAxisd(initial_yaw_, Eigen::Vector3d::UnitZ()).toRotationMatrix();
     state.omega.setZero();
     state.motor_rpm.setZero();
     quadrotor_.setState(state);
@@ -195,7 +199,7 @@ private:
     desired_.position = initial_position_;
     desired_.velocity.setZero();
     desired_.acceleration.setZero();
-    desired_.yaw = 1.57;
+    desired_.yaw = initial_yaw_;
     desired_.yaw_rate = 0.0;
     emergency_stop_latched_ = false;
     timeout_hold_active_ = false;
@@ -457,6 +461,7 @@ private:
   Quadrotor quadrotor_;
   DesiredState desired_;
   Eigen::Vector3d initial_position_;
+  double initial_yaw_;
   Eigen::Vector3d kp_;
   Eigen::Vector3d kv_;
   Eigen::Vector3d kr_;

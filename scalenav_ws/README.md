@@ -46,6 +46,30 @@ bash scalenav_ws/scripts/goal.sh  # one-way paper goal: (0, 140, 1.6)
 bash scalenav_ws/scripts/rviz.sh
 ```
 
+### RGB-D/Odom bag replay
+
+Record only the three sensor streams needed for deterministic planner replay:
+
+```bash
+bash scalenav_ws/scripts/record_rgbd_odom.sh \
+  --output scalenav_ws/bags/run_001 --duration 60
+```
+
+The recorder stores `/sim/odom`, `/camera/color/image`, and
+`/camera/depth/image` only. Replay the bag through the depth projector, graph,
+Route-YOPO and RViz by supplying the mission goal in `world_enu`:
+
+```bash
+bash scalenav_ws/scripts/replay_rgbd_odom.sh scalenav_ws/bags/run_001 \
+  --goal 0 40 1.6 --rate 1.0
+```
+
+Replay does not require AirSim. Since `CameraInfo` is deliberately absent from
+the bag, the depth projector derives focal lengths from its configured 90°
+horizontal and 60° vertical FOV. Use `--no-rviz` for headless runs and
+`--loop` for repeated playback. The goal is not part of the sensor-only bag;
+omit `--goal` only when publishing `/goal_pose` from another node.
+
 The goal script accepts `x y z` in the `world_enu` frame. AirSim/UE must be
 running before `start.sh`; run `build.sh` after source changes.
 

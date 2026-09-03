@@ -5,8 +5,10 @@ set -Eeo pipefail
 PROMPT="${PROMPT:-tree, blocks, wall}"   # PEARL prompt (higher score = higher risk)
 SEMANTIC=1                    # 1=text heatmap on, 0=geometry only
 SEMANTIC_COST_WEIGHT="${SEMANTIC_COST_WEIGHT:-2.0}"    # A* semantic repulsion; 0=off
-SEMANTIC_ROUTE_INFLUENCE_M="${SEMANTIC_ROUTE_INFLUENCE_M:-5.0}"
-SEMANTIC_POINT_INFLUENCE_M="${SEMANTIC_POINT_INFLUENCE_M:-5.0}"
+SEMANTIC_ROUTE_INFLUENCE_M="${SEMANTIC_ROUTE_INFLUENCE_M:-8.0}"
+SEMANTIC_POINT_INFLUENCE_M="${SEMANTIC_POINT_INFLUENCE_M:-8.0}"
+FRONTIER_GOAL_DISTANCE_WEIGHT="${FRONTIER_GOAL_DISTANCE_WEIGHT:-2.0}"
+WAIT_FOR_INITIAL_SEMANTIC="${WAIT_FOR_INITIAL_SEMANTIC:-true}"
 GRAPH_FIXED_LAYER="${GRAPH_FIXED_LAYER:-true}"  # graph topology: true=single layer, false=3D
 DEVICE="cuda"
 RATE="2"                      # heatmap Hz
@@ -69,6 +71,12 @@ while (($#)); do
   esac
 done
 
+# A geometry-only run has no heatmap producer, so it must bypass the semantic
+# startup gate. Semantic runs keep the default one-shot wait enabled.
+if ((SEMANTIC == 0)); then
+  WAIT_FOR_INITIAL_SEMANTIC=false
+fi
+
 [[ -f /opt/ros/humble/setup.bash ]] || { echo "ROS2 Humble not found" >&2; exit 1; }
 [[ -f "$WS/install/setup.bash" ]] || { echo "run $SCRIPT_DIR/build.sh first" >&2; exit 1; }
 [[ -x "$PYTHON" ]] || { echo "Python not found: $PYTHON" >&2; exit 1; }
@@ -120,7 +128,9 @@ run ros2 launch scalenav_graph_ros2 scalenav_graph.launch.py \
   trajectory_speed_color_max_mps:="$MAXIMUM_TRAJECTORY_SPEED_MPS" \
   semantic_cost_weight:="$SEMANTIC_COST_WEIGHT" \
   semantic_route_influence_m:="$SEMANTIC_ROUTE_INFLUENCE_M" \
-  semantic_point_influence_m:="$SEMANTIC_POINT_INFLUENCE_M"
+  semantic_point_influence_m:="$SEMANTIC_POINT_INFLUENCE_M" \
+  wait_for_initial_semantic:="$WAIT_FOR_INITIAL_SEMANTIC" \
+  frontier_goal_distance_weight:="$FRONTIER_GOAL_DISTANCE_WEIGHT"
 
 if ((SEMANTIC)); then
   run "$PYTHON" "$SRC/scalenav/text_heatmap_ros2.py" \
@@ -137,7 +147,7 @@ start_planner() {
     --mission-goal-topic /goal_pose --world-frame world_enu --odom-twist-frame body \
     --model-image-width 160 --model-image-height 96 --model-vertical-num 3 \
     --trajectory-speed-color-max-mps "$MAXIMUM_TRAJECTORY_SPEED_MPS" \
-    --fixed-altitude --plan-from-reference --disable-event-log "$@"
+    --fixed-altitude --disable-event-log "$@"
 }
 
 if ((SAVE_DEPTH)); then

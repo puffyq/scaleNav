@@ -18,6 +18,7 @@ runs/
 !train_scalenav/tools/candidate_diagnostic.html
 !tools/*.html
 !scalenav_ws/src/scalenav_log/web/index.html
+!scalenav_ws/src/scalenav/log_replay.html
 *.engine
 *.onnx
 *.trt
@@ -86,6 +87,19 @@ train_scalenav/saved_corrected/
 train_scalenav/saved_large/
 train_scalenav/saved_fixed_altitude/
 scalenav_ws/src/aut_test/results/
+
+# Captured replay sessions, benchmark logs, and generated viewers.
+log_ego/
+log_scalenav_train/
+log_scalenav_yopo_simple/
+scalenav_ws/log_test/
+scalenav_ws/tmp/
+train_scalenav/log_train/
+train_scalenav/tmp/
+train_scalenav/saved_route_*/
+train_scalenav/viewer/
+symlink_install_manifest.txt
+scalenav_ws/symlink_install_manifest.txt
 
 # Local replay diagnostics and generated semantic demo outputs.
 train_scalenav/*replay*.json

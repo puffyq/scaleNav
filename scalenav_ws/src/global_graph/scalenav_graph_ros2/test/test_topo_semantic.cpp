@@ -9,6 +9,17 @@
 
 namespace {
 
+void connectExecutableNodes(const TopoNode::Ptr &left, const TopoNode::Ptr &right)
+{
+  const float distance = (left->center_ - right->center_).norm();
+  left->neighbors_.insert(right);
+  right->neighbors_.insert(left);
+  left->paths_[right] = {left->center_, right->center_};
+  right->paths_[left] = {right->center_, left->center_};
+  left->weight_[right] = distance;
+  right->weight_[left] = distance;
+}
+
 TEST(TopoGraphM2Contract, TcM2001ProjectsPlanarAndThreeDimensionalPoints)
 {
   for (int index = 0; index < 1000; ++index) {
@@ -312,6 +323,7 @@ TEST(TopoNodeModel, SemanticSnapshotUsesOrdinaryObservedNodes)
   auto semantic = std::make_shared<TopoNode>();
   semantic->role_ = TopoNodeRole::Geometric;
   semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->is_virtual_semantic_ = true;
   semantic->semantic_observations_ = 1;
   auto geometric = std::make_shared<TopoNode>();
   geometric->role_ = TopoNodeRole::Geometric;
@@ -346,7 +358,7 @@ TEST(TopoNodeModel, SemanticSnapshotCanBeLimitedToTheLocalPlanningWindow)
   EXPECT_EQ(graph.semanticNodes().size(), 2U);
 }
 
-TEST(TopoNodeModel, SemanticPatchUsesFixedVirtualDepth)
+TEST(TopoNodeModel, SemanticPatchUsesFixedVirtualRange)
 {
   const Eigen::Vector3f camera_translation(0.5F, 0.0F, -0.1F);
   const Eigen::Vector3f center = virtualSemanticPointFlu(
@@ -355,9 +367,9 @@ TEST(TopoNodeModel, SemanticPatchUsesFixedVirtualDepth)
     0.0F, 0.0F, 90.0F, 60.0F, 30.0F, camera_translation);
 
   EXPECT_NEAR((center - camera_translation).norm(), 30.0F, 1e-5F);
-  EXPECT_GT((corner - camera_translation).norm(), 30.0F);
+  EXPECT_NEAR((corner - camera_translation).norm(), 30.0F, 1e-5F);
   EXPECT_NEAR(center.x(), 30.5F, 1e-5F);
-  EXPECT_NEAR(corner.x(), 30.5F, 1e-5F);
+  EXPECT_LT(corner.x(), 30.5F);
   EXPECT_GT(corner.y(), 0.0F);
   EXPECT_GT(corner.z(), camera_translation.z());
 }
@@ -370,6 +382,15 @@ TEST(TopoNodeModel, VirtualSemanticDepthDoesNotDependOnMeasuredDepth)
 
   EXPECT_FLOAT_EQ(point.x(), 30.0F);
   EXPECT_GT(point.x(), 20.0F);
+}
+
+TEST(TopoNodeModel, MeasuredSemanticProjectionKeepsOpticalDepth)
+{
+  const Eigen::Vector3f camera_translation(0.5F, 0.0F, -0.1F);
+  const Eigen::Vector3f corner = semanticPointFluAtOpticalDepth(
+    0.0F, 0.0F, 90.0F, 60.0F, 10.0F, camera_translation);
+  EXPECT_NEAR(corner.x(), 10.5F, 1e-5F);
+  EXPECT_GT((corner - camera_translation).norm(), 10.0F);
 }
 
 TEST(TopoSemanticCost, RiskAnchorHasAnExplicitNoiseFloor)
@@ -461,9 +482,9 @@ TEST(TopoGraphM3Contract, TcM3004ProjectionPreservesThreeVerticalRows)
     const auto upper = virtualSemanticPointFlu(u, 0.0F, 90.0F, 60.0F, 30.0F, camera);
     const auto middle = virtualSemanticPointFlu(u, 0.5F, 90.0F, 60.0F, 30.0F, camera);
     const auto lower = virtualSemanticPointFlu(u, 1.0F, 90.0F, 60.0F, 30.0F, camera);
-    EXPECT_FLOAT_EQ(upper.x() - camera.x(), 30.0F);
-    EXPECT_FLOAT_EQ(middle.x() - camera.x(), 30.0F);
-    EXPECT_FLOAT_EQ(lower.x() - camera.x(), 30.0F);
+    EXPECT_NEAR((upper - camera).norm(), 30.0F, 1e-5F);
+    EXPECT_NEAR((middle - camera).norm(), 30.0F, 1e-5F);
+    EXPECT_NEAR((lower - camera).norm(), 30.0F, 1e-5F);
     EXPECT_GT(upper.z(), middle.z());
     EXPECT_GT(middle.z(), lower.z());
   }
@@ -471,9 +492,7 @@ TEST(TopoGraphM3Contract, TcM3004ProjectionPreservesThreeVerticalRows)
     0.5F, 0.5F, 90.0F, 60.0F, 30.0F, camera);
   const auto corner = virtualSemanticPointFlu(
     0.0F, 0.0F, 90.0F, 60.0F, 30.0F, camera);
-  for (int repetition = 0; repetition < 500; ++repetition) {
-    EXPECT_GT((corner - camera).norm(), (center - camera).norm());
-  }
+  EXPECT_NEAR((corner - camera).norm(), (center - camera).norm(), 1e-5F);
 }
 
 TEST(TopoGraphM3Contract, TcM3006SemanticInsertionReusesNearbyIdentity)
@@ -705,15 +724,17 @@ TEST(TopoGraphSemanticPrune, RemovesPassedHistoryAndPreservesProtectedEvidence)
     auto node = std::make_shared<TopoNode>();
     node->center_ = Eigen::Vector3f(x, 0.0F, 1.6F);
     node->geometry_state_ = TopoGeometryState::Unknown;
+    node->is_virtual_semantic_ = true;
     graph.updateNodeSemantic(node, risk, 1.0F, stamp, 1.0F);
     region->topo_nodes_.insert(node);
     return node;
   };
-  auto behind = make_virtual(-5.0F, 0.8F, 100);
-  auto weak = make_virtual(5.0F, 0.1F, 200);
-  auto strong = make_virtual(6.0F, 0.9F, 300);
-  auto active = make_virtual(7.0F, 0.2F, 500);
-  auto protected_node = make_virtual(8.0F, 0.3F, 400);
+  constexpr std::int64_t now_ns = 5'000'000'000LL;
+  auto behind = make_virtual(-5.0F, 0.8F, 1'000'000'000LL);
+  auto weak = make_virtual(5.0F, 0.1F, 2'000'000'000LL);
+  auto strong = make_virtual(6.0F, 0.9F, 3'000'000'000LL);
+  auto active = make_virtual(7.0F, 0.2F, now_ns);
+  auto protected_node = make_virtual(8.0F, 0.3F, 3'000'000'000LL);
 
   behind->neighbors_.insert(verified);
   verified->neighbors_.insert(behind);
@@ -723,7 +744,7 @@ TEST(TopoGraphSemanticPrune, RemovesPassedHistoryAndPreservesProtectedEvidence)
   verified->weight_[behind] = 5.0F;
 
   const auto result = graph.pruneVirtualSemanticNodes(
-    Eigen::Vector3f::Zero(), Eigen::Vector3f::UnitX(), 2.0F, 3U, 500,
+    Eigen::Vector3f::Zero(), Eigen::Vector3f::UnitX(), 2.0F, 3U, now_ns,
     {protected_node->persistent_id_});
   EXPECT_EQ(result.before, 5U);
   EXPECT_EQ(result.removed_behind, 1U);
@@ -800,6 +821,7 @@ TEST(TopoGraphSemanticFrontier, CurrentGenerationExtendsNormalFrontierSearch)
   start->geometry_state_ = TopoGeometryState::Verified;
   measured_frontier->geometry_state_ = TopoGeometryState::Verified;
   semantic_frontier->geometry_state_ = TopoGeometryState::Unknown;
+  semantic_frontier->is_virtual_semantic_ = true;
   semantic_frontier->semantic_score_ = 0.8F;
   semantic_frontier->semantic_confidence_ = 1.0F;
   semantic_frontier->semantic_observations_ = 1;
@@ -835,7 +857,7 @@ TEST(TopoGraphSemanticFrontier, CurrentGenerationExtendsNormalFrontierSearch)
     start, Eigen::Vector3f(100.0F, 0.0F, 1.6F), path, 0.2,
     1.0F, 1.0F, {}, 0.0F, 50.0F, &start->center_, 0.0F, false,
     std::numeric_limits<float>::infinity(), 0.0F, nullptr, 90.0F,
-    0.0F, 0.0F, 0.0F, 0.0F, nullptr, 43));
+    0.0F, 0.0F, 0.0F, 0.0F, nullptr, 2'000'000'043LL));
   ASSERT_EQ(path.size(), 2U);
   EXPECT_EQ(path.back(), measured_frontier);
 }
@@ -862,9 +884,16 @@ TEST(TopoGraphSemanticFrontier, InsertionConnectsOnlyToMeasuredBackbone)
   measured->geometry_state_ = TopoGeometryState::Verified;
   graph.getRegionNode(Eigen::Vector3i(14, 10, 10))->topo_nodes_.insert(measured);
 
+  // A measured surface projection without a nearby Verified node is not a
+  // virtual frontier and must not create an Unknown graph endpoint.
+  ASSERT_EQ(graph.insertSemanticNodes(
+    {Eigen::Vector3f(35.0F, 12.0F, 1.6F)}, {0.9F}, 0.5F,
+    Eigen::Vector3f::Zero(), 41, {1.0F}, {0U}, {2}), 0U);
+
   ASSERT_EQ(graph.insertSemanticNodes(
     {Eigen::Vector3f(30.0F, -4.0F, 1.6F), Eigen::Vector3f(30.0F, 4.0F, 1.6F)},
-    {0.8F, 0.7F}, 0.5F, Eigen::Vector3f::Zero(), 42), 2U);
+    {0.8F, 0.7F}, 0.5F, Eigen::Vector3f::Zero(), 42,
+    {1.0F, 1.0F}, {1U, 1U}, {1, 3}), 2U);
   const auto semantic_nodes = graph.semanticNodes(nullptr, 0.0F, 42);
   ASSERT_EQ(semantic_nodes.size(), 2U);
   for (const auto &semantic : semantic_nodes) {
@@ -895,33 +924,40 @@ TEST(TopoGraphM3Contract, TcM3018FixedLayerDoesNotFlattenSemanticRows)
   }
 }
 
-TEST(TopoGraphM3Contract, TcM3021OnlyCurrentUnknownGenerationParticipates)
+TEST(TopoGraphM3Contract, TcM3021UnknownGenerationUsesOnePointFiveSecondMemory)
 {
   TopoGraph graph;
   auto region = std::make_shared<RegionNode>(Eigen::Vector3i::Zero());
   auto current = std::make_shared<TopoNode>();
+  auto retained = std::make_shared<TopoNode>();
   auto old = std::make_shared<TopoNode>();
   auto verified = std::make_shared<TopoNode>();
-  for (const auto &node : {current, old, verified}) {
+  for (const auto &node : {current, retained, old, verified}) {
     node->semantic_observations_ = 1;
     node->semantic_score_ = 0.8F;
     node->semantic_confidence_ = 1.0F;
     region->topo_nodes_.insert(node);
   }
   current->geometry_state_ = TopoGeometryState::Unknown;
-  current->semantic_stamp_ns_ = 200;
+  current->is_virtual_semantic_ = true;
+  current->semantic_stamp_ns_ = 2'000'000'000LL;
+  retained->geometry_state_ = TopoGeometryState::Unknown;
+  retained->is_virtual_semantic_ = true;
+  retained->semantic_stamp_ns_ = 600'000'000LL;
   old->geometry_state_ = TopoGeometryState::Unknown;
-  old->semantic_stamp_ns_ = 100;
+  old->is_virtual_semantic_ = true;
+  old->semantic_stamp_ns_ = 400'000'000LL;
   verified->geometry_state_ = TopoGeometryState::Verified;
-  verified->semantic_stamp_ns_ = 50;
+  verified->semantic_stamp_ns_ = 100'000'000LL;
   graph.reg_map_idx2ptr_[Eigen::Vector3i::Zero()] = region;
 
   for (int repetition = 0; repetition < 1000; ++repetition) {
     std::size_t skipped = 0;
     const auto active = graph.semanticNodes(nullptr,
-      std::numeric_limits<float>::infinity(), 200, &skipped);
-    EXPECT_EQ(active.size(), 2U);
+      std::numeric_limits<float>::infinity(), 2'000'000'000LL, &skipped);
+    EXPECT_EQ(active.size(), 3U);
     EXPECT_NE(std::find(active.begin(), active.end(), current), active.end());
+    EXPECT_NE(std::find(active.begin(), active.end(), retained), active.end());
     EXPECT_NE(std::find(active.begin(), active.end(), verified), active.end());
     EXPECT_EQ(std::find(active.begin(), active.end(), old), active.end());
     EXPECT_EQ(skipped, 1U);
@@ -930,9 +966,9 @@ TEST(TopoGraphM3Contract, TcM3021OnlyCurrentUnknownGenerationParticipates)
       std::numeric_limits<float>::infinity(), -1, &skipped);
     ASSERT_EQ(expired.size(), 1U);
     EXPECT_EQ(expired.front(), verified);
-    EXPECT_EQ(skipped, 2U);
+    EXPECT_EQ(skipped, 3U);
   }
-  EXPECT_EQ(graph.semanticNodes().size(), 3U);
+  EXPECT_EQ(graph.semanticNodes().size(), 4U);
 }
 
 TEST(TopoGraphPersistence, KeepsAOneFrameGeometryMiss)
@@ -998,6 +1034,7 @@ TEST(TopoGraphPersistence, DetachedRebuildCarriesSemanticNodes)
   semantic->center_ = Eigen::Vector3f(5.0F, 1.0F, 1.0F);
   semantic->role_ = TopoNodeRole::Geometric;
   semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->is_virtual_semantic_ = true;
   semantic->persistent_id_ = 19;
   semantic->semantic_score_ = 0.8F;
   semantic->semantic_observations_ = 1;
@@ -1191,6 +1228,7 @@ TEST(TopoSemanticCost, SemanticNodeUsesTheSameEndpointCostAsAnyTopoNode)
   semantic->center_ = Eigen::Vector3f(5.0F, 0.5F, 1.6F);
   semantic->role_ = TopoNodeRole::Geometric;
   semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->is_virtual_semantic_ = true;
   semantic->semantic_score_ = 0.9F;
   semantic->semantic_confidence_ = 1.0F;
   semantic->semantic_observations_ = 1;
@@ -1229,6 +1267,7 @@ TEST(TopoSemanticCost, RiskUsesTheExecutedWitnessPolyline)
   risk->center_ = Eigen::Vector3f(5.0F, 5.5F, 1.6F);
   risk->role_ = TopoNodeRole::Geometric;
   risk->geometry_state_ = TopoGeometryState::Unknown;
+  risk->is_virtual_semantic_ = true;
   risk->semantic_score_ = 1.0F;
   risk->semantic_confidence_ = 1.0F;
   risk->semantic_observations_ = 1;
@@ -1433,6 +1472,7 @@ TEST(TopoGraphM4Contract, TcM4018EquivalentRiskDensityKeepsFrontierGoalRanking)
     auto risk = std::make_shared<TopoNode>();
     risk->center_ = risky->center_ + Eigen::Vector3f(0.0F, 0.2F, 0.0F);
     risk->geometry_state_ = TopoGeometryState::Unknown;
+    risk->is_virtual_semantic_ = true;
     risk->semantic_score_ = 0.8F;
     risk->semantic_confidence_ = 1.0F;
     risk->semantic_observations_ = 1;
@@ -1468,6 +1508,7 @@ TEST(TopoGraphM4Contract, TcM4022OnlyVerifiedBubbleWithoutActiveSemanticFrame)
     start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
     virtual_semantic->center_ = Eigen::Vector3f(15.0F, 0.0F, -4.0F);
     virtual_semantic->geometry_state_ = TopoGeometryState::Unknown;
+    virtual_semantic->is_virtual_semantic_ = true;
     virtual_semantic->semantic_score_ = 0.9F;
     virtual_semantic->semantic_confidence_ = 1.0F;
     virtual_semantic->semantic_observations_ = 1;
@@ -1510,6 +1551,7 @@ TEST(TopoSemanticCost, UnknownSemanticNodeCannotBecomeFrontierFrontierGoal)
   semantic->center_ = Eigen::Vector3f(4.0F, 0.0F, 1.6F);
   semantic->role_ = TopoNodeRole::Geometric;
   semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->is_virtual_semantic_ = true;
   semantic->semantic_score_ = 0.9F;
   semantic->semantic_confidence_ = 1.0F;
   semantic->semantic_observations_ = 1;
@@ -1571,6 +1613,7 @@ TEST(TopoSemanticCost, AstarTurnsAwayFromNearbySemanticRisk)
   risk->center_ = Eigen::Vector3f(5.0F, 0.5F, 1.6F);
   risk->role_ = TopoNodeRole::Geometric;
   risk->geometry_state_ = TopoGeometryState::Unknown;
+  risk->is_virtual_semantic_ = true;
   risk->semantic_score_ = 1.0F;
   risk->semantic_confidence_ = 1.0F;
   risk->semantic_observations_ = 1;
@@ -1793,6 +1836,7 @@ TEST(TopoSearchRadius, GeometryWeightBalancesSemanticFrontierRisk)
   auto direct_risk = std::make_shared<TopoNode>();
   direct_risk->center_ = direct_mid->center_ + Eigen::Vector3f(0.0F, 0.2F, 0.0F);
   direct_risk->geometry_state_ = TopoGeometryState::Unknown;
+  direct_risk->is_virtual_semantic_ = true;
   direct_risk->semantic_score_ = 0.95F;
   direct_risk->semantic_confidence_ = 1.0F;
   direct_risk->semantic_observations_ = 1;
@@ -1862,7 +1906,9 @@ TEST(TopoSearchRadius, DirectGoalSearchUsesSemanticCostWhenBranchesAreParallel)
     start, Eigen::Vector3f(100.0F, 0.0F, 1.6F), path, 0.2,
     0.2F, 1.0F, {}, 2.0F, 35.0F, &vehicle, 31.5F, false));
   ASSERT_EQ(path.size(), 2U);
-  EXPECT_EQ(path.back(), risky_frontier);
+  // Both branches are geometrically comparable, so the continuous semantic
+  // edge cost must prefer the zero-risk branch over score 0.1.
+  EXPECT_EQ(path.back(), safe_frontier);
 }
 
 TEST(TopoSearchRadius, DirectGoalSearchUsesSemanticCostDuringExpansion)
@@ -2109,6 +2155,466 @@ TEST(TopoSemanticMemory, DoesNotDuplicateAnActiveNodeIdentity)
   EXPECT_EQ(graph.restoreNodeSemanticMemory(inserted, active_ids), 0U);
   EXPECT_NE(nearby_new->persistent_id_, active->persistent_id_);
   EXPECT_EQ(nearby_new->semantic_observations_, 0U);
+}
+
+TEST(TopoSemanticFrameSelection, MixedFrameChoosesLowRiskColumn)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto ordinary = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f::Zero();
+  ordinary->center_ = Eigen::Vector3f(2.0F, 0.0F, 0.0F);
+  start->geometry_state_ = ordinary->geometry_state_ = TopoGeometryState::Verified;
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    const float d = (a->center_ - b->center_).norm();
+    a->neighbors_.insert(b); b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_}; b->paths_[a] = {b->center_, a->center_};
+    a->weight_[b] = d; b->weight_[a] = d;
+  };
+  connect(start, ordinary);
+  graph.getRegionNode(Eigen::Vector3i(0, 0, 0))->topo_nodes_.insert(start);
+  graph.getRegionNode(Eigen::Vector3i(1, 0, 0))->topo_nodes_.insert(ordinary);
+  std::vector<TopoNode::Ptr> semantic;
+  for (int column = 0; column < 5; ++column) {
+    auto node = std::make_shared<TopoNode>();
+    node->persistent_id_ = static_cast<std::uint64_t>(100 + column);
+    node->center_ = Eigen::Vector3f(4.0F, (column - 2) * 2.0F, 0.0F);
+    node->geometry_state_ = TopoGeometryState::Unknown;
+    node->is_virtual_semantic_ = true;
+    node->semantic_observations_ = 1;
+    node->semantic_stamp_ns_ = 1000;
+    node->semantic_frame_stamp_ns_ = 1000;
+    node->semantic_column_ = static_cast<std::int8_t>(column);
+    node->semantic_score_ = column == 2 ? 0.9F : 0.1F;
+    node->semantic_confidence_ = 1.0F;
+    connect(start, node);
+    graph.getRegionNode(Eigen::Vector3i(1, column - 2, 0))->topo_nodes_.insert(node);
+    semantic.push_back(node);
+  }
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(20.0F, 0.0F, 0.0F), path, 0.2, 1.0F, 1.0F, {},
+    0.0F, 20.0F, &start->center_, 0.0F, false, std::numeric_limits<float>::infinity(),
+    0.0F, nullptr, 90.0F, 0.0F, 0.0F, 0.0F, 0.0F, nullptr, 1000));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_NE(path.back(), semantic[2]);
+  EXPECT_LT(path.back()->semantic_score_, 0.35F);
+}
+
+TEST(TopoSemanticFrameSelection, AllHighFrameFallsBackToOlderLowFrame)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f::Zero();
+  start->geometry_state_ = TopoGeometryState::Verified;
+  graph.getRegionNode(Eigen::Vector3i(0, 0, 0))->topo_nodes_.insert(start);
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    const float d = (a->center_ - b->center_).norm();
+    a->neighbors_.insert(b); b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_}; b->paths_[a] = {b->center_, a->center_};
+    a->weight_[b] = d; b->weight_[a] = d;
+  };
+  auto make_semantic = [&](std::uint64_t id, std::int64_t frame, int column,
+                           float score, float y) {
+    auto node = std::make_shared<TopoNode>();
+    node->persistent_id_ = id; node->center_ = Eigen::Vector3f(5.0F, y, 0.0F);
+    node->geometry_state_ = TopoGeometryState::Unknown; node->is_virtual_semantic_ = true; node->semantic_observations_ = 1;
+    node->semantic_stamp_ns_ = frame; node->semantic_frame_stamp_ns_ = frame;
+    node->semantic_column_ = static_cast<std::int8_t>(column);
+    node->semantic_score_ = score; node->semantic_confidence_ = 1.0F;
+    connect(start, node);
+    graph.getRegionNode(Eigen::Vector3i(1, static_cast<int>(y), 0))->topo_nodes_.insert(node);
+    return node;
+  };
+  auto older_low = make_semantic(201, 900, 0, 0.1F, -1.0F);
+  for (int column = 0; column < 5; ++column) {
+    make_semantic(300 + column, 1000, column, 0.9F, static_cast<float>(column + 1));
+  }
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(20.0F, 0.0F, 0.0F), path, 0.2, 1.0F, 1.0F, {},
+    0.0F, 20.0F, &start->center_, 0.0F, false, std::numeric_limits<float>::infinity(),
+    0.0F, nullptr, 90.0F, 0.0F, 0.0F, 0.0F, 0.0F, nullptr, 1000));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), older_low);
+}
+
+TEST(TopoSemanticFrameSelection, AllLowFrameUsesNormalizedMissionObjective)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto near_goal = std::make_shared<TopoNode>();
+  auto far_goal = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f::Zero();
+  near_goal->center_ = Eigen::Vector3f(8.0F, 0.0F, 0.0F);
+  far_goal->center_ = Eigen::Vector3f(4.0F, 4.0F, 0.0F);
+  start->geometry_state_ = TopoGeometryState::Verified;
+  for (const auto &node : {near_goal, far_goal}) {
+    node->geometry_state_ = TopoGeometryState::Unknown;
+    node->is_virtual_semantic_ = true;
+    node->semantic_observations_ = 1;
+    node->semantic_stamp_ns_ = node->semantic_frame_stamp_ns_ = 2000;
+    node->semantic_confidence_ = 1.0F;
+    node->semantic_score_ = 0.1F;
+  }
+  near_goal->persistent_id_ = 401; near_goal->semantic_column_ = 0;
+  far_goal->persistent_id_ = 402; far_goal->semantic_column_ = 1;
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    const float d = (a->center_ - b->center_).norm();
+    a->neighbors_.insert(b); b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_}; b->paths_[a] = {b->center_, a->center_};
+    a->weight_[b] = d; b->weight_[a] = d;
+  };
+  connect(start, near_goal); connect(start, far_goal);
+  graph.getRegionNode(Eigen::Vector3i(0, 0, 0))->topo_nodes_.insert(start);
+  graph.getRegionNode(Eigen::Vector3i(1, 0, 0))->topo_nodes_.insert(near_goal);
+  graph.getRegionNode(Eigen::Vector3i(1, 1, 0))->topo_nodes_.insert(far_goal);
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(10.0F, 0.0F, 0.0F), path, 0.2, 1.0F, 1.0F, {},
+    0.0F, 20.0F, &start->center_, 0.0F, false, std::numeric_limits<float>::infinity(),
+    0.0F, nullptr, 90.0F, 0.0F, 0.0F, 0.0F, 0.0F, nullptr, 2000));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), near_goal);
+}
+
+TEST(TopoSemanticFrameSelection, TinyLowRiskDifferenceDoesNotGetStretched)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto slightly_safer = std::make_shared<TopoNode>();
+  auto much_better_route = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f::Zero();
+  slightly_safer->center_ = Eigen::Vector3f(5.0F, 4.0F, 0.0F);
+  much_better_route->center_ = Eigen::Vector3f(8.0F, 0.0F, 0.0F);
+  start->geometry_state_ = TopoGeometryState::Verified;
+  for (const auto &node : {slightly_safer, much_better_route}) {
+    node->geometry_state_ = TopoGeometryState::Unknown;
+    node->is_virtual_semantic_ = true;
+    node->semantic_observations_ = 1;
+    node->semantic_stamp_ns_ = node->semantic_frame_stamp_ns_ = 3000;
+    node->semantic_confidence_ = 1.0F;
+  }
+  slightly_safer->semantic_score_ = 0.10F;
+  slightly_safer->semantic_column_ = 0;
+  much_better_route->semantic_score_ = 0.11F;
+  much_better_route->semantic_column_ = 2;
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    const float d = (a->center_ - b->center_).norm();
+    a->neighbors_.insert(b); b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_}; b->paths_[a] = {b->center_, a->center_};
+    a->weight_[b] = d; b->weight_[a] = d;
+  };
+  connect(start, slightly_safer);
+  connect(start, much_better_route);
+  graph.getRegionNode(Eigen::Vector3i(0, 0, 0))->topo_nodes_.insert(start);
+  graph.getRegionNode(Eigen::Vector3i(1, 1, 0))->topo_nodes_.insert(slightly_safer);
+  graph.getRegionNode(Eigen::Vector3i(2, 0, 0))->topo_nodes_.insert(much_better_route);
+
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(10.0F, 0.0F, 0.0F), path, 0.2, 1.0F, 1.0F, {},
+    0.0F, 20.0F, &start->center_, 0.0F, false,
+    std::numeric_limits<float>::infinity(), 0.0F, nullptr, 90.0F,
+    0.0F, 0.0F, 0.0F, 0.0F, nullptr, 3000, 2.0F, 1.0F));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), much_better_route);
+}
+
+TEST(TopoSemanticFrameSelection, ConfidenceDoesNotRescalePatchMeanRisk)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto safer = std::make_shared<TopoNode>();
+  auto riskier_outer_column = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f::Zero();
+  safer->center_ = Eigen::Vector3f(5.0F, -1.0F, 0.0F);
+  riskier_outer_column->center_ = Eigen::Vector3f(5.0F, 1.0F, 0.0F);
+  start->geometry_state_ = TopoGeometryState::Verified;
+  for (const auto &node : {safer, riskier_outer_column}) {
+    node->geometry_state_ = TopoGeometryState::Unknown;
+    node->is_virtual_semantic_ = true;
+    node->semantic_observations_ = 1;
+    node->semantic_stamp_ns_ = node->semantic_frame_stamp_ns_ = 4000;
+  }
+  safer->semantic_score_ = 0.10F;
+  safer->semantic_confidence_ = 1.0F;
+  safer->semantic_column_ = 1;
+  riskier_outer_column->semantic_score_ = 0.50F;
+  riskier_outer_column->semantic_confidence_ = 0.10F;
+  riskier_outer_column->semantic_column_ = 4;
+  auto connect = [](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
+    const float distance = (left->center_ - right->center_).norm();
+    left->neighbors_.insert(right);
+    right->neighbors_.insert(left);
+    left->paths_[right] = {left->center_, right->center_};
+    right->paths_[left] = {right->center_, left->center_};
+    left->weight_[right] = distance;
+    right->weight_[left] = distance;
+  };
+  connect(start, safer);
+  connect(start, riskier_outer_column);
+  graph.getRegionNode(Eigen::Vector3i(0, 0, 0))->topo_nodes_.insert(start);
+  graph.getRegionNode(Eigen::Vector3i(1, -1, 0))->topo_nodes_.insert(safer);
+  graph.getRegionNode(Eigen::Vector3i(1, 1, 0))->topo_nodes_.insert(riskier_outer_column);
+
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(20.0F, 0.0F, 0.0F), path, 0.2, 1.0F, 1.0F, {},
+    0.0F, 30.0F, &start->center_, 0.0F, false,
+    std::numeric_limits<float>::infinity(), 0.0F, nullptr, 90.0F,
+    0.0F, 0.0F, 0.0F, 0.0F, nullptr, 4000, 2.0F, 1.0F));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), safer);
+}
+
+TEST(TopoSemanticEndpointType, MeasuredAnnotationRemainsOrdinaryBackbone)
+{
+  auto measured = std::make_shared<TopoNode>();
+  measured->geometry_state_ = TopoGeometryState::Verified;
+  measured->semantic_observations_ = 3;
+  measured->semantic_score_ = 0.8F;
+  measured->semantic_confidence_ = 1.0F;
+
+  auto ordinary = std::make_shared<TopoNode>();
+  ordinary->geometry_state_ = TopoGeometryState::Verified;
+
+  auto virtual_candidate = std::make_shared<TopoNode>();
+  virtual_candidate->geometry_state_ = TopoGeometryState::Unknown;
+  virtual_candidate->is_virtual_semantic_ = true;
+  virtual_candidate->semantic_observations_ = 1;
+
+  EXPECT_TRUE(isOrdinaryBackboneEndpoint(measured));
+  EXPECT_FALSE(isVirtualSemanticEndpoint(measured));
+  EXPECT_FALSE(isOrdinarySemanticLink(measured, ordinary));
+  EXPECT_TRUE(isVirtualSemanticEndpoint(virtual_candidate));
+  EXPECT_TRUE(isOrdinarySemanticLink(virtual_candidate, measured));
+}
+
+TEST(TopoSemanticEndpointType, UnknownMeasuredAnnotationIsNotVirtual)
+{
+  auto measured_without_backbone_match = std::make_shared<TopoNode>();
+  measured_without_backbone_match->geometry_state_ = TopoGeometryState::Unknown;
+  measured_without_backbone_match->semantic_observations_ = 1;
+  measured_without_backbone_match->semantic_score_ = 0.8F;
+  measured_without_backbone_match->semantic_confidence_ = 1.0F;
+  measured_without_backbone_match->is_virtual_semantic_ = false;
+
+  auto ordinary = std::make_shared<TopoNode>();
+  ordinary->geometry_state_ = TopoGeometryState::Verified;
+
+  EXPECT_FALSE(isVirtualSemanticEndpoint(measured_without_backbone_match));
+  EXPECT_FALSE(isOrdinarySemanticLink(measured_without_backbone_match, ordinary));
+}
+
+TEST(TopoSemanticEndpointType, OnlyVirtualCandidateGetsSemanticFrontierPreference)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto measured = std::make_shared<TopoNode>();
+  auto virtual_candidate = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f::Zero();
+  measured->center_ = Eigen::Vector3f(4.0F, 0.0F, 0.0F);
+  virtual_candidate->center_ = Eigen::Vector3f(8.0F, 2.0F, 0.0F);
+  start->geometry_state_ = measured->geometry_state_ = TopoGeometryState::Verified;
+  measured->semantic_observations_ = 1;
+  measured->semantic_stamp_ns_ = measured->semantic_frame_stamp_ns_ = 1000;
+  measured->semantic_column_ = 2;
+  virtual_candidate->geometry_state_ = TopoGeometryState::Unknown;
+  virtual_candidate->is_virtual_semantic_ = true;
+  virtual_candidate->semantic_observations_ = 1;
+  virtual_candidate->semantic_stamp_ns_ = virtual_candidate->semantic_frame_stamp_ns_ = 1000;
+  virtual_candidate->semantic_column_ = 3;
+  auto connect = [](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
+    const float distance = (left->center_ - right->center_).norm();
+    left->neighbors_.insert(right);
+    right->neighbors_.insert(left);
+    left->paths_[right] = {left->center_, right->center_};
+    right->paths_[left] = {right->center_, left->center_};
+    left->weight_[right] = distance;
+    right->weight_[left] = distance;
+  };
+  connect(start, measured);
+  connect(start, virtual_candidate);
+  graph.getRegionNode(Eigen::Vector3i(0, 0, 0))->topo_nodes_.insert(start);
+  graph.getRegionNode(Eigen::Vector3i(1, 0, 0))->topo_nodes_.insert(measured);
+  graph.getRegionNode(Eigen::Vector3i(2, 0, 0))->topo_nodes_.insert(virtual_candidate);
+
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(20.0F, 0.0F, 0.0F), path, 0.2, 1.0F, 1.0F, {},
+    0.0F, 30.0F, &start->center_, 0.0F, false,
+    std::numeric_limits<float>::infinity(), 0.0F, nullptr, 90.0F,
+    0.0F, 0.0F, 0.0F, 0.0F, nullptr, 1000));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), virtual_candidate);
+}
+
+TEST(AcceptedRouteConnectivity, AllowsOneUnknownSemanticTerminal)
+{
+  auto odom = std::make_shared<TopoNode>();
+  auto corridor = std::make_shared<TopoNode>();
+  auto anchor = std::make_shared<TopoNode>();
+  auto semantic = std::make_shared<TopoNode>();
+  odom->role_ = TopoNodeRole::Odom;
+  odom->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  corridor->center_ = Eigen::Vector3f(0.0F, 4.0F, 1.6F);
+  anchor->center_ = Eigen::Vector3f(1.0F, 8.0F, 1.6F);
+  semantic->center_ = Eigen::Vector3f(4.0F, 20.0F, 1.6F);
+  semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->is_virtual_semantic_ = true;
+  semantic->semantic_observations_ = 1;
+  connectExecutableNodes(odom, corridor);
+  connectExecutableNodes(corridor, anchor);
+  connectExecutableNodes(anchor, semantic);
+
+  const auto connectivity = acceptedRouteConnectivity(
+    odom, {odom, corridor, anchor, semantic});
+  EXPECT_TRUE(connectivity.accepted_head_edge_usable);
+  EXPECT_TRUE(connectivity.verified_prefix_reachable);
+  EXPECT_TRUE(connectivity.has_terminal_unknown);
+  EXPECT_TRUE(connectivity.terminal_unknown_edge_usable);
+  EXPECT_EQ(connectivity.verified_anchor, anchor);
+  EXPECT_TRUE(connectivity.routeUsable());
+}
+
+TEST(AcceptedRouteConnectivity, UnknownCannotBridgeDisconnectedVerifiedComponents)
+{
+  auto odom = std::make_shared<TopoNode>();
+  auto local = std::make_shared<TopoNode>();
+  auto disconnected_anchor = std::make_shared<TopoNode>();
+  auto semantic = std::make_shared<TopoNode>();
+  odom->role_ = TopoNodeRole::Odom;
+  odom->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  local->center_ = Eigen::Vector3f(-2.0F, 5.0F, 1.6F);
+  disconnected_anchor->center_ = Eigen::Vector3f(8.0F, 9.0F, 1.6F);
+  semantic->center_ = Eigen::Vector3f(3.0F, 18.0F, 1.6F);
+  semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->is_virtual_semantic_ = true;
+  semantic->semantic_observations_ = 1;
+  connectExecutableNodes(odom, local);
+  connectExecutableNodes(local, semantic);
+  connectExecutableNodes(disconnected_anchor, semantic);
+
+  // The old unfiltered endpoint BFS reaches semantic through the local anchor.
+  // That must not prove reachability of the accepted route's other anchor.
+  EXPECT_TRUE(odom->neighbors_.count(local));
+  EXPECT_TRUE(local->neighbors_.count(semantic));
+  const auto connectivity = acceptedRouteConnectivity(
+    odom, {odom, disconnected_anchor, semantic});
+  EXPECT_FALSE(connectivity.accepted_head_edge_usable);
+  EXPECT_FALSE(connectivity.verified_prefix_reachable);
+  EXPECT_TRUE(connectivity.has_terminal_unknown);
+  EXPECT_TRUE(connectivity.terminal_unknown_edge_usable);
+  EXPECT_EQ(connectivity.verified_anchor, disconnected_anchor);
+  EXPECT_FALSE(connectivity.routeUsable());
+}
+
+TEST(AcceptedRouteConnectivity, RejectsMissingUnknownTerminalEdgeOnly)
+{
+  auto odom = std::make_shared<TopoNode>();
+  auto anchor = std::make_shared<TopoNode>();
+  auto semantic = std::make_shared<TopoNode>();
+  odom->role_ = TopoNodeRole::Odom;
+  semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->is_virtual_semantic_ = true;
+  semantic->semantic_observations_ = 1;
+  connectExecutableNodes(odom, anchor);
+
+  const auto connectivity = acceptedRouteConnectivity(
+    odom, {odom, anchor, semantic});
+  EXPECT_TRUE(connectivity.accepted_head_edge_usable);
+  EXPECT_TRUE(connectivity.verified_prefix_reachable);
+  EXPECT_TRUE(connectivity.has_terminal_unknown);
+  EXPECT_FALSE(connectivity.terminal_unknown_edge_usable);
+  EXPECT_FALSE(connectivity.routeUsable());
+}
+
+TEST(AcceptedRouteConnectivity, AllowsAlternateVerifiedPrefixWithoutFreshAstar)
+{
+  auto odom = std::make_shared<TopoNode>();
+  auto old_next = std::make_shared<TopoNode>();
+  auto alternate = std::make_shared<TopoNode>();
+  auto anchor = std::make_shared<TopoNode>();
+  auto semantic = std::make_shared<TopoNode>();
+  odom->role_ = TopoNodeRole::Odom;
+  odom->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  old_next->center_ = Eigen::Vector3f(-3.0F, 4.0F, 1.6F);
+  alternate->center_ = Eigen::Vector3f(3.0F, 4.0F, 1.6F);
+  anchor->center_ = Eigen::Vector3f(0.0F, 8.0F, 1.6F);
+  semantic->center_ = Eigen::Vector3f(0.0F, 20.0F, 1.6F);
+  semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->is_virtual_semantic_ = true;
+  semantic->semantic_observations_ = 1;
+  // The old odom->old_next edge disappeared, but the anchor is still reachable
+  // through the current Verified component. The progressing route may be held
+  // without forcing a fresh search solely for that stale head edge.
+  connectExecutableNodes(old_next, anchor);
+  connectExecutableNodes(odom, alternate);
+  connectExecutableNodes(alternate, anchor);
+  connectExecutableNodes(anchor, semantic);
+
+  const auto connectivity = acceptedRouteConnectivity(
+    odom, {odom, old_next, anchor, semantic});
+  EXPECT_FALSE(connectivity.accepted_head_edge_usable);
+  EXPECT_TRUE(connectivity.verified_prefix_reachable);
+  EXPECT_TRUE(connectivity.terminal_unknown_edge_usable);
+  EXPECT_TRUE(connectivity.routeUsable());
+}
+
+TEST(AcceptedRouteConnectivity, RejectsMissingInteriorEdgeDespiteAlternateReachability)
+{
+  auto odom = std::make_shared<TopoNode>();
+  auto accepted_next = std::make_shared<TopoNode>();
+  auto alternate = std::make_shared<TopoNode>();
+  auto anchor = std::make_shared<TopoNode>();
+  auto semantic = std::make_shared<TopoNode>();
+  odom->role_ = TopoNodeRole::Odom;
+  semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->is_virtual_semantic_ = true;
+  semantic->semantic_observations_ = 1;
+  connectExecutableNodes(odom, accepted_next);
+  connectExecutableNodes(odom, alternate);
+  connectExecutableNodes(alternate, anchor);
+  connectExecutableNodes(anchor, semantic);
+
+  // The accepted_next->anchor edge has disappeared. Although the anchor is
+  // reachable through an alternate branch, the accepted node sequence itself
+  // is stale and must trigger a fresh odom-rooted A* search.
+  const auto connectivity = acceptedRouteConnectivity(
+    odom, {odom, accepted_next, anchor, semantic});
+  EXPECT_TRUE(connectivity.accepted_head_edge_usable);
+  EXPECT_FALSE(connectivity.accepted_stable_edges_usable);
+  EXPECT_TRUE(connectivity.verified_prefix_reachable);
+  EXPECT_TRUE(connectivity.terminal_unknown_edge_usable);
+  EXPECT_FALSE(connectivity.routeUsable());
+}
+
+TEST(AcceptedRouteConnectivity, AcceptsRollingOdomHeadAfterReconnect)
+{
+  auto old_odom = std::make_shared<TopoNode>();
+  auto current_odom = std::make_shared<TopoNode>();
+  auto next = std::make_shared<TopoNode>();
+  auto anchor = std::make_shared<TopoNode>();
+  auto semantic = std::make_shared<TopoNode>();
+  old_odom->role_ = TopoNodeRole::Odom;
+  current_odom->role_ = TopoNodeRole::Odom;
+  semantic->geometry_state_ = TopoGeometryState::Unknown;
+  semantic->is_virtual_semantic_ = true;
+  semantic->semantic_observations_ = 1;
+  connectExecutableNodes(current_odom, next);
+  connectExecutableNodes(next, anchor);
+  connectExecutableNodes(anchor, semantic);
+
+  // The accepted route was rooted at the previous rolling odom pointer. After
+  // reconnection, its first downstream edge is still executable from current
+  // odom, so the route must not be replanned solely because the pointer changed.
+  const auto connectivity = acceptedRouteConnectivity(
+    current_odom, {old_odom, next, anchor, semantic});
+  EXPECT_TRUE(connectivity.accepted_head_edge_usable);
+  EXPECT_TRUE(connectivity.verified_prefix_reachable);
+  EXPECT_TRUE(connectivity.terminal_unknown_edge_usable);
+  EXPECT_TRUE(connectivity.routeUsable());
 }
 
 }  // namespace

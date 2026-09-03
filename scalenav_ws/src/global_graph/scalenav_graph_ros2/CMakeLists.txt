@@ -134,6 +134,15 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/epic_online_sim.py
       --json ${CMAKE_CURRENT_BINARY_DIR}/epic_online_sim.json
       --html ${CMAKE_CURRENT_BINARY_DIR}/epic_online_sim_report.html)
+
+  # Frame-level semantic projection/frontier contract with an inspectable HTML
+  # artifact. This stays independent of ROS timing and exercises every
+  # candidate decision deterministically.
+  add_test(NAME semantic_frontier_module_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/semantic_frontier_module_test.py
+      --json ${CMAKE_CURRENT_BINARY_DIR}/semantic_frontier_module_test.json
+      --html ${CMAKE_CURRENT_BINARY_DIR}/semantic_frontier_module_test.html)
 endif()
 
 install(TARGETS scalenav_graph_node DESTINATION lib/${PROJECT_NAME})

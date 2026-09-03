@@ -325,6 +325,10 @@ bool ParallelBubbleAstar::collisionCheck_shortenPath(
       const Eigen::Vector3f point = start + segment *
         (static_cast<float>(sample) / static_cast<float>(samples));
       const double clearance = graphClearance(point);
+      if (info != nullptr && clearance < info->minimum_clearance) {
+        info->minimum_clearance = clearance;
+        info->minimum_clearance_point = point;
+      }
       const double radius = clearance - safe_distance_;
       if (!std::isfinite(radius) || radius < 1e-3) {
         if (info != nullptr) {
@@ -346,14 +350,19 @@ bool ParallelBubbleAstar::collisionCheck_shortenPath(
     // made every open-space edge longer than roughly 4 m fail even when the
     // clearance field showed ample free space, leaving newly inserted nodes
     // isolated.  Use the measured bubble clearance instead.
-    double dis = graphClearance(path[i]) - safe_distance_;
+    const double clearance = graphClearance(path[i]);
+    if (info != nullptr && clearance < info->minimum_clearance) {
+      info->minimum_clearance = clearance;
+      info->minimum_clearance_point = path[i];
+    }
+    double dis = clearance - safe_distance_;
     raduis_lis.push_back(dis);
     if (raduis_lis.back() < 1e-3) {
       if (info != nullptr) {
         info->reason = CollisionCheckInfo::CLEARANCE;
         info->failed_index = i;
         info->failed_point = path[i];
-        info->clearance = graphClearance(path[i]);
+        info->clearance = clearance;
         info->radius = raduis_lis.back();
       }
       return false;

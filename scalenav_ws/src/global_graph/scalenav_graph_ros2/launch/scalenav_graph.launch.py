@@ -14,6 +14,7 @@ def generate_launch_description():
         DeclareLaunchArgument("cloud_topic", default_value="/depth/points"),
         DeclareLaunchArgument("free_ray_topic", default_value="/depth/free_rays"),
         DeclareLaunchArgument("semantic_heatmap_topic", default_value="/scalenav/text_heatmap_raw"),
+        DeclareLaunchArgument("semantic_depth_topic", default_value="/camera/depth/image"),
         DeclareLaunchArgument("odom_topic", default_value="/sim/odom"),
         DeclareLaunchArgument("goal_topic", default_value="/goal"),
         DeclareLaunchArgument("next_goal_topic", default_value="/scalenav/local_goal"),
@@ -35,10 +36,11 @@ def generate_launch_description():
         DeclareLaunchArgument("reuse_previous_route", default_value="false"),
         DeclareLaunchArgument("map_margin", default_value="50.0"),
         DeclareLaunchArgument("map_voxel_size", default_value="0.1"),
-        # TopoGraph/Bubbles retain route memory. Raw depth obstacles are a
-        # current-frame validation view unless a positive compatibility window
-        # is explicitly requested.
-        DeclareLaunchArgument("map_history_radius_m", default_value="0.0"),
+        # Keep observed static obstacles while semantic frontier edges remain
+        # eligible.  A current-frame-only KD-tree can forget an occluded wall
+        # and immediately recreate an ordinary-semantic edge that was just
+        # removed as blocked.
+        DeclareLaunchArgument("map_history_radius_m", default_value="40.0"),
         DeclareLaunchArgument("map_max_points", default_value="100000"),
         DeclareLaunchArgument("map_prune_distance_m", default_value="0.5"),
         DeclareLaunchArgument("update_period_ms", default_value="100"),
@@ -50,19 +52,17 @@ def generate_launch_description():
         # Compatibility arguments; the planner publishes every update tick.
         DeclareLaunchArgument("route_plan_period_ms", default_value="100"),
         DeclareLaunchArgument("local_goal_reserve_m", default_value="0.0"),
-        DeclareLaunchArgument("use_edge_witness_path", default_value="true"),
+        DeclareLaunchArgument("use_edge_witness_path", default_value="false"),
         DeclareLaunchArgument("goal_path_cost_weight", default_value="1.0"),
+        DeclareLaunchArgument("frontier_goal_distance_weight", default_value="2.0"),
+        DeclareLaunchArgument("frontier_semantic_score_weight", default_value="1.0"),
         DeclareLaunchArgument("semantic_cost_weight", default_value="2.0"),
-        DeclareLaunchArgument("semantic_route_replan_delta", default_value="0.05"),
-        DeclareLaunchArgument("semantic_route_replan_enabled", default_value="true"),
-        DeclareLaunchArgument("semantic_route_high_risk", default_value="0.35"),
-        DeclareLaunchArgument("semantic_route_high_risk_release", default_value="0.30"),
         DeclareLaunchArgument("semantic_route_switch_risk_margin", default_value="0.08"),
         DeclareLaunchArgument("semantic_route_switch_cost_ratio", default_value="0.90"),
-        DeclareLaunchArgument("semantic_route_influence_m", default_value="5.0"),
+        DeclareLaunchArgument("semantic_route_influence_m", default_value="8.0"),
         DeclareLaunchArgument("semantic_visualization_max_score", default_value="0.4"),
         DeclareLaunchArgument("semantic_baseline_quantile", default_value="0.25"),
-        DeclareLaunchArgument("semantic_point_influence_m", default_value="5.0"),
+        DeclareLaunchArgument("semantic_point_influence_m", default_value="8.0"),
         DeclareLaunchArgument("semantic_edge_candidate_limit", default_value="8"),
         DeclareLaunchArgument("bubble_topo/clearance_cost_weight", default_value="2.0"),
         DeclareLaunchArgument("bubble_topo/clearance_target_m", default_value="1.2"),
@@ -80,8 +80,12 @@ def generate_launch_description():
         DeclareLaunchArgument("odom_fallback_candidates", default_value="8"),
         DeclareLaunchArgument("odom_connect_timeout_ms", default_value="3.0"),
         DeclareLaunchArgument("semantic_pose_tolerance_ms", default_value="250.0"),
+        DeclareLaunchArgument("semantic_depth_tolerance_ms", default_value="50.0"),
+        DeclareLaunchArgument("semantic_depth_max_m", default_value="20.0"),
         DeclareLaunchArgument("semantic_max_age_ms", default_value="1500.0"),
-        DeclareLaunchArgument("semantic_virtual_depth_m", default_value="30.0"),
+        DeclareLaunchArgument("wait_for_initial_semantic", default_value="true"),
+        DeclareLaunchArgument("initial_semantic_wait_timeout_ms", default_value="5000.0"),
+        DeclareLaunchArgument("semantic_virtual_depth_m", default_value="35.0"),
         DeclareLaunchArgument("semantic_points_enabled", default_value="true"),
         DeclareLaunchArgument("semantic_point_min_score", default_value="0.20"),
         DeclareLaunchArgument("semantic_point_separation_m", default_value="1.5"),
@@ -107,6 +111,7 @@ def generate_launch_description():
                 "cloud_topic": LaunchConfiguration("cloud_topic"),
                 "free_ray_topic": LaunchConfiguration("free_ray_topic"),
                 "semantic_heatmap_topic": LaunchConfiguration("semantic_heatmap_topic"),
+                "semantic_depth_topic": LaunchConfiguration("semantic_depth_topic"),
                 "odom_topic": LaunchConfiguration("odom_topic"),
                 "goal_topic": LaunchConfiguration("goal_topic"),
                 "next_goal_topic": LaunchConfiguration("next_goal_topic"),
@@ -138,14 +143,11 @@ def generate_launch_description():
                 "local_goal_reserve_m": LaunchConfiguration("local_goal_reserve_m"),
                 "use_edge_witness_path": LaunchConfiguration("use_edge_witness_path"),
                 "goal_path_cost_weight": LaunchConfiguration("goal_path_cost_weight"),
+                "frontier_goal_distance_weight": LaunchConfiguration(
+                    "frontier_goal_distance_weight"),
+                "frontier_semantic_score_weight": LaunchConfiguration(
+                    "frontier_semantic_score_weight"),
                 "semantic_cost_weight": LaunchConfiguration("semantic_cost_weight"),
-                "semantic_route_replan_delta": LaunchConfiguration(
-                    "semantic_route_replan_delta"),
-                "semantic_route_replan_enabled": LaunchConfiguration(
-                    "semantic_route_replan_enabled"),
-                "semantic_route_high_risk": LaunchConfiguration("semantic_route_high_risk"),
-                "semantic_route_high_risk_release": LaunchConfiguration(
-                    "semantic_route_high_risk_release"),
                 "semantic_route_switch_risk_margin": LaunchConfiguration(
                     "semantic_route_switch_risk_margin"),
                 "semantic_route_switch_cost_ratio": LaunchConfiguration(
@@ -181,7 +183,13 @@ def generate_launch_description():
                 "odom_fallback_candidates": LaunchConfiguration("odom_fallback_candidates"),
                 "odom_connect_timeout_ms": LaunchConfiguration("odom_connect_timeout_ms"),
                 "semantic_pose_tolerance_ms": LaunchConfiguration("semantic_pose_tolerance_ms"),
+                "semantic_depth_tolerance_ms": LaunchConfiguration(
+                    "semantic_depth_tolerance_ms"),
+                "semantic_depth_max_m": LaunchConfiguration("semantic_depth_max_m"),
                 "semantic_max_age_ms": LaunchConfiguration("semantic_max_age_ms"),
+                "wait_for_initial_semantic": LaunchConfiguration("wait_for_initial_semantic"),
+                "initial_semantic_wait_timeout_ms": LaunchConfiguration(
+                    "initial_semantic_wait_timeout_ms"),
                 "semantic_virtual_depth_m": LaunchConfiguration("semantic_virtual_depth_m"),
                 "semantic_points_enabled": LaunchConfiguration("semantic_points_enabled"),
                 "semantic_point_min_score": LaunchConfiguration("semantic_point_min_score"),

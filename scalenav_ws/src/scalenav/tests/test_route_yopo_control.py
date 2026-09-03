@@ -16,19 +16,16 @@ from route_yopo_control_core import (
     RouteMode,
     build_route_features,
     clip_goal_to_camera_fov,
-    enforce_route_progress,
     conservative_depth_reduce,
     decide_route_mode,
-    project_endstates_to_altitude,
     quaternion_xyzw_to_matrix,
     reanchor_route_path,
+    trim_route_for_motion,
     route_signature,
     route_timestamps_coherent,
     sample_poly5_candidate_states,
     sample_poly5_candidates,
-    select_first_certified,
     validate_depth_trajectory,
-    validate_route_corridor,
 )
 from route_yopo_control_ros2 import RouteYopoController
 
@@ -70,16 +67,6 @@ def test_goal_input_is_clipped_to_model_fov_without_changing_range():
     assert abs(np.arctan2(clipped[2], np.linalg.norm(clipped[:2]))) <= np.pi / 6.0
 
 
-def test_route_progress_expands_collapsed_endpoints_toward_frontier():
-    states = np.zeros((2, 9), dtype=np.float32)
-    states[1, 0] = 4.0
-    expanded = enforce_route_progress(
-        states, np.array([10.0, 0.0, 0.0]), minimum_forward_m=2.0, maximum_forward_m=8.0
-    )
-    assert expanded[0, 0] == pytest.approx(2.0)
-    assert expanded[1, 0] == pytest.approx(4.0)
-
-
 def test_route_reanchor_trims_lagging_prefix_to_nearest_polyline_point():
     route = np.array([[0.0, 0.0, 1.6], [5.0, 0.0, 1.6], [10.0, 2.0, 1.6]])
     anchored, distance = reanchor_route_path(
@@ -94,6 +81,43 @@ def test_route_reanchor_trims_lagging_prefix_to_nearest_polyline_point():
     )
     assert rejected is None
     assert distance > 1.0
+
+
+def test_trim_route_for_motion_drops_strongly_backwards_prefix():
+    route = np.array([
+        [0.0, 0.0, 1.5],
+        [-2.0, -2.0, 1.5],
+        [0.0, 5.0, 1.5],
+    ])
+    trimmed = trim_route_for_motion(
+        route, np.array([0.0, 0.0, 1.5]), np.array([0.0, 1.0, 0.0])
+    )
+    np.testing.assert_allclose(trimmed[0], route[0])
+    np.testing.assert_allclose(trimmed[1], route[2])
+
+
+def test_route_local_radii_use_topology_bubbles_with_fallback():
+    adapter = RouteYopoController.__new__(RouteYopoController)
+    adapter.lock = threading.RLock()
+    adapter.route_radius_clip_m = 3.0
+    adapter.args = SimpleNamespace(
+        route_timeout=1.0,
+        compat_stamp_slop=0.2,
+        robot_radius=0.3,
+        safety_margin=0.2,
+    )
+    adapter.bubble_record = (
+        np.array([[0.0, 0.0, 1.5], [2.0, 0.0, 1.5]], dtype=np.float32),
+        np.array([1.0, 2.0], dtype=np.float32),
+        time.monotonic(),
+        10.0,
+    )
+    route = np.array(
+        [[0.0, 0.0, 1.5], [2.0, 0.0, 1.5], [5.0, 0.0, 1.5]],
+        dtype=np.float32,
+    )
+    radii = adapter._route_local_radii(route, fallback=0.4, route_stamp=10.0)
+    np.testing.assert_allclose(radii, [1.0, 2.0, 0.4])
 
 
 def test_adapter_route_id_is_stable_and_monotonic():
@@ -120,9 +144,10 @@ def test_route_feature_normalization_matches_training_contract():
         np.zeros(3),
         np.eye(3),
         radius_clip_m=3.0,
+        normalization_distance_m=10.0,
     )
-    np.testing.assert_allclose(features[0], [1.0, 0.0, 0.0, 0.5])
-    np.testing.assert_allclose(features[1], [0.0, 1.0, 0.0, 1.0])
+    np.testing.assert_allclose(features[0], [0.1, 0.0, 0.0, 0.5])
+    np.testing.assert_allclose(features[1], [0.0, 0.4, 0.0, 1.0])
 
 
 def test_quaternion_rotation_preserves_full_xyz_axes():
@@ -146,24 +171,6 @@ def test_log_replay_selects_depth_nearest_requested_goal_offset():
         records, depth_file="depth_1.pgm", seconds_after_goal=99.0
     )
     assert explicit["file"] == "depth/depth_1.pgm"
-
-
-def test_log_replay_fixed_altitude_projection_preserves_world_xy():
-    angle = np.pi / 3.0
-    rotation = quaternion_xyzw_to_matrix(
-        [0.0, 0.0, np.sin(angle / 2.0), np.cos(angle / 2.0)]
-    )
-    position = np.array([2.0, -3.0, 1.6])
-    states = np.array([[4.0, 1.0, 2.0, 0.5, -0.2, 1.0, 0.3, 0.4, -0.7]])
-    original_endpoint = position + rotation @ states[0, :3]
-    projected = project_endstates_to_altitude(states, position, rotation, 1.6)
-    projected_endpoint = position + rotation @ projected[0, :3]
-    projected_velocity = rotation @ projected[0, 3:6]
-    projected_acceleration = rotation @ projected[0, 6:9]
-    np.testing.assert_allclose(projected_endpoint[:2], original_endpoint[:2], atol=1.0e-6)
-    assert projected_endpoint[2] == pytest.approx(1.6)
-    assert projected_velocity[2] == pytest.approx(0.0, abs=1.0e-7)
-    assert projected_acceleration[2] == pytest.approx(0.0, abs=1.0e-7)
 
 
 def test_poly5_candidates_have_101_xyz_samples_and_exact_boundaries():
@@ -207,68 +214,6 @@ def test_poly5_control_derivatives_match_start_and_end_boundaries():
     np.testing.assert_allclose(accelerations[0, -1], endstate[0, 6:9], atol=5.0e-5)
 
 
-def test_score_collision_uses_next_certified_candidate():
-    trajectories = np.zeros((3, 101, 3), dtype=np.float32)
-    trajectories[:, :, 2] = 1.5
-    selected = select_first_certified(
-        np.array([0.1, 0.2, 0.3]),
-        trajectories,
-        ["INVALID", "CERTIFIED", "CERTIFIED"],
-        minimum_altitude_m=0.25,
-    )
-    assert selected == 1
-
-
-def test_depth_gate_skips_blocked_lowest_score_for_open_candidate():
-    depth = np.full((96, 160), 20.0, dtype=np.float32)
-    depth[:, 76:84] = 3.0
-    forward = np.linspace(0.0, 5.0, 101)
-    blocked = np.column_stack((forward, np.zeros_like(forward), np.ones_like(forward)))
-    open_path = np.column_stack(
-        (forward, np.minimum(0.5 * forward, 1.0), np.ones_like(forward))
-    )
-    trajectories = np.stack((blocked, open_path))
-    query = DepthSafeVolumeQuery(
-        depth,
-        robot_radius_m=0.3,
-        safety_margin_m=0.2,
-        max_unknown_fraction=0.2,
-    )
-    safety = [
-        validate_depth_trajectory(
-            query,
-            trajectory,
-            np.array([0.0, 0.0, 1.0]),
-            np.eye(3),
-            minimum_altitude_m=0.25,
-        )
-        for trajectory in trajectories
-    ]
-
-    selected = select_first_certified(
-        np.array([0.1, 0.2]),
-        trajectories,
-        [item["state"] for item in safety],
-        minimum_altitude_m=0.25,
-    )
-
-    assert [item["state"] for item in safety] == ["INVALID", "CERTIFIED"]
-    assert selected == 1
-
-
-def test_all_unsafe_or_nonfinite_candidates_produce_no_selection():
-    trajectories = np.zeros((3, 101, 3), dtype=np.float32)
-    trajectories[:, :, 2] = 1.5
-    trajectories[2, 50, 0] = np.nan
-    selected = select_first_certified(
-        np.array([0.1, 0.2, 0.05]),
-        trajectories,
-        ["INVALID", "UNVALIDATED", "CERTIFIED"],
-        minimum_altitude_m=0.25,
-    )
-    assert selected is None
-
-
 def test_dense_depth_gate_certifies_free_path_and_rejects_obstacle():
     adapter = RouteYopoController.__new__(RouteYopoController)
     adapter.args = SimpleNamespace(minimum_altitude=0.25)
@@ -292,77 +237,54 @@ def test_dense_depth_gate_certifies_free_path_and_rejects_obstacle():
     assert adapter._validate_trajectory(blocked_query, trajectory, position, np.eye(3))["state"] == "INVALID"
 
 
-def test_depth_gate_rejects_route_altitude_band_violation_before_depth_query():
-    trajectory = np.array([[0.0, 0.0, 1.6], [1.0, 0.0, 1.91]])
+def test_dense_depth_gate_rejects_near_field_obstacle():
+    trajectory = np.column_stack(
+        (np.linspace(0.0, 0.8, 81), np.zeros(81), np.ones(81))
+    )
+    query = DepthSafeVolumeQuery(
+        np.full((96, 160), 0.32, dtype=np.float32),
+        robot_radius_m=0.3,
+        safety_margin_m=0.2,
+        max_unknown_fraction=0.2,
+    )
     result = validate_depth_trajectory(
-        SimpleNamespace(),
+        query,
         trajectory,
-        np.zeros(3),
+        np.array([0.0, 0.0, 1.0]),
         np.eye(3),
         minimum_altitude_m=0.25,
-        route_altitude_m=1.6,
-        route_altitude_tolerance_m=0.25,
     )
-    assert result["state"] == "ROUTE_ALTITUDE"
-    assert result["maximum_altitude_error_m"] == pytest.approx(0.31)
+    assert result["state"] == "INVALID"
 
 
-def test_route_contract_accepts_only_fixed_altitude_path():
+def test_route_contract_accepts_nonplanar_path_and_clamps_radius():
     adapter = RouteYopoController.__new__(RouteYopoController)
     adapter.args = SimpleNamespace(
-        route_planarity_tolerance=0.05,
         route_start_tolerance=1.5,
         route_reanchor_tolerance=3.0,
-        route_terminal_tolerance=2.0,
-        minimum_route_length=0.5,
+            route_terminal_tolerance=2.0,
+            route_planarity_tolerance=0.25,
+            minimum_route_length=0.5,
         robot_radius=0.3,
         safety_margin=0.2,
     )
     position = np.array([0.0, 0.0, 1.6])
     frontier = np.array([5.0, 0.0, 1.6])
-    fixed = np.array([[0.0, 0.0, 1.6], [5.0, 0.0, 1.6]])
-    result = adapter._validate_route(fixed, frontier, position, 1.0)
+    path = np.array([[0.0, 0.0, 1.6], [2.5, 0.0, 1.8], [5.0, 0.0, 1.6]])
+    result = adapter._validate_route(path, frontier, position, 1.0)
     assert result[0]
     assert result[1] == "valid_fixed_altitude_route"
-    assert result[4] == pytest.approx(1.6)
 
-    nonplanar = fixed.copy()
-    nonplanar[1, 2] = 1.8
-    result = adapter._validate_route(nonplanar, frontier, position, 1.0)
-    assert not result[0]
-    assert result[1] == "path_not_fixed_altitude"
-
-    low_clearance = adapter._validate_route(fixed, frontier, position, 0.2)
+    low_clearance = adapter._validate_route(path, frontier, position, 0.2)
     assert low_clearance[0]
-    assert low_clearance[1] == "valid_fixed_altitude_route_without_corridor"
-    assert low_clearance[3] == pytest.approx(0.0)
+    assert low_clearance[1] == "valid_fixed_altitude_route"
+    assert low_clearance[3] == pytest.approx(0.2)
 
 
-def test_online_corridor_map_is_a_polyline_capsule_sdf():
-    route = np.array([[0.0, 0.0, 1.6], [2.0, 0.0, 1.6], [2.0, 2.0, 1.6]])
-    inside = np.array([[0.0, 0.0, 1.6], [1.0, 0.4, 1.6], [2.3, 1.0, 1.6]])
-    outside = inside.copy()
-    outside[-1] = [2.6, 1.0, 1.6]
-
-    accepted = validate_route_corridor(inside, route, 0.5)
-    rejected = validate_route_corridor(outside, route, 0.5)
-    assert accepted["state"] == "CERTIFIED"
-    assert accepted["minimum_corridor_margin_m"] == pytest.approx(0.1)
-    assert rejected["state"] == "ROUTE_CORRIDOR"
-    assert rejected["maximum_corridor_violation_m"] == pytest.approx(0.1)
-
-    tolerated = validate_route_corridor(outside, route, 0.5, tracking_tolerance_m=0.1)
-    assert tolerated["state"] == "CERTIFIED"
-    assert tolerated["minimum_nominal_corridor_margin_m"] == pytest.approx(-0.1)
-    assert tolerated["minimum_corridor_margin_m"] == pytest.approx(0.0, abs=1.0e-12)
-
-
-def test_route_corridor_can_certify_side_looking_unknown_depth():
+def test_route_controller_does_not_certify_unknown_depth_from_route():
     adapter = RouteYopoController.__new__(RouteYopoController)
     adapter.args = SimpleNamespace(
         minimum_altitude=0.25,
-        route_altitude_tolerance=0.25,
-        route_corridor_tracking_tolerance=0.1,
     )
     trajectory = np.column_stack(
         (np.full(101, 0.4), np.linspace(0.0, 2.0, 101), np.full(101, 1.6))
@@ -378,22 +300,81 @@ def test_route_corridor_can_certify_side_looking_unknown_depth():
         trajectory,
         np.zeros(3),
         np.eye(3),
-        route_altitude_m=1.6,
-        route_path_world=np.column_stack(
-            (np.zeros(2), np.linspace(0.0, 2.0, 2), np.full(2, 1.6))
-        ),
-        route_safe_radius_m=0.5,
     )
-    assert result["state"] == "CERTIFIED"
-    assert result["validation_source"] == "route_corridor_map_unknown_depth"
+    assert result["state"] == "UNVALIDATED"
 
 
-def test_route_corridor_deviation_does_not_override_depth_certificate():
+def test_route_corridor_cannot_certify_zero_depth_coverage():
     adapter = RouteYopoController.__new__(RouteYopoController)
     adapter.args = SimpleNamespace(
         minimum_altitude=0.25,
-        route_altitude_tolerance=0.25,
         route_corridor_tracking_tolerance=0.1,
+        route_corridor_min_known_fraction=0.75,
+        camera_translation_flu=(0.5, 0.0, -0.1),
+    )
+    # The route is geometrically valid, but every sample is behind the
+    # forward camera, so there is no depth evidence at all.
+    trajectory = np.column_stack(
+        (np.full(101, 0.4), np.linspace(0.0, 2.0, 101), np.full(101, 1.6))
+    )
+    route = np.array([[0.4, 0.0, 1.6], [0.4, 2.0, 1.6]])
+    unknown_query = DepthSafeVolumeQuery(
+        np.full((96, 160), np.nan, dtype=np.float32),
+        robot_radius_m=0.3,
+        safety_margin_m=0.2,
+        max_unknown_fraction=0.2,
+    )
+    result = adapter._validate_trajectory(
+        unknown_query,
+        trajectory,
+        np.zeros(3),
+        np.eye(3),
+        route_path_world=route,
+        route_safe_radius_m=0.5,
+    )
+    assert result["corridor_certified"] is True
+    assert result["depth_known_fraction"] == pytest.approx(0.0)
+    assert result["combined_certified"] is False
+    assert result["validation_source"] == "depth"
+    assert result["state"] == "UNVALIDATED"
+
+
+def test_route_corridor_supplements_partial_depth_coverage(monkeypatch):
+    adapter = RouteYopoController.__new__(RouteYopoController)
+    adapter.args = SimpleNamespace(
+        minimum_altitude=0.25,
+        route_corridor_tracking_tolerance=0.1,
+        route_corridor_min_known_fraction=0.75,
+    )
+    trajectory = np.column_stack(
+        (np.full(5, 1.0), np.linspace(0.0, 2.0, 5), np.full(5, 1.6))
+    )
+    route = np.array([[1.0, 0.0, 1.6], [1.0, 2.0, 1.6]])
+    monkeypatch.setattr(
+        "route_yopo_control_ros2.validate_depth_trajectory",
+        lambda *args, **kwargs: {
+            "state": "UNVALIDATED",
+            "minimum_clearance_m": 1.0,
+            "known_fraction": 0.80,
+        },
+    )
+    result = adapter._validate_trajectory(
+        object(),
+        trajectory,
+        np.zeros(3),
+        np.eye(3),
+        route_path_world=route,
+        route_safe_radius_m=0.5,
+    )
+    assert result["state"] == "CERTIFIED"
+    assert result["combined_certified"] is True
+    assert result["validation_source"] == "depth_plus_route_corridor"
+
+
+def test_route_controller_keeps_depth_certificate():
+    adapter = RouteYopoController.__new__(RouteYopoController)
+    adapter.args = SimpleNamespace(
+        minimum_altitude=0.25,
     )
     trajectory = np.column_stack(
         (np.linspace(0.0, 4.0, 101), np.zeros(101), np.full(101, 1.6))
@@ -409,14 +390,8 @@ def test_route_corridor_deviation_does_not_override_depth_certificate():
         trajectory,
         np.array([0.0, 0.0, 1.6]),
         np.eye(3),
-        route_altitude_m=1.6,
-        route_path_world=np.column_stack(
-            (np.linspace(0.0, 4.0, 2), np.full(2, 1.5), np.full(2, 1.6))
-        ),
-        route_safe_radius_m=0.5,
     )
     assert result["state"] == "CERTIFIED"
-    assert result["maximum_corridor_violation_m"] > 0.8
 
 
 def test_safety_depth_reduction_keeps_nearest_obstacle_and_unknown():

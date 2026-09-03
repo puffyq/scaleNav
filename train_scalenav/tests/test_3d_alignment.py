@@ -17,7 +17,6 @@ from scipy.spatial.transform import Rotation
 from evaluate_yopo import _sample_trajectory
 from policy.state_transform import (
     StateTransform,
-    project_world_endstate_to_altitude,
     state_body2world,
 )
 from policy.yopo_simple_baseline import YopoSimpleBaseline
@@ -98,35 +97,6 @@ def test_outer_lattice_rows_cannot_reach_a_level_route_without_projection():
     np.testing.assert_allclose(
         torch.rad2deg(minimum_outer_pitch).cpu().numpy(), [5.0, 5.0], atol=1.0e-5
     )
-
-
-def test_route_altitude_projection_preserves_xy_and_frontier_fallback():
-    position = torch.tensor([[4.0, 2.0, 3.0], [5.0, 3.0, 4.0]])
-    velocity = torch.tensor([[1.0, 2.0, 3.0], [2.0, 3.0, 4.0]])
-    acceleration = torch.tensor([[0.1, 0.2, 0.3], [0.2, 0.3, 0.4]])
-    projected = project_world_endstate_to_altitude(
-        position,
-        velocity,
-        acceleration,
-        torch.tensor([1.6, 1.7]),
-        torch.tensor([True, False]),
-    )
-    torch.testing.assert_close(projected[0][0], torch.tensor([4.0, 2.0, 1.6]))
-    torch.testing.assert_close(projected[1][0], torch.tensor([1.0, 2.0, 0.0]))
-    torch.testing.assert_close(projected[2][0], torch.tensor([0.1, 0.2, 0.0]))
-    torch.testing.assert_close(projected[0][1], position[1])
-    torch.testing.assert_close(projected[1][1], velocity[1])
-    torch.testing.assert_close(projected[2][1], acceleration[1])
-
-
-def test_route_supervision_targets_only_angularly_compatible_primitive():
-    transform = StateTransform()
-    compatible = transform.route_primitive_compatibility(
-        torch.tensor([[10.0, 0.0, 0.0], [10.0, 20.0, 0.0]])
-    )
-    assert compatible.shape == (2, 3, 5)
-    assert torch.nonzero(compatible[0], as_tuple=False).tolist() == [[1, 2]]
-    assert compatible[1].sum() >= 1
 
 
 def test_observation_3d_primitive_transform_matches_frozen_baseline():

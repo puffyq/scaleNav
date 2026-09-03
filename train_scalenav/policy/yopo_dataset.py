@@ -16,7 +16,6 @@ from data.coordinates import world_to_body_flu
 from data.route_contract import (
     RouteQualityFlag,
     RouteTable,
-    dense_route_arrays,
     load_route_table,
     sample_route_bubbles,
 )
@@ -99,8 +98,6 @@ class YOPODataset(Dataset):
         if len(self.anchors) != int(cfg["route_bubble_count"]):
             raise ValueError("route_anchor_distances_m must match route_bubble_count")
         self.clearance_clip_m = float(cfg["route_clearance_clip_m"])
-        self.dense_count = int(cfg["dense_route_points"])
-        self.dense_step_m = float(cfg["dense_route_step_m"])
         self.mode = mode
         self.seed = int(seed)
         self.split_strategy = "all"
@@ -195,6 +192,14 @@ class YOPODataset(Dataset):
         depth = self._read_depth(scene.path / "Textures" / str(frame["depthFileName"]), frame)
         position = np.asarray(frame["posStart"], dtype=np.float32)
         rotation = _rotation_wxyz(frame["orientationWxyz"])
+        path_world, _, path_radius = scene.routes.path(route_index)
+        initial_segments = np.diff(path_world, axis=0)
+        initial_lengths = np.linalg.norm(initial_segments, axis=1)
+        nonzero = np.flatnonzero(initial_lengths > 1.0e-5)
+        if len(nonzero) == 0:
+            raise ValueError(f"route {route_index} has no initial direction")
+        tangent_world = initial_segments[nonzero[0]] / initial_lengths[nonzero[0]]
+        tangent_body = rotation.T @ tangent_world
         motion_rng = (
             np.random
             if self.mode == "train"
@@ -202,7 +207,7 @@ class YOPODataset(Dataset):
                 np.random.SeedSequence((self.seed, scene_index, route_index))
             )
         )
-        motion = self._random_motion(motion_rng)
+        motion = self._random_motion(motion_rng, forward_direction=tangent_body)
         goal_field = (
             "local_subgoal_world"
             if "local_subgoal_world" in arrays
@@ -211,23 +216,15 @@ class YOPODataset(Dataset):
         frontier_world = arrays[goal_field][route_index].astype(np.float32, copy=True)
         frontier_body = world_to_body_flu(frontier_world, position, rotation).astype(np.float32)
 
-        path_world, _, path_radius = scene.routes.path(route_index)
         centers_world, conservative_radius, sample_distances = sample_route_bubbles(
             path_world, path_radius, self.anchors
         )
         centers_body = world_to_body_flu(centers_world, position, rotation)
-        normalized_centers = centers_body / np.maximum(sample_distances[:, None], 1.0)
+        normalized_centers = centers_body / float(cfg["goal_length"])
         normalized_radius = np.clip(conservative_radius, 0.0, self.clearance_clip_m) / self.clearance_clip_m
         route_bubbles = np.concatenate(
             (normalized_centers, normalized_radius[:, None]), axis=1
         ).astype(np.float32)
-        dense_world, dense_radius = dense_route_arrays(
-            path_world,
-            path_radius,
-            count=self.dense_count,
-            step_m=self.dense_step_m,
-        )
-
         return {
             "depth": torch.from_numpy(depth),
             "position_world": torch.from_numpy(position),
@@ -236,12 +233,9 @@ class YOPODataset(Dataset):
             "frontier_body": torch.from_numpy(frontier_body),
             "frontier_world": torch.from_numpy(frontier_world),
             "route_bubbles": torch.from_numpy(route_bubbles),
-            "dense_route_world": torch.from_numpy(dense_world),
-            "dense_route_radius": torch.from_numpy(dense_radius),
+            "route_points_world": torch.from_numpy(centers_world.astype(np.float32)),
+            "route_radii_world": torch.from_numpy(conservative_radius.astype(np.float32)),
             "map_id": torch.tensor(scene.map_id, dtype=torch.long),
-            "route_quality_weight": torch.tensor(
-                float(arrays["route_quality_weight"][route_index]), dtype=torch.float32
-            ),
         }
 
     def _read_depth(self, path: Path, frame: dict[str, Any]) -> np.ndarray:
@@ -257,7 +251,12 @@ class YOPODataset(Dataset):
         depth = np.nan_to_num(depth, nan=maximum, posinf=maximum, neginf=0.0)
         return np.expand_dims(np.clip(depth, 0.0, maximum) / maximum, axis=0).astype(np.float32)
 
-    def _random_motion(self, rng: Any = np.random) -> np.ndarray:
+    def _random_motion(
+        self,
+        rng: Any = np.random,
+        *,
+        forward_direction: np.ndarray | None = None,
+    ) -> np.ndarray:
         while True:
             velocity = self.vel_max * (self.v_mean + self.v_std * rng.standard_normal(3))
             forward = self.vel_max * rng.lognormal(
@@ -266,6 +265,11 @@ class YOPODataset(Dataset):
             velocity[0] = -forward + 1.2 * self.vel_max
             if np.linalg.norm(velocity) < 1.2 * self.vel_max:
                 break
+        if forward_direction is not None:
+            tangent = np.asarray(forward_direction, dtype=np.float32)
+            tangent /= max(float(np.linalg.norm(tangent)), 1.0e-6)
+            parallel = float(np.dot(velocity, tangent))
+            velocity = velocity + (max(abs(parallel), 0.5) - parallel) * tangent
         while True:
             acceleration = self.acc_max * (
                 self.a_mean + self.a_std * rng.standard_normal(3)

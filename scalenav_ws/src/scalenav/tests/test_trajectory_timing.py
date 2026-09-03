@@ -6,6 +6,7 @@ import pytest
 from policy.poly_solver import Poly5Solver
 from trajectory_timing import (
     load_maximum_trajectory_speed,
+    sample_fixed_period_trajectory,
     sample_time_scaled_trajectory,
     trajectory_peak_speed,
     trajectory_time_scale,
@@ -60,6 +61,40 @@ def test_time_scaling_keeps_the_same_spatial_path_and_scales_derivatives():
     np.testing.assert_allclose(position, expected_position)
     np.testing.assert_allclose(velocity, expected_velocity / scale)
     np.testing.assert_allclose(acceleration, expected_acceleration / scale**2)
+
+
+def test_fixed_period_sampling_advances_one_full_control_tick():
+    polynomials = make_trajectory()
+
+    _, _, _, first_time = sample_fixed_period_trajectory(
+        polynomials, 0.0, 0.02, 1.0
+    )
+    _, _, _, second_time = sample_fixed_period_trajectory(
+        polynomials, first_time, 0.02, 1.0
+    )
+
+    assert first_time == pytest.approx(0.02)
+    assert second_time == pytest.approx(0.04)
+
+
+def test_fixed_period_sampling_holds_at_trajectory_end():
+    polynomials = make_trajectory()
+
+    position, velocity, acceleration, sample_time = sample_fixed_period_trajectory(
+        polynomials, 0.99, 0.02, 1.0
+    )
+
+    assert sample_time == pytest.approx(1.0)
+    np.testing.assert_allclose(
+        position, [polynomial.get_position(1.0) for polynomial in polynomials]
+    )
+    np.testing.assert_allclose(
+        velocity, [polynomial.get_velocity(1.0) for polynomial in polynomials]
+    )
+    np.testing.assert_allclose(
+        acceleration,
+        [polynomial.get_acceleration(1.0) for polynomial in polynomials],
+    )
 
 
 def test_config_load_and_cli_override(tmp_path):

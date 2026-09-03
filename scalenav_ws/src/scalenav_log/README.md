@@ -56,6 +56,18 @@ scalenav_ws/install/scalenav_log/lib/scalenav_log/scalenav_log_viewer \
 
 打开 <http://127.0.0.1:8765>。网页从 `/api/sessions` 读取 session，从 `index.jsonl` 按时间轴加载 depth、点云和 graph 资源。服务只提供 GET，路径会拒绝绝对路径和 `..` 穿越。
 
+## 在线推理日志回放
+
+需要在包含 PyTorch、NumPy、OpenCV 和训练代码依赖的 Python 环境中运行：
+
+```bash
+cd /mnt/code/lab/yopo/OpenSeek
+ROUTE_YOPO_MODEL=train_scalenav/saved_route_balanced_w05_train_large_001/YOPO_0/best.pth \\
+  scalenav_ws/scripts/log_replay.sh
+```
+
+打开 <http://127.0.0.1:8766>。页面可选择历史 session 和深度帧，逐帧运行 Route-YOPO，并在世界 XY 图中叠加原日志规划路径、所有在线候选轨迹和当前选中轨迹。`--model` 省略时仍可浏览日志，但不会执行推理。
+
 ## 构建和测试
 
 ```bash

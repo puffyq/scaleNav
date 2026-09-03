@@ -4,6 +4,7 @@ uav_sim:
     simulation_rate: 500.0
     odom_rate: 100.0
     initial_position: [0.0, 0.0, 1.6]
+    initial_yaw: 1.5707963267948966
     position_gain: [4.0, 4.0, 6.0]
     velocity_gain: [3.0, 3.0, 4.0]
     attitude_gain: [2.0, 2.0, 1.0]

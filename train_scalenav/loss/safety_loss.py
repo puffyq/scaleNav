@@ -17,10 +17,8 @@ class SafetyLoss(nn.Module):
         self.map_expand_max = np.array(cfg['map_expand_max'])
         self.d0 = cfg["d0"]
         self.r = cfg["r"]
-        self.peak_weight = float(cfg["safety_peak_weight"])
-        self.collision_margin_weight = float(cfg["safety_collision_margin_weight"])
-        self.required_clearance = float(cfg["robot_radius_m"] + cfg["safety_margin_m"])
-
+        self.goal_length = float(cfg["goal_length"])
+        self.route_attraction_weight = float(cfg["safety_route_attraction_weight"])
         self._L = L
         self.sgm_time = cfg["sgm_time"]
         self.eval_points = int(cfg["safety_eval_points"])
@@ -38,7 +36,7 @@ class SafetyLoss(nn.Module):
         self.sdf_maps = self.get_sdf_from_ply(ply_paths if ply_paths is not None else data_dir)
         print("Map built!")
 
-    def forward(self, Df, Dp, map_id):
+    def forward(self, Df, Dp, map_id, route_points=None):
         """
         Args:
             Dp: decision parameters: (batch_size, 3, 3) → [px, vx, ax; py, vy, ay; pz, vz, az]
@@ -65,9 +63,7 @@ class SafetyLoss(nn.Module):
         if self.time_integral:
             # Compute average time integral of trajectory cost
             # Issue: uneven eval points may undercut cost by quickly crossing obstacles
-            point_cost = cost.reshape(-1, pos_coe.shape[1])
-            cost_colli = point_cost.mean(dim=-1)
-            cost_colli = cost_colli + self.peak_weight * point_cost.max(dim=-1).values
+            cost_colli = cost.reshape(-1, pos_coe.shape[1]).mean(dim=-1)
         else:
             # Compute average line integral of trajectory cost
             vel_coe = self.get_velocity_from_coeff(coe, t_list)
@@ -76,15 +72,58 @@ class SafetyLoss(nn.Module):
             line_length = (vel_coe * dt).sum(dim=1)  # [B*H*V]
             cost_colli = line_integral_cost / line_length  # [B*H*V]
 
-        # Exponential clearance cost is smooth but can still be traded for
-        # progress. Add an explicit differentiable barrier at the configured
-        # robot-plus-margin boundary so selected primitives cannot sit on an
-        # obstacle while gaining a longer endpoint.
-        point_violation = th.relu(self.required_clearance - dist.reshape(-1, pos_coe.shape[1]))
-        collision_barrier = point_violation.square().mean(dim=-1)
-        collision_barrier = collision_barrier + self.peak_weight * point_violation.square().max(dim=-1).values
-        self.last_collision_barrier = collision_barrier
-        return cost_colli + self.collision_margin_weight * collision_barrier
+        if self.route_attraction_weight <= 0.0:
+            return cost_colli
+        if route_points is None:
+            raise ValueError("route_points are required when route attraction is enabled")
+        attraction = self.route_attraction_cost(
+            pos_coe,
+            Df[:, :, 0],
+            route_points,
+        )
+        return cost_colli + self.route_attraction_weight * attraction
+
+    def route_attraction_cost(self, positions, start_position, route_points):
+        """Attract polynomial samples to arclength-aligned guide-line points."""
+        if positions.ndim != 3 or positions.shape[-1] != 3:
+            raise ValueError("positions must have shape [B, T, 3]")
+        if start_position.shape != (positions.shape[0], 3):
+            raise ValueError("start_position must have shape [B, 3]")
+        if route_points.ndim != 3 or route_points.shape[0] != positions.shape[0] or route_points.shape[-1] != 3:
+            raise ValueError("route_points must have shape [B, M, 3]")
+        if not th.isfinite(positions).all() or not th.isfinite(route_points).all():
+            raise ValueError("route attraction inputs must be finite")
+
+        route = th.cat((start_position[:, None, :], route_points), dim=1)
+        segment_length = th.linalg.vector_norm(route[:, 1:] - route[:, :-1], dim=-1)
+        cumulative = th.cat(
+            (th.zeros_like(segment_length[:, :1]), segment_length.cumsum(dim=1)),
+            dim=1,
+        )
+        fractions = th.linspace(
+            1.0 / positions.shape[1],
+            1.0,
+            positions.shape[1],
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+        target_distance = cumulative[:, -1:].clamp(max=self.goal_length) * fractions[None]
+        upper = th.searchsorted(
+            cumulative.contiguous(), target_distance.contiguous(), right=True
+        ).clamp(min=1, max=route.shape[1] - 1)
+        lower = upper - 1
+        lower_distance = th.gather(cumulative, 1, lower)
+        upper_distance = th.gather(cumulative, 1, upper)
+        alpha = (target_distance - lower_distance) / (
+            upper_distance - lower_distance
+        ).clamp_min(1.0e-8)
+        lower_point = th.gather(route, 1, lower[..., None].expand(-1, -1, 3))
+        upper_point = th.gather(route, 1, upper[..., None].expand(-1, -1, 3))
+        aligned = lower_point + alpha[..., None] * (upper_point - lower_point)
+        stationary = cumulative[:, -1:] <= 1.0e-8
+        aligned = th.where(stationary[..., None], start_position[:, None, :], aligned)
+        distance = th.linalg.vector_norm(positions - aligned, dim=-1)
+        return F.smooth_l1_loss(distance, th.zeros_like(distance), reduction="none").mean(dim=1)
 
     def get_distance_cost(self, pos, map_id):
         """

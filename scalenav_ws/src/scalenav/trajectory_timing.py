@@ -109,3 +109,23 @@ def sample_time_scaled_trajectory(
         dtype=np.float64,
     ) / (time_scale * time_scale)
     return position, velocity, acceleration, polynomial_time
+
+
+def sample_fixed_period_trajectory(
+    polynomials: Sequence,
+    current_time_s: float,
+    control_period_s: float,
+    duration_s: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Advance and sample a trajectory on YOPO-Simple's discrete control clock."""
+    values = (current_time_s, control_period_s, duration_s)
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError("trajectory control times must be finite")
+    if current_time_s < 0.0 or control_period_s <= 0.0 or duration_s <= 0.0:
+        raise ValueError(
+            "current trajectory time must be non-negative and periods positive"
+        )
+    sample_time = min(current_time_s + control_period_s, duration_s)
+    return sample_time_scaled_trajectory(
+        polynomials, sample_time, duration_s, 1.0
+    )

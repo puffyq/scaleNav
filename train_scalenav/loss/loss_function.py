@@ -30,7 +30,9 @@ class YOPOLoss(nn.Module):
         self.smoothness_loss = SmoothnessLoss(self._RJ, self._RA)
         self.safety_loss = SafetyLoss(self._L, obstacle_paths)
         self.goal_loss = GuidanceLoss() if include_goal else None
-        self.route_loss = RouteLoss(self._L)
+        self.route_loss = RouteLoss(
+            self._L, eval_points=int(cfg["safety_eval_points"])
+        )
         print("------ Actual Loss ------")
         print(f"| {'smooth':<12} = {self.smoothness_weight:6.4f} |")
         print(f"| {'safety':<12} = {self.safety_weight:6.4f} |")
@@ -93,12 +95,7 @@ class YOPOLoss(nn.Module):
         self.accele_weight = cfg["wa"] / vel_scale ** 3
         self.safety_weight = cfg["wc"]
         self.goal_weight = cfg["wg"]
-        self.path_weight = cfg["wp"]
-        self.path_mse_weight = cfg["wpath_mse"]
-        self.centerline_weight = cfg["wcenterline"]
-        self.progress_weight = cfg["wprogress"]
-        self.progress_floor_weight = cfg["wprogress_floor"]
-        self.tangent_weight = cfg["wtangent"]
+        self.corridor_weight = cfg["wcorridor"]
 
     def forward(
         self,
@@ -126,27 +123,20 @@ class YOPOLoss(nn.Module):
 
         smoothness_cost, acceleration_cost = self.smoothness_loss(Df, Dp)
         safety_cost = self.safety_loss(Df, Dp, map_id)
-        safety_barrier = self.safety_loss.last_collision_barrier
         if self.include_goal:
             if goal is None:
                 raise ValueError("goal is required when include_goal=True")
             goal_cost = self.goal_loss(Df, Dp, goal)
         else:
             goal_cost = th.zeros_like(smoothness_cost)
-        corridor_cost, centerline_cost, progress_cost, progress_floor_cost, tangent_cost, path_mse = self.route_loss(
+        corridor_cost = self.route_loss.corridor_barrier(
             Df, Dp, route_points, route_radii
         )
 
         return {
             "smooth": self.smoothness_weight * smoothness_cost,
             "safety": self.safety_weight * safety_cost,
-            "safety_barrier": self.safety_weight * self.safety_loss.collision_margin_weight * safety_barrier,
+            "route_corridor": self.corridor_weight * corridor_cost,
             "frontier": self.goal_weight * goal_cost,
             "acceleration": self.accele_weight * acceleration_cost,
-            "path_corridor": self.path_weight * corridor_cost,
-            "path_centerline": self.centerline_weight * centerline_cost,
-            "path_progress": self.progress_weight * progress_cost,
-            "path_progress_floor": self.progress_floor_weight * progress_floor_cost,
-            "path_tangent": self.tangent_weight * tangent_cost,
-            "path_mse": self.path_mse_weight * path_mse,
         }

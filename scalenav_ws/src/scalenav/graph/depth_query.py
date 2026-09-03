@@ -105,10 +105,10 @@ class DepthSafeVolumeQuery:
         for progress in np.linspace(0.0, 1.0, sample_count):
             point = start + progress * (end - start)
             forward = float(point[0])
-            # The volume surrounding the camera is occupied by the vehicle and
-            # cannot be observed by a forward camera. Treat it as the certified
-            # starting volume instead of turning every edge into UNKNOWN.
-            if forward <= max(self.min_depth_m, 2.0 * self.swept_radius_m):
+            # Do not discard measurable near-field returns. The camera is
+            # mounted ahead of the vehicle body, so a real obstacle can be
+            # inside the old 2*swept-radius skip distance and still collide.
+            if forward <= self.min_depth_m:
                 continue
             projection = self.project(point)
             if projection is None:
@@ -119,8 +119,6 @@ class DepthSafeVolumeQuery:
             u, v = projection
             radius_u = max(1, int(math.ceil(self.fx * self.swept_radius_m / forward)))
             radius_v = max(1, int(math.ceil(self.fy * self.swept_radius_m / forward)))
-            requested_pixels += self._ellipse_pixel_count(radius_u, radius_v)
-
             u0 = max(0, int(math.floor(u)) - radius_u)
             u1 = min(self.width - 1, int(math.ceil(u)) + radius_u)
             v0 = max(0, int(math.floor(v)) - radius_v)
@@ -129,6 +127,10 @@ class DepthSafeVolumeQuery:
             rows = np.arange(v0, v1 + 1, dtype=np.float32)
             grid_u, grid_v = np.meshgrid(columns, rows)
             mask = ((grid_u - u) / radius_u) ** 2 + ((grid_v - v) / radius_v) ** 2 <= 1.0
+            # Count only pixels that are actually present in the image. The
+            # old full-ellipse denominator made near-field/edge projections
+            # look artificially unknown after the ellipse was clipped.
+            requested_pixels += int(mask.sum())
             values = self.depth[v0 : v1 + 1, u0 : u1 + 1][mask]
             measured = np.isfinite(values) & (values >= self.min_depth_m)
             saturated = measured & (values >= self.far_depth_m - 1e-3)

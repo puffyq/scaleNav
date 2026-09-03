@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Route-conditioned YOPO online controller with a mandatory safety gate."""
+"""Original YOPO-Simple with route-constrained MPC post-processing."""
 
 from __future__ import annotations
 
@@ -37,9 +37,10 @@ from route_yopo_control_core import (
     enforce_route_progress,
     conservative_depth_reduce,
     decide_route_mode,
-    project_endstates_to_altitude,
     quaternion_xyzw_to_matrix,
+    project_endstates_to_altitude,
     reanchor_route_path,
+    trim_route_for_motion,
     route_signature,
     route_timestamps_coherent,
     sample_poly5_candidate_states,
@@ -48,6 +49,7 @@ from route_yopo_control_core import (
     validate_route_corridor,
     world_to_body_flu,
 )
+from yopo_inference_scaling import YopoInferenceScaling
 
 
 def _stamp_seconds(stamp: Any) -> float:
@@ -83,16 +85,24 @@ class RouteYopoController(Node):
         self.odom_record: tuple[Odometry, float] | None = None
         self.path_record: tuple[np.ndarray, float, float] | None = None
         self.frontier_record: tuple[np.ndarray, float, float] | None = None
+        self.bubble_record: tuple[np.ndarray, np.ndarray, float, float] | None = None
         self.clearance_record: tuple[float, float, float] | None = None
         self.previous_velocity_world: np.ndarray | None = None
         self.previous_velocity_time: float | None = None
         self.acceleration_world = np.zeros(3, dtype=np.float32)
         self.last_depth_monotonic = 0.0
-        self.control_trajectory: tuple[np.ndarray, np.ndarray, np.ndarray, float] | None = None
+        self.control_trajectory: (
+            tuple[np.ndarray, np.ndarray, np.ndarray, float, float] | None
+        ) = None
+        self.last_trajectory_replace_monotonic = 0.0
         self.planned_yaw = 0.0
         self.control_conflict = False
         self.control_executing = False
         self.control_armed = False
+        self.mpc = None
+        self.mpc_context = None
+        self.mpc_enabled = bool(getattr(args, "ordered_bubble_mpc", False))
+        self.mpc_last_status: list[int] = []
         self.inference_times_ms: deque[float] = deque(maxlen=4096)
         self.last_status: dict[str, Any] = self._hold_status("waiting_for_inputs")
 
@@ -105,30 +115,57 @@ class RouteYopoController(Node):
         sys.path.insert(0, train_path)
         from config.config import cfg
         from data.route_contract import sample_route_bubbles
-        from policy.yopo_network import YopoNetwork
-
         self.cfg = cfg
         self.sample_route_bubbles = sample_route_bubbles
         self.anchors = np.asarray(cfg["route_anchor_distances_m"], dtype=np.float32)
         self.route_radius_clip_m = float(cfg["route_clearance_clip_m"])
-        self.segment_time_s = float(cfg["sgm_time"])
+        self.training_segment_time_s = float(cfg["sgm_time"])
         self.image_width = int(cfg["image_width"])
         self.image_height = int(cfg["image_height"])
         self.device = self._resolve_device(args.device)
 
         checkpoint_path = Path(args.model).expanduser().resolve()
-        checkpoint = torch.load(
-            checkpoint_path, map_location=self.device, weights_only=False
+        self.model = torch.jit.load(checkpoint_path, map_location=self.device).eval()
+        self.feature_order = "yopo_simple_original_v1"
+        self.yopo_scaling = YopoInferenceScaling(
+            training_speed_mps=6.0,
+            training_acceleration_mps2=6.0,
+            inference_speed_mps=float(args.maximum_speed),
+            base_segment_time_s=self.training_segment_time_s,
         )
-        checkpoint_anchors = checkpoint.get("route_anchor_distances_m")
-        if checkpoint_anchors is not None and not np.array_equal(
-            np.asarray(checkpoint_anchors, dtype=np.float32), self.anchors
-        ):
-            raise ValueError("checkpoint route anchors do not match online configuration")
-        if int(checkpoint.get("route_bubble_count", len(self.anchors))) != len(self.anchors):
-            raise ValueError("checkpoint route bubble count does not match online configuration")
-        self.model = YopoNetwork().to(self.device).eval()
-        self.feature_order = self.model.load_route_checkpoint(checkpoint)
+        self.segment_time_s = self.yopo_scaling.segment_time_s
+        if self.mpc_enabled:
+            try:
+                from mpc.ordered_bubble_ocp import (
+                    OrderedBubbleMPC,
+                    OrderedBubbleMPCConfig,
+                )
+
+                self.mpc = OrderedBubbleMPC(
+                    OrderedBubbleMPCConfig(
+                        horizon_steps=max(
+                            12,
+                            int(
+                                round(
+                                    12
+                                    * self.segment_time_s
+                                    / self.training_segment_time_s
+                                )
+                            ),
+                        ),
+                        horizon_time_s=self.segment_time_s,
+                        max_velocity_mps=float(args.maximum_speed),
+                        max_acceleration_mps2=float(args.acceleration_limit),
+                        max_jerk_mps3=40.0,
+                    ),
+                    batch_size=1,
+                    model_name="route_yopo_ordered_bubble_online",
+                )
+                self.get_logger().info("ordered-bubble MPC enabled")
+            except Exception as error:
+                self.mpc = None
+                self.mpc_enabled = False
+                self.get_logger().error("ordered-bubble MPC disabled: %s" % error)
         self._warm_up()
 
         self.path_pub = self.create_publisher(
@@ -142,6 +179,12 @@ class RouteYopoController(Node):
         )
         self.route_pub = self.create_publisher(
             String, "/scalenav/route_yopo/route_condition", 10
+        )
+        self.mpc_path_pub = self.create_publisher(
+            PathMsg, args.mpc_path_topic, 10
+        )
+        self.mpc_bubble_pub = self.create_publisher(
+            MarkerArray, args.mpc_bubble_topic, 10
         )
         self.command_pub = self.create_publisher(
             MultiDOFJointTrajectoryPoint, args.control_topic, 10
@@ -175,6 +218,13 @@ class RouteYopoController(Node):
             10,
             callback_group=self.callback_group,
         )
+        self.bubble_sub = self.create_subscription(
+            MarkerArray,
+            args.bubble_topic,
+            self.on_bubbles,
+            10,
+            callback_group=self.callback_group,
+        )
         self.clearance_sub = self.create_subscription(
             Vector3Stamped,
             args.clearance_topic,
@@ -203,19 +253,18 @@ class RouteYopoController(Node):
 
     @torch.inference_mode()
     def _warm_up(self) -> None:
-        count = len(self.anchors)
         depth = torch.ones(
             (1, 1, self.image_height, self.image_width), device=self.device
         )
-        motion = torch.zeros((1, 6), device=self.device)
-        frontier = torch.tensor([[10.0, 0.0, 0.0]], device=self.device)
-        route = torch.zeros((1, count, 4), device=self.device)
-        endstate, score = self.model(depth, motion, frontier, route)
-        if tuple(endstate.shape) != (1, 9, 3, 5) or tuple(score.shape) != (1, 3, 5):
+        observation = torch.zeros((1, 9), device=self.device)
+        observation[:, 6] = 10.0
+        model_output, score = self.model(depth, observation)
+        if tuple(model_output.shape) != (1, 9, 3, 5):
             raise ValueError(
-                f"Route-YOPO output contract mismatch: {tuple(endstate.shape)}, {tuple(score.shape)}"
+                "YOPO-Simple output contract mismatch: "
+                f"{tuple(model_output.shape)}, {tuple(score.shape)}"
             )
-        if not torch.isfinite(endstate).all() or not torch.isfinite(score).all():
+        if not torch.isfinite(model_output).all() or not torch.isfinite(score).all():
             raise FloatingPointError("Route-YOPO warm-up produced non-finite output")
 
     def on_odometry(self, message: Odometry) -> None:
@@ -288,6 +337,56 @@ class RouteYopoController(Node):
             elif deleted:
                 self.frontier_record = None
 
+    def on_bubbles(self, message: MarkerArray) -> None:
+        bubble_centers: list[np.ndarray] = []
+        bubble_radii: list[float] = []
+        source_stamp = 0.0
+        for marker in message.markers:
+            if marker.ns == "scalenav_route_bubble_radius" and marker.action == Marker.ADD:
+                center = np.array(
+                    [marker.pose.position.x, marker.pose.position.y, marker.pose.position.z],
+                    dtype=np.float32,
+                )
+                radius = 0.5 * float(marker.scale.x)
+                if np.isfinite(center).all() and np.isfinite(radius) and radius > 0.0:
+                    bubble_centers.append(center)
+                    bubble_radii.append(radius)
+                    source_stamp = _stamp_seconds(marker.header.stamp)
+        with self.lock:
+            if bubble_centers:
+                self.bubble_record = (
+                    np.asarray(bubble_centers, dtype=np.float32),
+                    np.asarray(bubble_radii, dtype=np.float32),
+                    time.monotonic(),
+                    source_stamp,
+                )
+
+    def _route_local_radii(
+        self, route_path: np.ndarray, fallback: float, route_stamp: float
+    ) -> np.ndarray:
+        """Match route vertices to the latest raw topology bubble radii."""
+        with self.lock:
+            record = self.bubble_record
+        if (
+            record is None
+            or time.monotonic() - record[2] > self.args.route_timeout
+            or abs(float(route_stamp) - record[3]) > self.args.compat_stamp_slop
+        ):
+            return np.full(len(route_path), fallback, dtype=np.float32)
+        centers, radii, _, _ = record
+        distances = np.linalg.norm(route_path[:, None, :] - centers[None, :, :], axis=2)
+        nearest = np.argmin(distances, axis=1)
+        nearest_distance = distances[np.arange(len(route_path)), nearest]
+        # A route node is expected to be a topology bubble center. Reject
+        # unrelated bubbles instead of assigning a distant radius.
+        matched = nearest_distance <= 1.0
+        output = np.full(len(route_path), fallback, dtype=np.float32)
+        # ScaleNav publishes the topology bubble radius as the route geometry
+        # to constrain.  Keep that original radius intact; vehicle-size
+        # handling belongs to the independent depth collision certification.
+        output[matched] = radii[nearest[matched]]
+        return np.clip(output, 0.05, self.route_radius_clip_m)
+
     def on_clearance(self, message: Vector3Stamped) -> None:
         with self.lock:
             self.clearance_record = (
@@ -343,6 +442,11 @@ class RouteYopoController(Node):
 
     def on_depth(self, message: Image) -> None:
         now = time.monotonic()
+        # Sensor freshness is independent of the planning rate. In particular,
+        # a low replan rate must not make the 50 Hz controller treat a healthy
+        # depth stream as stale between inference ticks.
+        with self.lock:
+            self.last_depth_monotonic = now
         if now - self.last_plan_monotonic < 1.0 / self.args.update_rate:
             return
         if not self.inference_lock.acquire(blocking=False):
@@ -360,9 +464,8 @@ class RouteYopoController(Node):
     def _plan(self, depth_message: Image, now: float) -> None:
         raw_depth = self.decode_depth(depth_message)
         with self.lock:
-            self.last_depth_monotonic = now
             odom_record = self.odom_record
-            path_record = self.path_record
+            path_record = getattr(self, "path_record", None)
             frontier_record = self.frontier_record
             clearance_record = self.clearance_record
             velocity_world = (
@@ -404,6 +507,7 @@ class RouteYopoController(Node):
 
         route_valid = False
         route_reason = "route_not_available"
+        route_terminal_error_m = math.nan
         route_path = None
         safe_radius_m = math.nan
         route_altitude_m = math.nan
@@ -411,6 +515,7 @@ class RouteYopoController(Node):
             route_path = path_record[0].astype(np.float64, copy=True)
             frontier_world = frontier_record[0].astype(np.float64, copy=True)
             path_clearance_m = float(clearance_record[0])
+            route_terminal_error_m = float(np.linalg.norm(route_path[-1] - frontier_world)) if len(route_path) else math.nan
             (
                 route_valid,
                 route_reason,
@@ -440,12 +545,11 @@ class RouteYopoController(Node):
         route_features = np.zeros((count, 4), dtype=np.float32)
         sample_distances = self.anchors.copy()
         if decision.mode == RouteMode.ROUTE:
-            # Preserve the training-time route feature distribution when the
-            # compatibility clearance is temporarily below the robot margin.
-            # The floor is guidance only; corridor certification remains
-            # disabled for non-positive safe radii below.
-            feature_radius = max(safe_radius_m, 0.25)
-            point_radii = np.full(len(route_path), feature_radius, dtype=np.float32)
+            route_path = trim_route_for_motion(route_path, position_world, velocity_world)
+            feature_radius = max(safe_radius_m, 0.0)
+            point_radii = self._route_local_radii(
+                route_path, feature_radius, float(path_record[2])
+            )
             centers_world, sampled_radii, sample_distances = (
                 self.sample_route_bubbles(route_path, point_radii, self.anchors)
             )
@@ -456,6 +560,7 @@ class RouteYopoController(Node):
                 position_world,
                 rotation,
                 radius_clip_m=self.route_radius_clip_m,
+                normalization_distance_m=10.0,
             )
             route_id = self.route_ids.observe(route_signature(frontier_world, route_path))
 
@@ -471,44 +576,46 @@ class RouteYopoController(Node):
         depth_tensor = torch.from_numpy(model_depth[None, None]).to(
             self.device, non_blocking=True
         )
-        motion_tensor = torch.from_numpy(motion_body[None]).to(self.device, non_blocking=True)
-        frontier_tensor = torch.from_numpy(frontier_body[None]).to(
+        observation = np.concatenate((motion_body, frontier_body), axis=0).astype(np.float32)
+        observation_tensor = torch.from_numpy(observation[None]).to(
             self.device, non_blocking=True
         )
-        route_tensor = torch.from_numpy(route_features[None]).to(
-            self.device, non_blocking=True
-        )
+        observation_tensor = self.yopo_scaling.model_input(observation_tensor)
 
         started = time.perf_counter()
-        endstate, score = self.model(
-            depth_tensor, motion_tensor, frontier_tensor, route_tensor
-        )
+        model_output, score = self.model(depth_tensor, observation_tensor)
+        model_output = self.yopo_scaling.physical_endstate(model_output)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         inference_ms = (time.perf_counter() - started) * 1000.0
         self.inference_times_ms.append(inference_ms)
-        if not torch.isfinite(endstate).all() or not torch.isfinite(score).all():
+        if not torch.isfinite(model_output).all() or not torch.isfinite(score).all():
             self._publish_hold("model_output_non_finite")
             return
 
-        endstates_body = (
-            endstate[0].permute(1, 2, 0).reshape(-1, 9).detach().cpu().numpy()
-        )
         scores = score[0].reshape(-1).detach().cpu().numpy()
-        if decision.mode == RouteMode.ROUTE:
+        score_selected = int(np.argmin(scores))
+        endstates_body = (
+            model_output[0].permute(1, 2, 0).reshape(-1, 9).detach().cpu().numpy()
+        )
+        raw_endpoint_world = position_world[None] + endstates_body[:, :3] @ rotation.T
+        if decision.mode in (RouteMode.ROUTE, RouteMode.FRONTIER_ONLY):
             endstates_body = enforce_route_progress(
                 endstates_body,
                 frontier_body,
                 minimum_forward_m=2.0,
                 maximum_forward_m=8.0,
             )
-        raw_endpoint_world = position_world[None] + endstates_body[:, :3] @ rotation.T
-        if decision.mode == RouteMode.ROUTE:
+            constrained_altitude_m = (
+                route_altitude_m
+                if decision.mode == RouteMode.ROUTE
+                else float(frontier_world[2])
+            )
             endstates_body = project_endstates_to_altitude(
                 endstates_body,
                 position_world,
                 rotation,
-                route_altitude_m,
+                constrained_altitude_m,
             )
         trajectories, trajectory_velocities, trajectory_accelerations = sample_poly5_candidate_states(
             position_world,
@@ -519,6 +626,112 @@ class RouteYopoController(Node):
             segment_time_s=self.segment_time_s,
             sample_count=self.args.safety_samples,
         )
+        trajectory_durations = np.full(
+            len(trajectories), self.segment_time_s, dtype=np.float32
+        )
+        # YOPO performs proposal selection.  MPC receives only the top-scored
+        # terminal state; it is a constrained trajectory generator, not a
+        # second selector over the whole 3x5 lattice.
+        mpc_status: list[int] = [-2] * len(trajectories)
+        mpc_bubble_violation_m: list[float | None] = [None] * len(trajectories)
+        mpc_visual_trajectory: np.ndarray | None = None
+        mpc_visual_bubble_centers: np.ndarray | None = None
+        mpc_visual_bubble_radii: np.ndarray | None = None
+        if self.mpc is not None and decision.mode == RouteMode.ROUTE and safe_radius_m > 0.0:
+            try:
+                from mpc.ordered_bubble_ocp import (
+                    maximum_bubble_violation,
+                    maximum_reachable_progress,
+                    resolve_target_progress,
+                    sample_reachable_stage_bubbles,
+                )
+
+                route_segments = np.linalg.norm(np.diff(route_path, axis=0), axis=1)
+                initial_world = np.concatenate(
+                    (position_world, velocity_world, acceleration_world)
+                ).astype(np.float64)
+                terminal_world_all = np.concatenate(
+                    (
+                        position_world[None] + endstates_body[:, :3] @ rotation.T,
+                        endstates_body[:, 3:6] @ rotation.T,
+                        endstates_body[:, 6:9] @ rotation.T,
+                    ),
+                    axis=1,
+                ).astype(np.float64)
+                terminal_world = terminal_world_all[score_selected : score_selected + 1]
+                first_segment_index = int(np.flatnonzero(route_segments > 1.0e-6)[0])
+                route_tangent = (
+                    route_path[first_segment_index + 1] - route_path[first_segment_index]
+                ) / route_segments[first_segment_index]
+                initial_forward_speed = max(0.0, float(np.dot(velocity_world, route_tangent)))
+                reachable_progress = maximum_reachable_progress(
+                    horizon_time_s=self.mpc.config.horizon_time_s,
+                    initial_speed_mps=initial_forward_speed,
+                    max_velocity_mps=self.mpc.config.max_velocity_mps,
+                    max_acceleration_mps2=self.mpc.config.max_acceleration_mps2,
+                )
+                target_progress, _ = resolve_target_progress(
+                    terminal_world[0, :3], route_path,
+                    reachable_progress_m=reachable_progress,
+                )
+                stage_centers, stage_radii, _ = sample_reachable_stage_bubbles(
+                    route_path,
+                    point_radii.astype(np.float64),
+                    horizon_steps=self.mpc.config.horizon_steps,
+                    horizon_time_s=self.mpc.config.horizon_time_s,
+                    initial_speed_mps=initial_forward_speed,
+                    max_velocity_mps=self.mpc.config.max_velocity_mps,
+                    max_acceleration_mps2=self.mpc.config.max_acceleration_mps2,
+                    target_progress_m=target_progress,
+                )
+                mpc_context, _, mpc_states, _, _ = self.mpc(
+                    initial_world[None],
+                    terminal_world,
+                    stage_centers[None],
+                    stage_radii[None],
+                    context=self.mpc_context,
+                )
+                self.mpc_context = mpc_context
+                top1_status = int(np.asarray(mpc_context.status).reshape(-1)[0])
+                mpc_status[score_selected] = top1_status
+                mpc_nodes = mpc_states.detach().cpu().numpy()
+                # Keep the exact candidate and ordered bubbles used by MPC
+                # for RViz, including a soft-constraint solution that is later
+                # rejected by the explicit bubble-violation check.
+                mpc_visual_trajectory = mpc_nodes[0, :, :3].copy()
+                mpc_visual_bubble_centers = stage_centers.copy()
+                mpc_visual_bubble_radii = stage_radii.copy()
+                top1_violation = maximum_bubble_violation(
+                    mpc_nodes[0, :, :3], stage_centers, stage_radii
+                )
+                mpc_bubble_violation_m[score_selected] = top1_violation
+                if (
+                    top1_status == 0
+                    and top1_violation
+                    > self.mpc.config.maximum_accepted_bubble_violation_m
+                ):
+                    # acados status 0 only means the softened NLP converged.
+                    # It does not mean the safety set was actually respected.
+                    top1_status = -3
+                    mpc_status[score_selected] = top1_status
+                node_times = np.linspace(0.0, self.segment_time_s, mpc_nodes.shape[1])
+                sample_times = np.linspace(0.0, self.segment_time_s, self.args.safety_samples)
+                if top1_status == 0:
+                    for component in range(3):
+                        trajectories[score_selected, :, component] = np.interp(
+                            sample_times, node_times, mpc_nodes[0, :, component]
+                        )
+                        trajectory_velocities[score_selected, :, component] = np.interp(
+                            sample_times, node_times, mpc_nodes[0, :, 3 + component]
+                        )
+                        trajectory_accelerations[score_selected, :, component] = np.interp(
+                            sample_times, node_times, mpc_nodes[0, :, 6 + component]
+                        )
+            except Exception as error:
+                self.mpc_context = None
+                mpc_status[score_selected] = -1
+                self.get_logger().warning("ordered-bubble MPC solve failed: %s" % error)
+        self.mpc_last_status = mpc_status
         safety_depth = self._safety_depth(raw_depth)
         query = DepthSafeVolumeQuery(
             safety_depth,
@@ -528,7 +741,14 @@ class RouteYopoController(Node):
             safety_margin_m=self.args.safety_margin,
             sample_step_m=self.args.safety_sample_step,
             far_depth_m=self.args.max_depth,
-            max_unknown_fraction=self.args.max_unknown_fraction,
+            # Ordered bubbles constrain the part of an MPC trajectory that
+            # leaves the forward camera FOV. Allow a small additional unknown
+            # fraction only for that mode; non-MPC trajectories keep the
+            # stricter online depth gate.
+            max_unknown_fraction=max(
+                self.args.max_unknown_fraction,
+                0.25 if self.mpc is not None and decision.mode == RouteMode.ROUTE else 0.0,
+            ),
         )
         safety = [
             self._validate_trajectory(
@@ -536,32 +756,96 @@ class RouteYopoController(Node):
                 trajectory,
                 position_world,
                 rotation,
-                route_altitude_m=route_altitude_m
-                if decision.mode == RouteMode.ROUTE
-                else None,
-                route_path_world=route_path
-                if decision.mode == RouteMode.ROUTE
-                and math.isfinite(safe_radius_m)
-                and safe_radius_m > 0.0
-                else None,
-                route_safe_radius_m=safe_radius_m
-                if decision.mode == RouteMode.ROUTE
-                and math.isfinite(safe_radius_m)
-                and safe_radius_m > 0.0
-                else None,
+                route_altitude_m=constrained_altitude_m,
+                route_path_world=route_path if decision.mode == RouteMode.ROUTE and safe_radius_m > 0.0 else None,
+                route_safe_radius_m=safe_radius_m if decision.mode == RouteMode.ROUTE and safe_radius_m > 0.0 else None,
             )
             for trajectory in trajectories
         ]
+        for index, item in enumerate(safety):
+            speed_peak = float(np.linalg.norm(trajectory_velocities[index], axis=1).max())
+            acceleration_peak = float(np.linalg.norm(trajectory_accelerations[index], axis=1).max())
+            jerk_peak = (
+                float(
+                    np.linalg.norm(
+                        np.diff(trajectory_accelerations[index], axis=0), axis=1
+                    ).max()
+                )
+                / max(
+                    float(trajectory_durations[index])
+                    / max(len(trajectory_accelerations[index]) - 1, 1),
+                    1.0e-6,
+                )
+                if len(trajectory_accelerations[index]) > 1
+                else 0.0
+            )
+            item.update(
+                maximum_speed_mps=speed_peak,
+                maximum_acceleration_mps2=acceleration_peak,
+                maximum_jerk_mps3=jerk_peak,
+            )
         safety_states = [item["state"] for item in safety]
-        selected = select_first_certified(
-            scores,
-            trajectories,
-            safety_states,
-            minimum_altitude_m=self.args.minimum_altitude,
+        top1_mpc_required = self.mpc is not None and decision.mode == RouteMode.ROUTE
+        if top1_mpc_required:
+            selected = (
+                score_selected
+                if mpc_status[score_selected] == 0
+                and safety_states[score_selected] == "CERTIFIED"
+                else None
+            )
+        else:
+            selected = select_first_certified(
+                scores,
+                trajectories,
+                safety_states,
+                minimum_altitude_m=self.args.minimum_altitude,
+            )
+        certified_count = safety_states.count("CERTIFIED")
+        invalid_count = safety_states.count("INVALID")
+        unvalidated_count = safety_states.count("UNVALIDATED")
+        altitude_count = sum(
+            state in ("ALTITUDE", "ROUTE_ALTITUDE") for state in safety_states
         )
-        score_selected = int(np.argmin(scores))
+        selected_end = (
+            trajectories[selected, -1]
+            if selected is not None
+            else np.full(3, np.nan, dtype=np.float32)
+        )
+        selected_safety = safety[selected] if selected is not None else {}
+        selected_clearance = selected_safety.get("minimum_clearance_m")
+        selected_known_fraction = selected_safety.get("known_fraction")
+        maximum_known_fraction = max(
+            (float(item.get("known_fraction", 0.0) or 0.0) for item in safety),
+            default=0.0,
+        )
+        self.get_logger().info(
+            "[Route-YOPO safety] mode=%s route_reason=%s route_id=%d "
+            "selected=%s score_selected=%d "
+            "states=certified:%d invalid:%d unvalidated:%d altitude:%d "
+            "selected_end=(%.2f,%.2f,%.2f) selected_min_clearance=%s "
+            "selected_known_fraction=%s max_known_fraction=%.3f"
+            % (
+                decision.mode.value,
+                decision.reason,
+                route_id,
+                "none" if selected is None else str(selected),
+                score_selected,
+                certified_count,
+                invalid_count,
+                unvalidated_count,
+                altitude_count,
+                float(selected_end[0]),
+                float(selected_end[1]),
+                float(selected_end[2]),
+                "none" if selected_clearance is None else f"{float(selected_clearance):.3f}",
+                "none"
+                if selected_known_fraction is None
+                else f"{float(selected_known_fraction):.3f}",
+                maximum_known_fraction,
+            )
+        )
         output_mode = decision.mode if selected is not None else RouteMode.SAFETY_HOLD
-        output_reason = decision.reason if selected is not None else "no_certified_primitive"
+        output_reason = decision.reason if selected is not None else "no_certified_candidate"
 
         route_contract = {
             "contract": "RouteCondition-compatible diagnostic v1",
@@ -573,14 +857,12 @@ class RouteYopoController(Node):
             "centers_world": centers_world.tolist(),
             "safe_radii_m": sampled_radii.tolist(),
             "anchor_or_feature_distances_m": sample_distances.tolist(),
-            "radius_source": "scalenav_path_min_clearance_broadcast",
-            "corridor_map": "polyline_capsule_sdf",
+            "radius_source": "scalenav_route_topology_bubble_or_raw_clearance",
+            "radius_vehicle_subtraction_m": 0.0,
             "path_safe_radius_m": safe_radius_m if math.isfinite(safe_radius_m) else None,
-            "tracking_tolerance_m": self.args.route_corridor_tracking_tolerance,
-            "fixed_altitude_m": route_altitude_m
-            if math.isfinite(route_altitude_m)
-            else None,
             "route_validation": route_reason,
+            "route_terminal_error_m": route_terminal_error_m,
+            "fixed_altitude_m": constrained_altitude_m,
         }
         status = {
             "controller": "route_yopo",
@@ -595,42 +877,121 @@ class RouteYopoController(Node):
             "route_id_source": "adapter_local_monotonic",
             "route_source": "scalenav_compat_non_atomic",
             "feature_order": self.feature_order,
+            "yopo_route_input": False,
+            "route_validation": route_reason,
+            "route_terminal_error_m": route_terminal_error_m,
+            "fixed_altitude_m": constrained_altitude_m,
+            "training_trajectory_duration_s": self.training_segment_time_s,
+            "trajectory_duration_s": (
+                self.segment_time_s
+                if selected is None
+                else float(trajectory_durations[selected])
+            ),
             "selected_primitive": selected,
+            "selected_known_fraction": selected_known_fraction,
+            "selected_depth_known_fraction": selected_safety.get("depth_known_fraction"),
+            "selected_depth_known_sample_fraction": selected_safety.get(
+                "depth_known_sample_fraction"
+            ),
+            "selected_corridor_certified": selected_safety.get("corridor_certified", False),
+            "selected_combined_certified": selected_safety.get("combined_certified", False),
+            "selected_validation_source": selected_safety.get("validation_source"),
+            "route_corridor_min_known_fraction": float(
+                getattr(self.args, "route_corridor_min_known_fraction", 0.75)
+            ),
+            "selection_policy": "yopo_top1_then_mpc_certification",
+            "trajectory_replaced": False,
             "score_selected_primitive": score_selected,
-            "score_selected_certified": safety_states[score_selected] == "CERTIFIED",
+            "score_selected_certified": selected == score_selected,
             "selected_score": None if selected is None else float(scores[selected]),
             "candidate_scores": scores.tolist(),
             "raw_candidate_endpoint_z_min_max_m": [
                 float(np.min(raw_endpoint_world[:, 2])),
                 float(np.max(raw_endpoint_world[:, 2])),
             ],
-            "fixed_altitude_m": route_altitude_m
-            if math.isfinite(route_altitude_m)
-            else None,
+            "constrained_candidate_endpoint_z_min_max_m": [
+                float(np.min(trajectories[:, -1, 2])),
+                float(np.max(trajectories[:, -1, 2])),
+            ],
             "candidate_safety": safety,
             "inference_ms": inference_ms,
             "inference_p95_ms": float(np.percentile(self.inference_times_ms, 95.0)),
             "safety_samples_per_primitive": self.args.safety_samples,
             "safety_depth_shape_hw": list(safety_depth.shape),
+            "mpc_enabled": self.mpc is not None,
+            "mpc_submitted_primitive": score_selected if top1_mpc_required else None,
+            "mpc_not_submitted_status_code": -2,
+            "mpc_bubble_violation_rejected_status_code": -3,
+            "mpc_status": mpc_status,
+            "mpc_bubble_violation_m": mpc_bubble_violation_m,
+            "trajectory_source": (
+                "ordered_bubble_mpc"
+                if top1_mpc_required and mpc_status[score_selected] == 0
+                else "poly5"
+                if not top1_mpc_required
+                else "none"
+            ),
         }
         self._publish_json(self.route_pub, route_contract)
-        self._publish_json(self.status_pub, status)
+        self._publish_mpc_visualization(
+            mpc_visual_trajectory,
+            mpc_visual_bubble_centers,
+            mpc_visual_bubble_radii,
+            depth_message,
+        )
+        if selected is None:
+            with self.lock:
+                # Safety certification is evaluated on an asynchronous depth
+                # frame. A single frame can temporarily reject every new
+                # candidate even though the currently executing trajectory was
+                # certified moments earlier. Clearing it here makes the
+                # controller brake to zero and restart on the next good frame,
+                # which causes the observed stop-and-go motion. Keep the last
+                # certified trajectory until it expires; stale sensors and
+                # route/frontier failures still enter _publish_hold() above.
+                if invalid_count:
+                    # Never continue an old command after the newest depth
+                    # frame explicitly found an occupied swept volume.
+                    self.control_trajectory = None
+                    active = False
+                else:
+                    active = (
+                        self.control_trajectory is not None
+                        and now - self.control_trajectory[3]
+                        < min(
+                            self.control_trajectory[4],
+                            self.args.minimum_trajectory_hold,
+                        )
+                        and now - self.last_depth_monotonic <= self.args.control_timeout
+                    )
+                self.control_executing = active
+                status["trajectory_preserved"] = active
+            self._publish_json(self.status_pub, status)
+            return
         with self.lock:
-            if selected is None:
-                self.control_trajectory = None
-                self.control_executing = False
             self.last_status = status
         self._publish_candidates(trajectories, safety_states, selected, depth_message)
-        if selected is not None:
-            with self.lock:
+        with self.lock:
+            replace = (
+                self.control_trajectory is None
+                or now - self.last_trajectory_replace_monotonic
+                >= self.args.minimum_trajectory_hold
+                or now - self.control_trajectory[3] >= self.control_trajectory[4]
+            )
+            if replace:
                 self.control_trajectory = (
                     trajectories[selected].copy(),
                     trajectory_velocities[selected].copy(),
                     trajectory_accelerations[selected].copy(),
-                    time.monotonic(),
+                    now,
+                    float(trajectory_durations[selected]),
                 )
-                self.control_executing = True
-            self._publish_path(trajectories[selected], depth_message)
+                self.last_trajectory_replace_monotonic = now
+            self.control_executing = True
+            status["trajectory_replaced"] = replace
+            self.last_status = status
+        self._publish_json(self.status_pub, status)
+        self._publish_path(trajectories[selected], depth_message)
 
     def _validate_route(
         self,
@@ -644,10 +1005,10 @@ class RouteYopoController(Node):
         if not np.isfinite(path).all() or not np.isfinite(path_clearance_m):
             return False, "path_non_finite", path, math.nan, math.nan
         route_altitude = float(np.median(path[:, 2]))
-        altitude_span = float(np.ptp(path[:, 2]))
-        if altitude_span > self.args.route_planarity_tolerance:
+        if float(np.ptp(path[:, 2])) > getattr(self.args, "route_planarity_tolerance", 0.05):
             return False, "path_not_fixed_altitude", path, math.nan, math.nan
         start_error = float(np.linalg.norm(path[0] - position))
+        route_reason = "valid_route"
         if start_error > self.args.route_start_tolerance:
             anchored, nearest_error = reanchor_route_path(
                 path,
@@ -662,18 +1023,18 @@ class RouteYopoController(Node):
             start_error = nearest_error
         elif start_error > 1.0e-3:
             path = np.concatenate((position[None], path), axis=0)
-        if float(np.linalg.norm(path[-1] - frontier)) > self.args.route_terminal_tolerance:
-            return False, "path_terminal_mismatch", path, math.nan, math.nan
+        # Path and frontier arrive on separate topics and can be one graph tick
+        # apart. Path geometry is authoritative; endpoint skew is retained in
+        # status.route_terminal_error_m instead of forcing an unsafe fallback.
         length = float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
         if length < self.args.minimum_route_length:
             return False, "path_too_short", path, math.nan, math.nan
-        safe_radius = path_clearance_m - self.args.robot_radius - self.args.safety_margin
-        # Keep the route geometry and fixed-altitude contract usable even when
-        # the compatibility clearance topic reports a transiently small
-        # radius.  A non-positive radius disables corridor-map fallback; the
-        # live depth gate remains authoritative for collision certification.
+        # The route constraint uses the original ScaleNav clearance directly.
+        # Do not shrink it by the vehicle radius or an additional margin here.
+        safe_radius = path_clearance_m
         if safe_radius <= 0.0:
-            return True, "valid_fixed_altitude_route_without_corridor", path, 0.0, route_altitude
+            # A non-positive source clearance cannot define a route bubble.
+            return False, "route_corridor_too_narrow", path, 0.0, route_altitude
         return True, "valid_fixed_altitude_route", path, safe_radius, route_altitude
 
     def _validate_trajectory(
@@ -687,7 +1048,7 @@ class RouteYopoController(Node):
         route_path_world: np.ndarray | None = None,
         route_safe_radius_m: float | None = None,
     ) -> dict[str, Any]:
-        corridor: dict[str, Any] | None = None
+        corridor = None
         if route_path_world is not None or route_safe_radius_m is not None:
             if route_path_world is None or route_safe_radius_m is None:
                 raise ValueError("route path and safe radius must be provided together")
@@ -695,7 +1056,10 @@ class RouteYopoController(Node):
                 trajectory_world,
                 route_path_world,
                 route_safe_radius_m,
-                self.args.route_corridor_tracking_tolerance,
+                max(
+                    getattr(self.args, "route_corridor_tracking_tolerance", 0.0),
+                    0.25 if getattr(self, "mpc", None) is not None else 0.0,
+                ),
             )
         result = validate_depth_trajectory(
             query,
@@ -709,31 +1073,39 @@ class RouteYopoController(Node):
             rotation_body_to_world,
             minimum_altitude_m=self.args.minimum_altitude,
             route_altitude_m=route_altitude_m,
-            route_altitude_tolerance_m=self.args.route_altitude_tolerance
-            if route_altitude_m is not None
-            else None,
+            route_altitude_tolerance_m=getattr(
+                self.args, "route_altitude_tolerance", 0.25
+            ),
         )
-        # The corridor is a route guide, not a second local obstacle planner.
-        # A trajectory may leave it to avoid a newly observed obstacle, so a
-        # corridor violation must not discard an otherwise depth-certified
-        # candidate.  Conversely, an unknown depth sample can only fall back
-        # to the corridor map when the trajectory remains inside the map.
+        # A route corridor can cover points outside the camera FOV, but it
+        # cannot replace all sensor evidence.  In particular, a trajectory
+        # with known_fraction == 0 must never become publishable merely
+        # because its geometry lies on the planned route.
+        depth_known_fraction = float(result.get("known_fraction", 0.0) or 0.0)
+        depth_known_sample_fraction = float(
+            result.get("known_sample_fraction", depth_known_fraction) or 0.0
+        )
+        minimum_known_fraction = float(
+            getattr(self.args, "route_corridor_min_known_fraction", 0.75)
+        )
+        corridor_certified = corridor is not None and corridor["state"] == "CERTIFIED"
+        result = dict(result)
+        result["depth_known_fraction"] = depth_known_fraction
+        result["depth_known_sample_fraction"] = depth_known_sample_fraction
+        result["corridor_certified"] = bool(corridor_certified)
+        result["combined_certified"] = result["state"] == "CERTIFIED"
+        result["validation_source"] = "depth"
         if (
             result["state"] == "UNVALIDATED"
-            and corridor is not None
-            and corridor["state"] == "CERTIFIED"
+            and corridor_certified
+            and depth_known_sample_fraction > 0.0
+            and depth_known_sample_fraction >= minimum_known_fraction
         ):
-            result = dict(result)
             result["state"] = "CERTIFIED"
-            result["validation_source"] = "route_corridor_map_unknown_depth"
+            result["combined_certified"] = True
+            result["validation_source"] = "depth_plus_route_corridor"
         if corridor is not None:
-            result.update(
-                {
-                    name: value
-                    for name, value in corridor.items()
-                    if name != "state"
-                }
-            )
+            result.update(corridor=corridor, corridor_state=corridor["state"])
         return result
 
     def _publish_path(self, trajectory: np.ndarray, source: Image) -> None:
@@ -747,6 +1119,88 @@ class RouteYopoController(Node):
             pose.pose.orientation.w = 1.0
             message.poses.append(pose)
         self.path_pub.publish(message)
+
+    def _publish_mpc_visualization(
+        self,
+        trajectory_world: np.ndarray | None,
+        bubble_centers_world: np.ndarray | None,
+        bubble_radii_m: np.ndarray | None,
+        source: Image,
+    ) -> None:
+        """Publish the MPC solution and the exact ordered bubbles it used."""
+        path = PathMsg()
+        path.header.stamp = source.header.stamp
+        path.header.frame_id = self.args.world_frame
+        if trajectory_world is not None:
+            points = np.asarray(trajectory_world, dtype=np.float64)
+            if points.ndim == 2 and points.shape[1:] == (3,) and np.isfinite(points).all():
+                for values in points:
+                    pose = PoseStamped()
+                    pose.header = path.header
+                    pose.pose.position = _point(values)
+                    pose.pose.orientation.w = 1.0
+                    path.poses.append(pose)
+        self.mpc_path_pub.publish(path)
+
+        markers = MarkerArray()
+        clear = Marker()
+        clear.header = path.header
+        clear.ns = "route_yopo_mpc_bubbles"
+        clear.action = Marker.DELETEALL
+        markers.markers.append(clear)
+        centers = np.asarray(
+            [] if bubble_centers_world is None else bubble_centers_world,
+            dtype=np.float64,
+        )
+        radii = np.asarray(
+            [] if bubble_radii_m is None else bubble_radii_m,
+            dtype=np.float64,
+        ).reshape(-1)
+        if (
+            centers.ndim == 2
+            and centers.shape[1:] == (3,)
+            and len(centers) == len(radii)
+            and np.isfinite(centers).all()
+            and np.isfinite(radii).all()
+        ):
+            order = Marker()
+            order.header = path.header
+            order.ns = "route_yopo_mpc_bubbles"
+            order.id = 0
+            order.type = Marker.LINE_STRIP
+            order.action = Marker.ADD
+            order.pose.orientation.w = 1.0
+            order.scale.x = 0.045
+            order.color.r = 1.0
+            order.color.g = 0.78
+            order.color.b = 0.10
+            order.color.a = 0.75
+            order.points = [_point(center) for center, radius in zip(centers, radii) if radius > 0.0]
+            if len(order.points) >= 2:
+                markers.markers.append(order)
+            for index, (center, radius) in enumerate(zip(centers, radii)):
+                if radius <= 0.0:
+                    continue
+                marker = Marker()
+                marker.header = path.header
+                marker.ns = "route_yopo_mpc_bubbles"
+                marker.id = index + 1
+                marker.type = Marker.SPHERE
+                marker.action = Marker.ADD
+                marker.pose.orientation.w = 1.0
+                marker.pose.position = _point(center)
+                diameter = float(2.0 * radius)
+                marker.scale.x = diameter
+                marker.scale.y = diameter
+                marker.scale.z = diameter
+                marker.color.r = 1.0
+                marker.color.g = 0.78
+                marker.color.b = 0.10
+                marker.color.a = 0.22
+                marker.lifetime.sec = 0
+                marker.lifetime.nanosec = 0
+                markers.markers.append(marker)
+        self.mpc_bubble_pub.publish(markers)
 
     def _publish_candidates(
         self,
@@ -767,8 +1221,6 @@ class RouteYopoController(Node):
             "UNVALIDATED": (0.95, 0.70, 0.10, 0.60),
             "INVALID": (0.90, 0.15, 0.12, 0.60),
             "ALTITUDE": (0.72, 0.20, 0.75, 0.60),
-            "ROUTE_ALTITUDE": (0.85, 0.35, 0.75, 0.65),
-            "ROUTE_CORRIDOR": (0.95, 0.45, 0.10, 0.65),
             "NON_FINITE": (0.35, 0.35, 0.35, 0.50),
         }
         for index, trajectory in enumerate(trajectories):
@@ -843,9 +1295,16 @@ class RouteYopoController(Node):
             self.control_conflict = False
             odom_record = self.odom_record
             trajectory = self.control_trajectory
+            path_record = getattr(self, "path_record", None)
             last_depth = self.last_depth_monotonic
             planned_yaw = self.planned_yaw
             control_armed = self.control_armed
+            previous_velocity_world = getattr(self, "previous_velocity_world", None)
+            measured_velocity_world = (
+                np.zeros(3, dtype=np.float64)
+                if previous_velocity_world is None
+                else previous_velocity_world.astype(np.float64, copy=True)
+            )
         if recovered:
             self.get_logger().warning(
                 "control publisher conflict cleared; waiting for a newly certified trajectory"
@@ -871,9 +1330,13 @@ class RouteYopoController(Node):
             and now - trajectory[3] <= self.segment_time_s
         )
         if trajectory_fresh:
-            positions, velocities, accelerations, started = trajectory
+            if len(trajectory) == 4:
+                positions, velocities, accelerations, started = trajectory
+                duration_s = self.segment_time_s
+            else:
+                positions, velocities, accelerations, started, duration_s = trajectory
             progress = np.clip(
-                (now - started) / self.segment_time_s * (len(positions) - 1),
+                (now - started) / max(duration_s, 1.0e-6) * (len(positions) - 1),
                 0.0,
                 len(positions) - 1,
             )
@@ -885,6 +1348,32 @@ class RouteYopoController(Node):
             desired_acceleration = (
                 (1.0 - weight) * accelerations[lower] + weight * accelerations[upper]
             )
+            # Keep the command anchored at the measured pose. This prevents a
+            # far-ahead polynomial sample from creating a large stale position
+            # error while preserving the planned velocity direction.
+            desired_position = measured_position.copy()
+            desired_position[2] = positions[lower, 2] * (1.0 - weight) + positions[upper, 2] * weight
+            velocity_norm = float(np.linalg.norm(desired_velocity))
+            maximum_speed = getattr(self.args, "maximum_speed", 3.0)
+            command_acceleration_limit = getattr(
+                self.args, "command_acceleration_limit", 2.5
+            )
+            if velocity_norm > maximum_speed:
+                desired_velocity *= maximum_speed / velocity_norm
+            acceleration_norm = float(np.linalg.norm(desired_acceleration))
+            if acceleration_norm > command_acceleration_limit:
+                desired_acceleration *= command_acceleration_limit / acceleration_norm
+            # Horizontal tilt temporarily changes the vertical thrust. Close a
+            # small explicit altitude loop so that this coupling cannot turn a
+            # fixed-height route into a climb or descent.
+            altitude_error = float(desired_position[2] - measured_position[2])
+            desired_acceleration[2] += (
+                getattr(self.args, "altitude_kp", 4.0) * altitude_error
+                - getattr(self.args, "altitude_kv", 2.5) * measured_velocity_world[2]
+            )
+            acceleration_norm = float(np.linalg.norm(desired_acceleration))
+            if acceleration_norm > command_acceleration_limit:
+                desired_acceleration *= command_acceleration_limit / acceleration_norm
             speed_xy = float(np.linalg.norm(desired_velocity[:2]))
             target_yaw = (
                 math.atan2(float(desired_velocity[1]), float(desired_velocity[0]))
@@ -907,6 +1396,32 @@ class RouteYopoController(Node):
             desired_acceleration = np.zeros(3, dtype=np.float64)
             command_yaw = _quaternion_yaw(odom.pose.pose.orientation)
             yaw_rate = 0.0
+            # A safety hold should stop translation, but it should not leave
+            # the camera pointed permanently away from the route. Rotate at
+            # the normal yaw-rate limit toward the next route segment so the
+            # next depth frame can reacquire the corridor and resume motion.
+            if (
+                path_record is not None
+                and now - path_record[1] <= getattr(self.args, "route_timeout", 1.0)
+                and len(path_record[0]) >= 2
+            ):
+                route = np.asarray(path_record[0], dtype=np.float64)
+                nearest = int(
+                    np.argmin(np.linalg.norm(route[:, :2] - measured_position[None, :2], axis=1))
+                )
+                target = route[min(nearest + 1, len(route) - 1)] - measured_position
+                if float(np.linalg.norm(target[:2])) > 0.5:
+                    target_yaw = math.atan2(float(target[1]), float(target[0]))
+                    maximum_change = self.args.max_yaw_rate * 0.02
+                    yaw_change = float(
+                        np.clip(
+                            _wrap_angle(target_yaw - planned_yaw),
+                            -maximum_change,
+                            maximum_change,
+                        )
+                    )
+                    command_yaw = _wrap_angle(planned_yaw + yaw_change)
+                    yaw_rate = yaw_change / 0.02
             with self.lock:
                 if self.control_executing:
                     status = dict(self.last_status)
@@ -957,7 +1472,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default=str(root / "train_scalenav/saved_fixed_altitude/YOPO_0/best.pth"),
+        default=str(root / "scalenav_ws/src/models/original_yopo_simple/model.pt"),
     )
     parser.add_argument("--train-root", default=str(root / "train_scalenav"))
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -965,27 +1480,62 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-topic", default="/camera/depth/image")
     parser.add_argument("--path-topic", default="/scalenav/path")
     parser.add_argument("--graph-topic", default="/scalenav/graph")
+    parser.add_argument("--bubble-topic", default="/scalenav/bubbles")
     parser.add_argument("--clearance-topic", default="/scalenav/clearance")
     parser.add_argument("--world-frame", default="world_enu")
     parser.add_argument("--control-topic", default="/scalenav/trajectory_point")
+    parser.add_argument(
+        "--mpc-path-topic",
+        default="/scalenav/route_yopo/mpc_path",
+        help="RViz nav_msgs/Path topic for the current ordered-bubble MPC solution",
+    )
+    parser.add_argument(
+        "--mpc-bubble-topic",
+        default="/scalenav/route_yopo/mpc_bubbles",
+        help="RViz visualization_msgs/MarkerArray topic for MPC ordered bubbles",
+    )
     parser.add_argument("--control-timeout", type=float, default=0.5)
     parser.add_argument("--max-yaw-rate", type=float, default=1.5)
+    parser.add_argument(
+        "--maximum-speed",
+        type=float,
+        default=6.0,
+        help="controller and MPC speed limit in m/s (default: 6.0)",
+    )
     parser.add_argument("--odom-twist-frame", choices=("body", "world"), default="body")
-    parser.add_argument("--update-rate", type=float, default=5.0)
+    parser.add_argument(
+        "--ordered-bubble-mpc",
+        action="store_true",
+        help="run leap-c/acados MPC with ordered route bubbles after YOPO",
+    )
+    parser.add_argument("--update-rate", type=float, default=1.0)
     parser.add_argument("--odom-timeout", type=float, default=0.5)
     parser.add_argument("--route-timeout", type=float, default=1.0)
     parser.add_argument("--compat-stamp-slop", type=float, default=0.20)
     parser.add_argument("--route-start-tolerance", type=float, default=1.5)
-    parser.add_argument("--route-reanchor-tolerance", type=float, default=5.0)
+    # Route updates can lag the 50 Hz controller by several metres while the
+    # vehicle is moving. Allow trimming that lagging prefix without accepting
+    # an unrelated route from far away.
+    parser.add_argument("--route-reanchor-tolerance", type=float, default=10.0)
     parser.add_argument("--route-terminal-tolerance", type=float, default=2.0)
     parser.add_argument("--route-planarity-tolerance", type=float, default=0.05)
     parser.add_argument("--route-altitude-tolerance", type=float, default=0.25)
     parser.add_argument("--route-corridor-tracking-tolerance", type=float, default=0.1)
+    parser.add_argument(
+        "--route-corridor-min-known-fraction",
+        type=float,
+        default=0.75,
+        help="minimum depth coverage required before a route corridor can supplement unknown FOV samples",
+    )
     parser.add_argument("--minimum-route-length", type=float, default=0.5)
     parser.add_argument("--robot-radius", type=float, default=0.3)
     parser.add_argument("--safety-margin", type=float, default=0.2)
     parser.add_argument("--minimum-altitude", type=float, default=0.25)
     parser.add_argument("--acceleration-limit", type=float, default=6.0)
+    parser.add_argument("--command-acceleration-limit", type=float, default=2.5)
+    parser.add_argument("--altitude-kp", type=float, default=4.0)
+    parser.add_argument("--altitude-kv", type=float, default=2.5)
+    parser.add_argument("--minimum-trajectory-hold", type=float, default=1.0)
     parser.add_argument("--safety-samples", type=int, default=101)
     parser.add_argument("--safety-sample-step", type=float, default=0.20)
     parser.add_argument("--max-unknown-fraction", type=float, default=0.20)
@@ -1003,10 +1553,17 @@ def parse_args() -> argparse.Namespace:
     if (
         args.update_rate <= 0.0
         or args.safety_samples < 101
+        or args.acceleration_limit <= 0.0
+        or args.maximum_speed <= 0.0
+        or args.command_acceleration_limit <= 0.0
+        or args.altitude_kp <= 0.0
+        or args.altitude_kv <= 0.0
+        or args.minimum_trajectory_hold < 0.0
         or args.route_planarity_tolerance <= 0.0
         or args.route_altitude_tolerance <= 0.0
         or args.route_corridor_tracking_tolerance < 0.0
         or args.route_corridor_tracking_tolerance > args.safety_margin
+        or not 0.0 < args.route_corridor_min_known_fraction <= 1.0
         or not all(math.isfinite(value) for value in args.camera_translation_flu)
     ):
         parser.error("update rate must be positive and safety samples must be at least 101")

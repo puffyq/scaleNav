@@ -73,6 +73,8 @@ public:
     Eigen::Vector3f failed_point = Eigen::Vector3f::Zero();
     double clearance = std::numeric_limits<double>::quiet_NaN();
     double radius = std::numeric_limits<double>::quiet_NaN();
+    double minimum_clearance = std::numeric_limits<double>::infinity();
+    Eigen::Vector3f minimum_clearance_point = Eigen::Vector3f::Zero();
     std::size_t predecessor_index = std::numeric_limits<std::size_t>::max();
     double predecessor_radius = std::numeric_limits<double>::quiet_NaN();
     double predecessor_distance = std::numeric_limits<double>::quiet_NaN();

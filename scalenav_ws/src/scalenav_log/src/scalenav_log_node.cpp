@@ -183,6 +183,8 @@ public:
     graph_topic_ = declare_parameter<std::string>("graph_topic", "/scalenav/graph");
     bubble_topic_ = declare_parameter<std::string>("bubble_topic", "/scalenav/bubbles");
     path_topic_ = declare_parameter<std::string>("path_topic", "/scalenav/path");
+    route_yopo_planned_path_topic_ = declare_parameter<std::string>(
+      "route_yopo_planned_path_topic", "/scalenav/route_yopo/planned_path");
     odom_topic_ = declare_parameter<std::string>("odom_topic", "/sim/odom");
     control_topic_ = declare_parameter<std::string>("control_topic", "/scalenav/trajectory_point");
     semantic_topic_ = declare_parameter<std::string>("semantic_topic", "/scalenav/text_heatmap_raw");
@@ -191,6 +193,8 @@ public:
     clearance_topic_ = declare_parameter<std::string>("clearance_topic", "/scalenav/clearance");
     collision_topic_ = declare_parameter<std::string>("collision_topic", "/sim/collision");
     timing_topic_ = declare_parameter<std::string>("timing_topic", "/scalenav/timing");
+    route_yopo_status_topic_ = declare_parameter<std::string>(
+      "route_yopo_status_topic", "/scalenav/route_yopo/status");
     mission_position_tolerance_m_ = declare_parameter<double>(
       "mission_position_tolerance_m", 0.5);
     mission_speed_tolerance_mps_ = declare_parameter<double>(
@@ -205,12 +209,14 @@ public:
       << ",\"pointcloud\":" << jsonQuote(pointcloud_topic_)
       << ",\"free_ray\":" << jsonQuote(free_ray_topic_) << ",\"graph\":" << jsonQuote(graph_topic_)
       << ",\"bubbles\":" << jsonQuote(bubble_topic_) << ",\"path\":" << jsonQuote(path_topic_)
+      << ",\"route_yopo_planned_path\":" << jsonQuote(route_yopo_planned_path_topic_)
       << ",\"odom\":" << jsonQuote(odom_topic_) << ",\"control\":" << jsonQuote(control_topic_)
       << ",\"semantic\":" << jsonQuote(semantic_topic_) << ",\"goal\":" << jsonQuote(goal_topic_)
       << ",\"local_goal\":" << jsonQuote(local_goal_topic_)
       << ",\"clearance\":" << jsonQuote(clearance_topic_)
       << ",\"collision\":" << jsonQuote(collision_topic_)
       << ",\"timing\":" << jsonQuote(timing_topic_)
+      << ",\"route_yopo_status\":" << jsonQuote(route_yopo_status_topic_)
       << "},\"pointcloud_max_points\":" << pointcloud_max_points_
       << ",\"pointcloud_stride\":" << pointcloud_stride_
       << ",\"graph_snapshot_period_ms\":" << graph_snapshot_period_ms_
@@ -236,7 +242,12 @@ public:
     bubble_sub_ = create_subscription<visualization_msgs::msg::MarkerArray>(bubble_topic_, qos_depth,
       [this](visualization_msgs::msg::MarkerArray::ConstSharedPtr message) { captureMarkers(*message, "bubbles"); });
     path_sub_ = create_subscription<nav_msgs::msg::Path>(path_topic_, qos_depth,
-      [this](nav_msgs::msg::Path::ConstSharedPtr message) { capturePath(*message); });
+      [this](nav_msgs::msg::Path::ConstSharedPtr message) { capturePath(*message, "path"); });
+    route_yopo_planned_path_sub_ = create_subscription<nav_msgs::msg::Path>(
+      route_yopo_planned_path_topic_, qos_depth,
+      [this](nav_msgs::msg::Path::ConstSharedPtr message) {
+        capturePath(*message, "route_yopo_planned_path");
+      });
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(odom_topic_, sensor_qos,
       [this](nav_msgs::msg::Odometry::ConstSharedPtr message) { captureOdom(*message); });
     control_sub_ = create_subscription<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>(control_topic_, qos_depth,
@@ -258,6 +269,11 @@ public:
     timing_sub_ = create_subscription<std_msgs::msg::String>(
       timing_topic_, rclcpp::QoS(rclcpp::KeepLast(100)).reliable(),
       [this](std_msgs::msg::String::ConstSharedPtr message) { captureTiming(*message); });
+    route_yopo_status_sub_ = create_subscription<std_msgs::msg::String>(
+      route_yopo_status_topic_, rclcpp::QoS(rclcpp::KeepLast(100)).reliable(),
+      [this](std_msgs::msg::String::ConstSharedPtr message) {
+        captureJsonString(*message, "route_yopo_status");
+      });
     RCLCPP_INFO(get_logger(), "scalenav log session: %s", store_->activeSession().string().c_str());
   }
 
@@ -437,7 +453,7 @@ private:
     store_->record(kind, stamp, relative, bytes.size(), "{\"marker_count\":" + std::to_string(message.markers.size()) + "}");
   }
 
-  void capturePath(const nav_msgs::msg::Path &message)
+  void capturePath(const nav_msgs::msg::Path &message, const std::string &kind)
   {
     std::ostringstream out;
     out << "{\"frame_id\":" << jsonQuote(message.header.frame_id) << ",\"poses\":[";
@@ -447,9 +463,10 @@ private:
     }
     out << "]}";
     const auto bytes = bytesFromString(out.str());
-    const auto file = "graph/path_" + std::to_string(++path_seq_) + ".json";
+    const auto file = "graph/" + kind + "_" + std::to_string(++path_seq_) + ".json";
     const auto relative = store_->writeAsset(file, bytes);
-    store_->record("path", stampNs(message.header.stamp), relative, bytes.size(), "{\"pose_count\":" + std::to_string(message.poses.size()) + "}");
+    store_->record(kind, stampNs(message.header.stamp), relative, bytes.size(),
+      "{\"pose_count\":" + std::to_string(message.poses.size()) + "}");
   }
 
   void captureOdom(const nav_msgs::msg::Odometry &message)
@@ -579,6 +596,15 @@ private:
     store_->record("timing", receptionStampNs(), "", extra.size(), extra);
   }
 
+  void captureJsonString(const std_msgs::msg::String &message, const std::string &kind)
+  {
+    const bool json_object = message.data.size() >= 2 && message.data.front() == '{' &&
+      message.data.back() == '}';
+    const auto extra = json_object ? message.data :
+      "{\"raw\":" + jsonQuote(message.data) + "}";
+    store_->record(kind, receptionStampNs(), "", extra.size(), extra);
+  }
+
   std::int64_t receptionStampNs() const
   {
     return now().nanoseconds();
@@ -592,8 +618,9 @@ private:
   bool have_graph_snapshot_time_ = false;
   std::uint64_t depth_seq_ = 0, rgb_seq_ = 0, pointcloud_seq_ = 0, graph_seq_ = 0, path_seq_ = 0;
   std::string depth_topic_, rgb_topic_, pointcloud_topic_, free_ray_topic_, graph_topic_,
-    bubble_topic_, path_topic_, odom_topic_, control_topic_, semantic_topic_, goal_topic_,
-    local_goal_topic_, clearance_topic_, collision_topic_, timing_topic_;
+    bubble_topic_, path_topic_, route_yopo_planned_path_topic_, odom_topic_, control_topic_, semantic_topic_, goal_topic_,
+    local_goal_topic_, clearance_topic_, collision_topic_, timing_topic_,
+    route_yopo_status_topic_;
   double mission_position_tolerance_m_ = 0.5;
   double mission_speed_tolerance_mps_ = 0.3;
   std::array<double, 3> mission_goal_{0.0, 0.0, 0.0};
@@ -610,7 +637,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_, rgb_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_, free_ray_sub_;
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr graph_sub_, bubble_sub_;
-  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_, route_yopo_planned_path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>::SharedPtr control_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr semantic_sub_;
@@ -618,6 +645,7 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr clearance_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr collision_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr timing_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr route_yopo_status_sub_;
 };
 
 }  // namespace

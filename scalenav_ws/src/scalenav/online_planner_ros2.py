@@ -43,9 +43,8 @@ from planner_continuity import (
 )
 from trajectory_timing import (
     load_maximum_trajectory_speed,
-    sample_time_scaled_trajectory,
+    sample_fixed_period_trajectory,
     trajectory_peak_speed,
-    trajectory_time_scale,
 )
 from yopo_inference_scaling import YopoInferenceScaling
 from text_tracker.heatmap import goal_body_to_heatmap
@@ -143,6 +142,7 @@ class OnlinePlanner(Node):
         self.velocity_world = np.zeros(3, dtype=np.float32)
         self.previous_velocity_stamp: float | None = None
         self.acceleration_world = np.zeros(3, dtype=np.float32)
+        self.angular_velocity = np.zeros(3, dtype=np.float32)
         self.flight_samples = deque(maxlen=50000)
         self.flight_path_length_m = 0.0
         self.flight_duration_s = 0.0
@@ -160,7 +160,8 @@ class OnlinePlanner(Node):
         self.desired_velocity_world: np.ndarray | None = None
         self.desired_acceleration_world = np.zeros(3, dtype=np.float64)
         self.polynomials: tuple[Poly5Solver, Poly5Solver, Poly5Solver] | None = None
-        self.trajectory_started = 0.0
+        self.control_period_s = 0.02
+        self.trajectory_control_time = 0.0
         self.trajectory_time_scale = 1.0
         self.trajectory_duration = self.segment_time
         self.planned_yaw = 0.0
@@ -168,7 +169,6 @@ class OnlinePlanner(Node):
         self.inference_total_ms = 0.0
         self.last_log_time = 0.0
         self.trajectory_valid_for_control = False
-        self.last_tracking_error = 0.0
         self.control_topic = args.control_topic
         self.goal_world: np.ndarray | None = None
         self.mission_goal_world: np.ndarray | None = None
@@ -257,7 +257,10 @@ class OnlinePlanner(Node):
                 callback_group=self.callback_group,
             )
         self.control_timer = self.create_timer(
-            0.02, self.publish_control, callback_group=self.callback_group)
+            self.control_period_s,
+            self.publish_control,
+            callback_group=self.callback_group,
+        )
         self.status_timer = self.create_timer(
             2.0, self.report_status, callback_group=self.callback_group)
         self.flight_timer = self.create_timer(
@@ -300,8 +303,6 @@ class OnlinePlanner(Node):
                 ),
                 "odom_twist_frame": args.odom_twist_frame,
                 "plan_from_reference": bool(args.plan_from_reference),
-                "reference_reset_position_error_m": args.reference_reset_position_error,
-                "reference_reset_velocity_error_m_s": args.reference_reset_velocity_error,
                 "minimum_trajectory_altitude_m": args.minimum_trajectory_altitude,
                 "trajectory_altitude_margin_m": args.altitude_margin,
                 "model_motion_contract": "body FLU [velocity_m_s, acceleration_m_s2, goal_m]",
@@ -462,8 +463,17 @@ class OnlinePlanner(Node):
             ).astype(np.float32)
         else:
             velocity_world = velocity_input
+        angular_velocity = np.array(
+            [
+                message.twist.twist.angular.x,
+                message.twist.twist.angular.y,
+                message.twist.twist.angular.z,
+            ],
+            dtype=np.float32,
+        )
         with self.flight_lock:
             self.velocity_world = velocity_world
+            self.angular_velocity = angular_velocity
             if self.previous_velocity_world is not None and self.previous_velocity_stamp is not None:
                 dt = sample_stamp - self.previous_velocity_stamp
                 if 0.002 <= dt <= 0.2:
@@ -511,6 +521,7 @@ class OnlinePlanner(Node):
                 ),
                 "velocity_world": self.vec(velocity_world),
                 "acceleration_world": self.vec(self.acceleration_world),
+                "angular_velocity": self.vec(angular_velocity),
                 "orientation_xyzw": self.vec(
                     [
                         message.pose.pose.orientation.x,
@@ -1010,6 +1021,15 @@ class OnlinePlanner(Node):
         states = endstate[0].permute(1, 2, 0).reshape(-1, 9)
         scores_np = scores.detach().cpu().numpy()
         selected_state = states[selected].detach().cpu().numpy()
+        with self.lock:
+            trajectory_start_odom = self.odom
+        if trajectory_start_odom is None:
+            return
+        (
+            trajectory_start_position,
+            trajectory_start_velocity,
+            trajectory_start_acceleration,
+        ) = self.reference_state(trajectory_start_odom, time.monotonic())
         self.frame_index += 1
         raw_depth_png = None
         model_depth_png = None
@@ -1052,14 +1072,14 @@ class OnlinePlanner(Node):
             },
         )
         self.update_trajectory(
-            odom,
+            trajectory_start_odom,
             rotation,
             selected_state,
             selected,
             scores_np,
-            reference_position,
-            reference_velocity,
-            reference_acceleration,
+            trajectory_start_position,
+            trajectory_start_velocity,
+            trajectory_start_acceleration,
         )
         self.inference_count += 1
         self.inference_total_ms += inference_ms
@@ -1222,37 +1242,30 @@ class OnlinePlanner(Node):
         )
 
     def reference_state(
-        self, odom: Odometry, sample_clock: float
+        self, odom: Odometry, _sample_clock: float
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         with self.lock:
-            polynomials = self.polynomials
-            started = self.trajectory_started
-            time_scale = self.trajectory_time_scale
-            valid = self.trajectory_valid_for_control
-        if self.args.plan_from_reference and polynomials is not None and valid:
-            position, velocity, acceleration, _ = sample_time_scaled_trajectory(
-                polynomials,
-                sample_clock - started,
-                self.segment_time,
-                time_scale,
+            desired_position = (
+                None
+                if self.desired_position_world is None
+                else self.desired_position_world.astype(np.float64, copy=True)
             )
-            measured_position = np.array(
-                [odom.pose.pose.position.x, odom.pose.pose.position.y, odom.pose.pose.position.z],
-                dtype=np.float64,
+            desired_velocity = (
+                None
+                if self.desired_velocity_world is None
+                else self.desired_velocity_world.astype(np.float64, copy=True)
             )
-            measured_velocity = self.velocity_world.astype(np.float64, copy=True)
-            position_error = float(np.linalg.norm(position - measured_position))
-            velocity_error = float(np.linalg.norm(velocity - measured_velocity))
-            self.last_tracking_error = position_error
-            if (
-                position_error <= self.args.reference_reset_position_error
-                and velocity_error <= self.args.reference_reset_velocity_error
-            ):
-                return position, velocity, acceleration
-            self.get_logger().warning(
-                "reference reset: position_error=%.2f m velocity_error=%.2f m/s"
-                % (position_error, velocity_error)
+            desired_acceleration = self.desired_acceleration_world.astype(
+                np.float64, copy=True
             )
+        if (
+            self.args.plan_from_reference
+            and desired_position is not None
+            and desired_velocity is not None
+        ):
+            # YOPO-Simple replans from the latest command published by its
+            # control timer. It does not reset this state from odometry.
+            return desired_position, desired_velocity, desired_acceleration
 
         position = np.array(
             [odom.pose.pose.position.x, odom.pose.pose.position.y, odom.pose.pose.position.z],
@@ -1275,7 +1288,6 @@ class OnlinePlanner(Node):
         start_velocity: np.ndarray,
         start_acceleration: np.ndarray,
     ) -> None:
-        position = start_position.astype(np.float64, copy=True)
         yaw = quaternion_yaw(odom.pose.pose.orientation)
         if self.args.original_goal_input:
             rotation = rotation_world_body
@@ -1285,75 +1297,98 @@ class OnlinePlanner(Node):
                 [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]],
                 dtype=np.float64,
             )
-        end_position = position + rotation @ state_body[0:3]
-        end_velocity = rotation @ state_body[3:6]
-        end_acceleration = rotation @ state_body[6:9]
-        if self.fixed_altitude:
-            with self.lock:
-                fixed_goal = None if self.goal_world is None else self.goal_world.copy()
-            if fixed_goal is not None and np.isfinite(fixed_goal[2]):
+
+        # Match YOPO-Simple's critical section: read the last published P/V/A,
+        # build the replacement polynomial, and reset its discrete clock while
+        # the control callback is excluded. This prevents an old trajectory
+        # sample from being written after the new trajectory is installed.
+        with self.lock:
+            if (
+                self.args.plan_from_reference
+                and self.desired_position_world is not None
+                and self.desired_velocity_world is not None
+            ):
+                position = self.desired_position_world.astype(np.float64, copy=True)
+                start_velocity = self.desired_velocity_world.astype(
+                    np.float64, copy=True
+                )
+                start_acceleration = self.desired_acceleration_world.astype(
+                    np.float64, copy=True
+                )
+            else:
+                position = start_position.astype(np.float64, copy=True)
+                start_velocity = start_velocity.astype(np.float64, copy=True)
+                start_acceleration = start_acceleration.astype(np.float64, copy=True)
+
+            end_position = position + rotation @ state_body[0:3]
+            end_velocity = rotation @ state_body[3:6]
+            end_acceleration = rotation @ state_body[6:9]
+            fixed_goal = None if self.goal_world is None else self.goal_world.copy()
+            if (
+                self.fixed_altitude
+                and fixed_goal is not None
+                and np.isfinite(fixed_goal[2])
+            ):
                 end_position[2] = float(fixed_goal[2])
                 end_velocity[2] = 0.0
                 end_acceleration[2] = 0.0
-        polynomials = tuple(
-            Poly5Solver(
-                position[axis], start_velocity[axis], start_acceleration[axis],
-                end_position[axis], end_velocity[axis], end_acceleration[axis],
-                self.segment_time,
+            polynomials = tuple(
+                Poly5Solver(
+                    position[axis], start_velocity[axis], start_acceleration[axis],
+                    end_position[axis], end_velocity[axis], end_acceleration[axis],
+                    self.segment_time,
+                )
+                for axis in range(3)
             )
-            for axis in range(3)
-        )
-        endpoint_distance = float(np.linalg.norm(state_body[0:3]))
-        # YOPO-Simple's original test node does not reject a model-selected
-        # endpoint by distance. Keep the model output and let the downstream
-        # controller handle the command; only reject non-finite trajectories.
-        finite_trajectory = bool(
-            np.isfinite(end_position).all()
-            and np.isfinite(end_velocity).all()
-            and np.isfinite(end_acceleration).all()
-        )
-        minimum_sampled_altitude = float("-inf")
-        if finite_trajectory:
-            minimum_sampled_altitude = min(
-                float(polynomials[2].get_position(sample_time))
-                for sample_time in np.linspace(0.0, self.segment_time, 41)
+            endpoint_distance = float(np.linalg.norm(state_body[0:3]))
+            # YOPO-Simple's original test node does not reject a model-selected
+            # endpoint by distance. Keep the model output and let the downstream
+            # controller handle the command; only reject non-finite trajectories.
+            finite_trajectory = bool(
+                np.isfinite(end_position).all()
+                and np.isfinite(end_velocity).all()
+                and np.isfinite(end_acceleration).all()
             )
-        altitude_floor = self.args.minimum_trajectory_altitude + self.args.altitude_margin
-        trajectory_valid = finite_trajectory and minimum_sampled_altitude >= altitude_floor
-        unscaled_peak_speed = (
-            trajectory_peak_speed(polynomials, self.segment_time)
-            if finite_trajectory
-            else float("nan")
-        )
-        time_scale = (
-            trajectory_time_scale(
-                unscaled_peak_speed, self.maximum_trajectory_speed_mps
+            minimum_sampled_altitude = float("-inf")
+            if finite_trajectory:
+                minimum_sampled_altitude = min(
+                    float(polynomials[2].get_position(sample_time))
+                    for sample_time in np.linspace(0.0, self.segment_time, 41)
+                )
+            altitude_floor = (
+                self.args.minimum_trajectory_altitude + self.args.altitude_margin
             )
-            if finite_trajectory
-            else 1.0
-        )
-        trajectory_duration = self.segment_time * time_scale
-        if trajectory_valid:
-            with self.lock:
+            trajectory_valid = (
+                finite_trajectory and minimum_sampled_altitude >= altitude_floor
+            )
+            unscaled_peak_speed = (
+                trajectory_peak_speed(polynomials, self.segment_time)
+                if finite_trajectory
+                else float("nan")
+            )
+            # YOPO-Simple executes the selected Poly5 over its configured segment
+            # duration without applying a second runtime time scale.
+            time_scale = 1.0
+            trajectory_duration = self.segment_time
+            if trajectory_valid:
                 self.polynomials = polynomials
-                self.trajectory_started = time.monotonic()
+                self.trajectory_control_time = 0.0
                 self.trajectory_time_scale = time_scale
                 self.trajectory_duration = trajectory_duration
                 self.trajectory_valid_for_control = True
-                planned_yaw = self.planned_yaw
-            self.publish_path(polynomials)
-        else:
-            with self.lock:
+            elif self.polynomials is None:
                 # Keep executing the previous verified segment. Invalid model
                 # output must not turn a 50 Hz controller into stop-and-go.
-                if self.polynomials is None:
-                    self.trajectory_valid_for_control = False
-                planned_yaw = self.planned_yaw
-            if finite_trajectory:
-                self.get_logger().warning(
-                    "trajectory rejected: min_z=%.3f m floor=%.3f m"
-                    % (minimum_sampled_altitude, altitude_floor)
-                )
+                self.trajectory_valid_for_control = False
+            planned_yaw = self.planned_yaw
+
+        if trajectory_valid:
+            self.publish_path(polynomials)
+        elif finite_trajectory:
+            self.get_logger().warning(
+                "trajectory rejected: min_z=%.3f m floor=%.3f m"
+                % (minimum_sampled_altitude, altitude_floor)
+            )
 
         self.emit_event(
             "trajectory",
@@ -1400,33 +1435,47 @@ class OnlinePlanner(Node):
     def publish_control(self) -> None:
         if not self.args.control:
             return
+        if time.monotonic() - self.last_depth_time > self.args.depth_timeout:
+            return
         with self.lock:
             polynomials = self.polynomials
-            trajectory_started = self.trajectory_started
-            time_scale = self.trajectory_time_scale
             trajectory_valid = self.trajectory_valid_for_control
-            goal_world = None if self.goal_world is None else self.goal_world.copy()
-            last_yaw = self.planned_yaw
-        if (
-            polynomials is None
-            or not trajectory_valid
-            or time.monotonic() - self.last_depth_time > self.args.depth_timeout
-        ):
-            return
-        desired_position, desired_velocity, desired_acceleration, sample_time = (
-            sample_time_scaled_trajectory(
+            if polynomials is None or not trajectory_valid:
+                return
+            (
+                desired_position,
+                desired_velocity,
+                desired_acceleration,
+                sample_time,
+            ) = sample_fixed_period_trajectory(
                 polynomials,
-                time.monotonic() - trajectory_started,
+                self.trajectory_control_time,
+                self.control_period_s,
                 self.segment_time,
-                time_scale,
             )
-        )
-        goal_direction = (
-            desired_velocity if goal_world is None else goal_world - desired_position
-        )
-        planned_yaw, yaw_rate = calculate_yaw(
-            desired_velocity, goal_direction, last_yaw, 0.02
-        )
+            goal_world = None if self.goal_world is None else self.goal_world.copy()
+            goal_direction = (
+                desired_velocity
+                if goal_world is None
+                else goal_world - desired_position
+            )
+            planned_yaw, yaw_rate = calculate_yaw(
+                desired_velocity,
+                goal_direction,
+                self.planned_yaw,
+                self.control_period_s,
+            )
+            self.trajectory_control_time = sample_time
+            self.desired_position_world = desired_position
+            self.desired_velocity_world = desired_velocity
+            self.desired_acceleration_world = desired_acceleration
+            self.planned_yaw = planned_yaw
+            odom = self.odom
+            measured_yaw_rate = (
+                0.0 if odom is None else float(odom.twist.twist.angular.z)
+            )
+            frame_index = self.frame_index
+
         command = MultiDOFJointTrajectoryPoint()
         transform = Transform()
         transform.translation.x = float(desired_position[0])
@@ -1439,19 +1488,12 @@ class OnlinePlanner(Node):
             setattr(velocity.linear, field, float(desired_velocity[axis]))
             setattr(acceleration.linear, field, float(desired_acceleration[axis]))
         velocity.angular.z = float(yaw_rate)
-        with self.lock:
-            self.desired_position_world = desired_position
-            self.desired_velocity_world = desired_velocity
-            self.desired_acceleration_world = desired_acceleration
-            self.planned_yaw = planned_yaw
         command.transforms.append(transform)
         command.velocities.append(velocity)
         command.accelerations.append(acceleration)
 
         # These values also describe the trajectory-message output mode, where
         # no direct yaw-rate command is published.
-        with self.lock:
-            odom = self.odom
         current_yaw = (
             planned_yaw
             if odom is None
@@ -1476,7 +1518,7 @@ class OnlinePlanner(Node):
         self.emit_event(
             "control",
             {
-                "frame_index": self.frame_index,
+                "frame_index": frame_index,
                 "topic": published_topic,
                 "type": published_type,
                 "sample_time": sample_time,
@@ -1493,6 +1535,8 @@ class OnlinePlanner(Node):
                 "current_yaw_deg": math.degrees(current_yaw),
                 "yaw_error_deg": math.degrees(yaw_error),
                 "yaw_rate_rad_s": yaw_rate,
+                "measured_yaw_rate_rad_s": measured_yaw_rate,
+                "yaw_rate_tracking_error_rad_s": yaw_rate - measured_yaw_rate,
             },
         )
 
@@ -1532,8 +1576,6 @@ def parse_args() -> argparse.Namespace:
         "--odom-twist-frame", choices=("body", "world"), default="world",
         help="Coordinate frame used by Odometry.twist.linear.",
     )
-    parser.add_argument("--reference-reset-position-error", type=float, default=0.75)
-    parser.add_argument("--reference-reset-velocity-error", type=float, default=1.5)
     parser.add_argument("--minimum-trajectory-altitude", type=float, default=0.15)
     parser.add_argument("--altitude-margin", type=float, default=0.10)
     parser.add_argument(
@@ -1623,8 +1665,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("yaw rate must be positive")
     if args.trajectory_speed_color_max_mps <= 0.0:
         parser.error("trajectory speed color maximum must be positive")
-    if args.reference_reset_position_error <= 0.0 or args.reference_reset_velocity_error <= 0.0:
-        parser.error("reference reset thresholds must be positive")
     if args.minimum_trajectory_altitude < 0.0 or args.altitude_margin < 0.0:
         parser.error("trajectory altitude constraints must be non-negative")
     if args.graph_candidate_distance <= 0.0 or args.graph_robot_radius <= 0.0:

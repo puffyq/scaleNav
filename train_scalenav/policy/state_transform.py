@@ -54,40 +54,6 @@ class StateTransform:
         endstate = endstate.permute(0, 2, 1).reshape(B, 9, V, H)  # [B, 9, 3, 5]
         return endstate
 
-    def route_primitive_compatibility(self, frontier_body: torch.Tensor) -> torch.Tensor:
-        """Return the image-grid primitives whose angular sector covers the Route goal."""
-        if frontier_body.ndim != 2 or frontier_body.shape[1] != 3:
-            raise ValueError("frontier_body must have shape [B, 3]")
-        horizontal = torch.linalg.vector_norm(frontier_body[:, :2], dim=1)
-        yaw_goal = torch.atan2(frontier_body[:, 1], frontier_body[:, 0])
-        pitch_goal = torch.atan2(frontier_body[:, 2], horizontal)
-        yaw, pitch = self.lattice_primitive.getAngleLattice()
-        yaw = yaw.to(frontier_body).flip(0)[None, :]
-        pitch = pitch.to(frontier_body).flip(0)[None, :]
-        yaw_error = torch.atan2(
-            torch.sin(yaw_goal[:, None] - yaw),
-            torch.cos(yaw_goal[:, None] - yaw),
-        ).abs()
-        pitch_error = (pitch_goal[:, None] - pitch).abs()
-        compatible = (yaw_error <= self.lattice_primitive.yaw_diff) & (
-            pitch_error <= self.lattice_primitive.pitch_diff
-        )
-        # Keep supervision defined for a goal just outside the configured FOV.
-        missing = ~compatible.any(dim=1)
-        if torch.any(missing):
-            normalized_error = (
-                yaw_error / max(float(self.lattice_primitive.yaw_diff), 1.0e-6)
-                + pitch_error / max(float(self.lattice_primitive.pitch_diff), 1.0e-6)
-            )
-            nearest = normalized_error.argmin(dim=1)
-            compatible = compatible.clone()
-            compatible[missing, nearest[missing]] = True
-        return compatible.view(
-            frontier_body.shape[0],
-            self.lattice_primitive.vertical_num,
-            self.lattice_primitive.horizon_num,
-        )
-
     def pred_to_endstate_cpu(self, endstate_pred: np.ndarray, lattice_id: torch.Tensor) -> np.ndarray:
         """
             Used during test:
@@ -171,35 +137,6 @@ class StateTransform:
             self.lattice_primitive.horizon_num,
         )
 
-    def prepare_route_input(self, route_bubbles):
-        """Transform K normalized body-FLU corridor bubbles per primitive."""
-        if route_bubbles.ndim != 3 or route_bubbles.shape[-1] != 4:
-            raise ValueError("route_bubbles must have shape [B, K, 4]")
-        batch, bubble_count, _ = route_bubbles.shape
-        trajectory_count = self.lattice_primitive.traj_num
-        rotations = self.lattice_primitive.getRotation().to(
-            device=route_bubbles.device, dtype=route_bubbles.dtype
-        ).flip(0)
-        centers = route_bubbles[:, None, :, :3].expand(
-            batch, trajectory_count, bubble_count, 3
-        )
-        rotations = rotations[None, :, :, :].expand(
-            batch, trajectory_count, 3, 3
-        )
-        transformed = torch.matmul(centers, rotations)
-        radius = route_bubbles[:, None, :, 3:4].expand(
-            batch, trajectory_count, bubble_count, 1
-        )
-        features = torch.cat((transformed, radius), dim=-1)
-        features = features.reshape(batch, trajectory_count, bubble_count * 4)
-        features = features.permute(0, 2, 1).contiguous()
-        return features.view(
-            batch,
-            bubble_count * 4,
-            self.lattice_primitive.vertical_num,
-            self.lattice_primitive.horizon_num,
-        )
-
     def unnormalize_obs(self, vel_acc):
         vel_acc[:, 0:3] = vel_acc[:, 0:3] * self.lattice_primitive.vel_max
         vel_acc[:, 3:6] = vel_acc[:, 3:6] * self.lattice_primitive.acc_max
@@ -247,37 +184,6 @@ def state_body2world(pos_w, rot_wb, pos_b, vel_b, acc_b):
     vel_b = rotate_body2world(rot_wb, vel_b)
     acc_b = rotate_body2world(rot_wb, acc_b)
     return pos_b, vel_b, acc_b
-
-
-def project_world_endstate_to_altitude(
-    position_world: torch.Tensor,
-    velocity_world: torch.Tensor,
-    acceleration_world: torch.Tensor,
-    altitude_world: torch.Tensor,
-    active: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Project Route-mode terminal state onto a fixed world-frame altitude."""
-    if (
-        position_world.shape != velocity_world.shape
-        or position_world.shape != acceleration_world.shape
-        or position_world.ndim != 2
-        or position_world.shape[1] != 3
-    ):
-        raise ValueError("world end states must all have shape [B, 3]")
-    if altitude_world.shape != position_world.shape[:1] or active.shape != altitude_world.shape:
-        raise ValueError("altitude and active mask must have shape [B]")
-    active = active.to(dtype=torch.bool)
-    position = position_world.clone()
-    velocity = velocity_world.clone()
-    acceleration = acceleration_world.clone()
-    position[:, 2] = torch.where(active, altitude_world, position_world[:, 2])
-    velocity[:, 2] = torch.where(active, torch.zeros_like(velocity_world[:, 2]), velocity_world[:, 2])
-    acceleration[:, 2] = torch.where(
-        active,
-        torch.zeros_like(acceleration_world[:, 2]),
-        acceleration_world[:, 2],
-    )
-    return position, velocity, acceleration
 
 
 if __name__ == '__main__':
