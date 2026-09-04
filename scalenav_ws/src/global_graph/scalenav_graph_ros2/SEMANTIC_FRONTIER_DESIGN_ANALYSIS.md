@@ -46,6 +46,23 @@ approximately `(x=+/-28 m, y=35.5 m)` from the initial pose. They exceed the
 configured 35 m local search radius and are not equal-range alternatives. It
 is diagnostic evidence for the bug, not a post-fix acceptance run.
 
+The later successful trial `session_20260903_205400_601` exposes a second,
+independent ranking error. All five directions existed and a lateral route was
+reachable, but endpoint risk was still added as a bare `[0,1]` number after
+route and mission distances had been divided by the remaining mission span. A
+roughly `0.1` risk improvement therefore could not justify tens of metres of
+early avoidance. The diagnostic route objective also omitted this endpoint
+term, so the logged objective was not the objective that selected the frontier.
+
+There is also no semantic-observation trigger in the current route state
+machine. New heatmap frames update the graph, but candidate A* runs only for
+initialization, route invalidation, or the configured progress fraction. A
+wall that becomes semantically clear shortly after a route commit is therefore
+ignored until 40 percent progress unless a geometric edge has already failed.
+Flattening every candidate from the 1.5 s memory window into one list compounds
+the issue: old camera poses compete with the latest five-way observation
+without a frame-local risk reference.
+
 ## 3. Candidate Model
 
 Every middle-row column is represented by a record with:
@@ -84,18 +101,26 @@ relative_risk(j) = score_j - m_f
 
 The frame minimum represents the absolute quality of the safest direction in
 that observation. The relative term represents the directional difference
-between the five columns. The semantic contribution for column `j` is:
+between the five columns. Convert both meanings into equivalent detour metres:
 
 ```
-semantic_term(f,j) =
-    frontier_semantic_frame_weight * m_f
-  + frontier_semantic_relative_weight * relative_risk(j)
+frame_range(f) = max(score in f) - m_f
+risk_regret(f,j) =
+  relative_risk(j) / max(frame_range(f), risk_noise_floor)
+
+semantic_cost_m(f,j) =
+    semantic_frame_budget_m * m_f
+  + semantic_detour_budget_m * risk_regret(f,j)
 ```
 
-With equal default weights this is exactly the raw patch mean, written as an
-absolute frame term plus an intra-frame difference so the two meanings remain
-explicit. It has the required limiting behavior without hard low/high
-thresholds:
+`risk_noise_floor` is not a low/high gate. It prevents a harmless spread such
+as `0.10..0.11` from being stretched into a full-scale semantic decision. This
+has the required limiting behavior without hard low/high thresholds:
+
+The minimum and range use all usable directions in frame `f`, not only the
+directions currently connected to the graph. Connectivity is a selection
+constraint; the five-way heatmap relationship is the risk reference. Mixing
+those roles makes the objective jump whenever an edge appears or disappears.
 
 - if all five scores are low, the absolute semantic term is small and the
   normalized route/mission-distance terms decide among similarly safe paths;
@@ -106,23 +131,19 @@ thresholds:
 - if all five scores are equal, `relative_risk` is zero for all columns and
   deterministic route/mission-distance tie breaking applies.
 
-Do not normalize every non-uniform frame to a full `0..1` risk span. That
-would make a harmless difference such as `0.10` versus `0.11` as influential
-as a real difference such as `0.05` versus `0.90`, contradicting the rule that
-distance dominates when all alternatives are similarly low.
-
 For every reachable virtual candidate, use the dimensionless objective:
 
 ```
-route_cost / scale
-+ frontier_goal_distance_weight * mission_goal_distance / scale
-+ semantic_term(f,j)
+(route_cost
+ + frontier_goal_distance_weight * mission_goal_distance
+ + semantic_cost_m(f,j)) / scale
 ```
 
 where `scale = max(1 m, current_odom_to_mission_goal_distance)`. Route cost is
-the actual A* cost from the odom node to that candidate, including edge
-clearance and semantic-field penalties. This prevents raw metres from changing
-meaning as the vehicle advances.
+the complete A* cost from the odom node to that candidate, including real
+backtracking distance, edge clearance, and semantic-field penalties. There is
+no straight-line approximation for retreat. All three ranking terms are in
+equivalent metres before the common division.
 
 Ordinary Verified nodes are not normal frontier goals. They are an explicit
 safety fallback only when no active virtual candidate is reachable. Near the
@@ -133,15 +154,28 @@ itself rather than selecting an ordinary node.
 
 - Virtual semantic memory remains eligible for the configured memory window
   (currently 1.5 s) and keeps its frame/column identity.
-- A route is held until its configured progress trigger or a real edge failure;
-  a new heatmap callback alone does not replan.
+- A new heatmap callback alone does not switch the route. It may open a
+  semantic-opportunity proposal only when the same world-frame low-risk
+  direction persists for the configured number of frames.
+- A semantic proposal must improve on the risk of the current route direction
+  by the configured equivalent-metre switch margin. Non-safety semantic
+  switches observe a cooldown; edge failures bypass persistence and cooldown.
+- The normal refresh remains the configured route-progress trigger. Semantic
+  opportunity is an exception for early avoidance, not a second periodic
+  planner.
 - A replan replaces the complete route segment. It never splices a new prefix
   onto an old route.
 - A* always starts at the current odom node and may backtrack when that is the
   least-cost collision-free way around an obstacle.
+- Every candidate in one decision uses the same odom, graph snapshot, active
+  semantic cutoff, and normalization scale. Objectives computed at different
+  times must not be compared.
+- Semantic expiry removes evidence from the next decision; it does not by
+  itself invalidate an already collision-free accepted route.
 - The committed frontier goal, selected node type, frame, column, score,
-  route cost, mission distance, and objective must be logged from the same
-  candidate record. Search diagnostics must not report a different winner.
+  frame minimum/range, risk regret, semantic equivalent metres, route cost,
+  mission distance, and objective must be logged from the same candidate
+  record. Search diagnostics must not report a different winner.
 
 ## 6. Safety Rules
 

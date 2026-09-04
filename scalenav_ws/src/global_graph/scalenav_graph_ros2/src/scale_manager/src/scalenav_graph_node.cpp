@@ -218,13 +218,27 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     goal_path_cost_weight_ = declare_parameter<double>("goal_path_cost_weight", 1.0);
     frontier_goal_distance_weight_ = std::clamp(declare_parameter<double>(
       "frontier_goal_distance_weight", 2.0), 0.0, 10.0);
-    frontier_semantic_score_weight_ = std::max(0.0, declare_parameter<double>(
-      "frontier_semantic_score_weight", 1.0));
+    // Compatibility only: semantic endpoint scores are now converted to
+    // equivalent metres before the common objective normalization.
+    (void)declare_parameter<double>("frontier_semantic_score_weight", 1.0);
+    frontier_semantic_detour_budget_m_ = std::max(0.0, declare_parameter<double>(
+      "frontier_semantic_detour_budget_m", 45.0));
+    frontier_semantic_frame_budget_m_ = std::max(0.0, declare_parameter<double>(
+      "frontier_semantic_frame_budget_m", 12.0));
+    frontier_semantic_noise_floor_ = std::clamp(declare_parameter<double>(
+      "frontier_semantic_noise_floor", 0.08), 1.0e-3, 1.0);
     semantic_cost_weight_ = declare_parameter<double>("semantic_cost_weight", 2.0);
-    semantic_route_switch_risk_margin_ = declare_parameter<double>(
-      "semantic_route_switch_risk_margin", 0.08);
-    semantic_route_switch_cost_ratio_ = declare_parameter<double>(
-      "semantic_route_switch_cost_ratio", 0.90);
+    (void)declare_parameter<double>("semantic_route_switch_risk_margin", 0.08);
+    (void)declare_parameter<double>("semantic_route_switch_cost_ratio", 0.90);
+    semantic_opportunity_persistence_frames_ = static_cast<int>(std::max<std::int64_t>(
+      1, declare_parameter<int>("semantic_opportunity_persistence_frames", 2)));
+    semantic_opportunity_switch_margin_m_ = std::max(0.0,
+      declare_parameter<double>("semantic_opportunity_switch_margin_m", 3.0));
+    semantic_opportunity_cooldown_s_ = std::max(0.0,
+      declare_parameter<double>("semantic_opportunity_cooldown_s", 0.8));
+    semantic_opportunity_direction_tolerance_deg_ = std::clamp(
+      declare_parameter<double>("semantic_opportunity_direction_tolerance_deg", 30.0),
+      1.0, 90.0);
     semantic_route_influence_m_ = declare_parameter<double>(
       "semantic_route_influence_m", 8.0);
     semantic_visualization_max_score_ = declare_parameter<double>(
@@ -352,12 +366,17 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       get_logger(),
       "ScaleNav config: clearance_target=%.2f m clearance_weight=%.2f "
       "geometry_map=%s route_mode=SEGMENT_HOLD_REPLAN frontier_goal_distance_weight=%.2f "
+      "semantic_detour_budget=%.1f m semantic_frame_budget=%.1f m semantic_noise_floor=%.3f "
+      "semantic_opportunity=%d frames/%.1f m/%.1f s "
       "semantic_radius=%.2f m "
       "semantic_visual_max=%.2f pearl_risk_threshold=%.2f baseline_q=%.2f "
       "semantic_edge_candidate_limit=%d diagnostic_period=%d ms",
       clearance_target_m_, clearance_cost_weight_,
       map_history_radius_m_ <= 0.0 ? "CURRENT_FRAME" : "SLIDING_WINDOW",
       frontier_goal_distance_weight_,
+      frontier_semantic_detour_budget_m_, frontier_semantic_frame_budget_m_,
+      frontier_semantic_noise_floor_, semantic_opportunity_persistence_frames_,
+      semantic_opportunity_switch_margin_m_, semantic_opportunity_cooldown_s_,
       semantic_point_radius_m_, semantic_visualization_max_score_,
       semantic_point_min_score_,
       semantic_baseline_quantile_,
@@ -1749,7 +1768,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     // than skipping the planner tick — a missed subgoal publish looks like
     // "planning stopped" to YOPO.
     std::lock_guard<std::mutex> topology_lock(topology_operation_mutex_);
-    updateTopoSemanticMemory(active_topo);
+    const bool semantic_frame_applied = updateTopoSemanticMemory(active_topo);
     // Semantic links are provisional and must follow the live lidar map.  A
     // new obstacle can invalidate an edge even when PEARL has not produced a
     // newer heatmap frame, so perform this check on every planner tick.
@@ -1762,6 +1781,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     }
     bool accepted_route_forced_replan = false;
     const char *accepted_route_forced_reason = "NONE";
+    bool accepted_route_stale_but_safe = false;
     // A route is executable only while every topology edge it references is
     // still present.  revalidateSemanticEdges() can detach an edge before the
     // planner reaches the accepted-route check; without this guard the
@@ -1769,6 +1789,9 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     // ignore the detach event.
     if (accepted_route_.valid && accepted_route_.topology_path.size() >= 2) {
       bool accepted_route_edge_missing = false;
+      bool accepted_route_ordinary_semantic_failure = false;
+      bool accepted_route_backbone_edge_missing = false;
+      bool accepted_route_shortcut_blocked = false;
       std::uint64_t missing_from = 0;
       std::uint64_t missing_to = 0;
       for (std::size_t i = 1; i < accepted_route_.topology_path.size(); ++i) {
@@ -1825,12 +1848,17 @@ class ScaleNavGraphNode final : public rclcpp::Node {
             from ? static_cast<int>(from->geometry_state_) : -1,
             to ? static_cast<int>(to->geometry_state_) : -1,
             static_cast<int>(neighbor_present), static_cast<int>(witness_present),
-            static_cast<int>(weight_present), "REPLAN",
+            static_cast<int>(weight_present), ordinary_semantic_edge ? "REPLAN" : "CHECK_WITNESS",
             from ? from->center_.x() : 0.0F,
             from ? from->center_.y() : 0.0F, from ? from->center_.z() : 0.0F,
             to ? to->center_.x() : 0.0F, to ? to->center_.y() : 0.0F,
             to ? to->center_.z() : 0.0F);
           accepted_route_edge_missing = true;
+          if (ordinary_semantic_edge) {
+            accepted_route_ordinary_semantic_failure = true;
+          } else {
+            accepted_route_backbone_edge_missing = true;
+          }
           break;
         }
         if (ordinary_semantic_edge && active_topo->parallel_bubble_astar_) {
@@ -1869,6 +1897,85 @@ class ScaleNavGraphNode final : public rclcpp::Node {
               to->center_.y(), to->center_.z());
             break;
           }
+        }
+      }
+      // Revalidate actual execution geometry when DP shortcutting removed
+      // topology vertices. A shortcut chord has no neighbors_/paths_ entry,
+      // so checking topology_path alone cannot detect a newly blocked chord.
+      if (!accepted_route_ordinary_semantic_failure &&
+          executionPathContainsShortcutChord(
+            accepted_route_.topology_path, accepted_route_.execution_path) &&
+          active_topo->parallel_bubble_astar_ &&
+          accepted_route_.witness_path.size() >= 2) {
+        auto remaining_execution = scalenav_graph::forwardRouteFromT(
+          accepted_route_.witness_path,
+          accepted_route_.frontier_goal_progress_t);
+        if (remaining_execution.size() >= 2) {
+          ParallelBubbleAstar::CollisionCheckInfo execution_info;
+          const bool execution_safe = active_topo->parallel_bubble_astar_
+            ->collisionCheck_shortenPath(remaining_execution, &execution_info);
+          if (!execution_safe) {
+            accepted_route_edge_missing = true;
+            accepted_route_shortcut_blocked = true;
+            const char *reason = execution_info.reason ==
+                ParallelBubbleAstar::CollisionCheckInfo::CLEARANCE ? "CLEARANCE" :
+              execution_info.reason == ParallelBubbleAstar::CollisionCheckInfo::BUBBLE_OVERLAP ?
+                "BUBBLE_OVERLAP" : "INVALID_PATH";
+            RCLCPP_WARN(
+              get_logger(),
+              "[ScaleNav route] shortcut execution suffix blocked; forcing fresh A* "
+              "reason=%s points=%zu minimum_clearance=%.3f failed_index=%zu "
+              "failed_point=(%.2f,%.2f,%.2f) clearance=%.3f safe_distance=%.3f",
+              reason, remaining_execution.size(), execution_info.minimum_clearance,
+              execution_info.failed_index, execution_info.failed_point.x(),
+              execution_info.failed_point.y(), execution_info.failed_point.z(),
+              execution_info.clearance,
+              active_topo->parallel_bubble_astar_->safe_distance_);
+          }
+        }
+      }
+      // Sliding-window skeleton updates can replace a backbone edge while the
+      // already accepted witness remains collision-free.  Keep executing that
+      // complete segment in this case; only a semantic link failure or a live
+      // witness collision is allowed to force an immediate replan.
+      if (accepted_route_edge_missing && !accepted_route_ordinary_semantic_failure &&
+          !accepted_route_shortcut_blocked && accepted_route_backbone_edge_missing &&
+          active_topo->parallel_bubble_astar_ &&
+          accepted_route_.witness_path.size() >= 2) {
+        auto witness = accepted_route_.witness_path;
+        ParallelBubbleAstar::CollisionCheckInfo witness_info;
+        const bool witness_safe = active_topo->parallel_bubble_astar_
+          ->collisionCheck_shortenPath(witness, &witness_info);
+        if (witness_safe) {
+          accepted_route_stale_but_safe = true;
+          accepted_route_edge_missing = false;
+          RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "[ScaleNav route] backbone edge rebuilt but accepted witness remains safe; "
+            "holding route missing_edge=%llu->%llu min_clearance=%.3f",
+            static_cast<unsigned long long>(missing_from),
+            static_cast<unsigned long long>(missing_to),
+            witness_info.minimum_clearance);
+        } else {
+          const char *witness_reason = witness_info.reason ==
+              ParallelBubbleAstar::CollisionCheckInfo::CLEARANCE ? "CLEARANCE" :
+            witness_info.reason == ParallelBubbleAstar::CollisionCheckInfo::BUBBLE_OVERLAP ?
+              "BUBBLE_OVERLAP" :
+            witness_info.reason == ParallelBubbleAstar::CollisionCheckInfo::INVALID_PATH ?
+              "INVALID_PATH" : "NONE";
+          RCLCPP_WARN(
+            get_logger(),
+            "[ScaleNav route] stale backbone witness unsafe; forcing replan "
+            "missing_edge=%llu->%llu reason=%s witness_points=%zu "
+            "minimum_clearance=%.3f failed_index=%zu failed_point=(%.2f,%.2f,%.2f) "
+            "clearance=%.3f safe_distance=%.3f",
+            static_cast<unsigned long long>(missing_from),
+            static_cast<unsigned long long>(missing_to), witness_reason,
+            witness.size(), witness_info.minimum_clearance,
+            witness_info.failed_index, witness_info.failed_point.x(),
+            witness_info.failed_point.y(), witness_info.failed_point.z(),
+            witness_info.clearance,
+            active_topo->parallel_bubble_astar_->safe_distance_);
         }
       }
       if (accepted_route_edge_missing) {
@@ -1964,7 +2071,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       accepted_connectivity = acceptedRouteConnectivity(
         active_topo->odom_node_, accepted_route_.topology_path);
     }
-    const bool accepted_route_reachable = accepted_connectivity.routeUsable();
+    const bool accepted_route_reachable = accepted_connectivity.routeUsable() ||
+      accepted_route_stale_but_safe;
     const bool accepted_route_head_attached =
       accepted_connectivity.accepted_head_edge_usable;
     if (accepted_route_.valid && !accepted_route_reachable) {
@@ -2072,13 +2180,76 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         static_cast<double>(vehicle_to_goal));
     }
     const bool mission_goal_direct = have_goal_ && mission_direct_goal_latched_;
+    scalenav_graph::SemanticOpportunity semantic_opportunity;
+    bool semantic_opportunity_observed = false;
+    bool semantic_opportunity_persistent = false;
+    bool semantic_opportunity_cooldown_ready = true;
+    bool semantic_opportunity_waiting_for_progress = false;
+    bool semantic_opportunity_replan = false;
+    if (semantic_frame_applied) {
+      std::optional<SemanticFrame> applied_frame;
+      {
+        std::lock_guard<std::mutex> lock(semantic_mutex_);
+        if (semantic_frame_ &&
+            semantic_frame_->stamp_ns != last_semantic_opportunity_evaluated_stamp_ns_) {
+          applied_frame = semantic_frame_;
+          last_semantic_opportunity_evaluated_stamp_ns_ = semantic_frame_->stamp_ns;
+        }
+      }
+      if (applied_frame && accepted_witness_usable && !mission_goal_direct) {
+        Eigen::Vector3f route_target = accepted_route_.frontier_goal;
+        Eigen::Vector3f lookahead_target;
+        if (scalenav_graph::routeLookaheadPoint(
+              accepted_route_.witness_path, position_, effective_lookahead_m,
+              lookahead_target)) {
+          route_target = lookahead_target;
+        }
+        semantic_opportunity = scalenav_graph::evaluateSemanticOpportunity(
+          applied_frame->points_world, applied_frame->scores,
+          applied_frame->is_virtual, applied_frame->columns,
+          applied_frame->origin, route_target,
+          static_cast<float>(frontier_semantic_detour_budget_m_),
+          static_cast<float>(frontier_semantic_noise_floor_));
+        semantic_opportunity_observed = semantic_opportunity.valid;
+        semantic_opportunity_persistent =
+          scalenav_graph::updateSemanticOpportunityPersistence(
+            semantic_opportunity,
+            static_cast<float>(semantic_opportunity_switch_margin_m_),
+            std::cos(static_cast<float>(semantic_opportunity_direction_tolerance_deg_) *
+              static_cast<float>(M_PI / 180.0)),
+            semantic_opportunity_persistence_frames_,
+            pending_semantic_opportunity_direction_,
+            pending_semantic_opportunity_frames_);
+        if (have_semantic_opportunity_probe_time_) {
+          const double elapsed_s = std::chrono::duration<double>(
+            now_steady - last_semantic_opportunity_probe_time_).count();
+          semantic_opportunity_cooldown_ready =
+            elapsed_s >= semantic_opportunity_cooldown_s_;
+        }
+        if (!semantic_opportunity_cooldown_ready) {
+          // A probe consumes the evidence that caused it. Do not carry a
+          // previously accumulated persistence count through the cooldown;
+          // otherwise the first frame after cooldown immediately retriggers.
+          pending_semantic_opportunity_direction_.setZero();
+          pending_semantic_opportunity_frames_ = 0;
+          semantic_opportunity_persistent = false;
+        }
+        // A semantic opportunity is evidence for the next route decision, not
+        // an immediate mid-segment steering command.  Let the accepted route
+        // run until its configured progress boundary; otherwise alternating
+        // heatmap frames can replace a route every 1-2 seconds before any
+        // meaningful progress has been made.
+        semantic_opportunity_waiting_for_progress = semantic_opportunity_persistent &&
+          semantic_opportunity_cooldown_ready && !frontier_progress_replan;
+        semantic_opportunity_replan = semantic_opportunity_persistent &&
+          semantic_opportunity_cooldown_ready && frontier_progress_replan;
+      }
+    }
     const bool route_has_planning_horizon = accepted_witness_usable &&
       !frontier_progress_replan;
-    const bool compared_route_metrics = false;
-    const float current_route_risk = 0.0F;
-    const char *incumbent_result = "NONE";
     const bool need_candidate_search = !accepted_witness_usable ||
-      !accepted_route_reachable || frontier_progress_replan;
+      !accepted_route_reachable || frontier_progress_replan ||
+      semantic_opportunity_replan;
     bool using_accepted_route = false;
     std::vector<TopoNode::Ptr> candidate_nodes;
     if (!need_candidate_search && accepted_witness_usable) {
@@ -2101,7 +2272,9 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         0.0F, 0.0F, 0.0F, 0.0F,
         &candidate_search_stats, active_virtual_semantic_stamp_ns,
         static_cast<float>(frontier_goal_distance_weight_),
-        static_cast<float>(frontier_semantic_score_weight_));
+        static_cast<float>(frontier_semantic_detour_budget_m_),
+        static_cast<float>(frontier_semantic_frame_budget_m_),
+        static_cast<float>(frontier_semantic_noise_floor_));
       candidate_nodes.swap(path_nodes);
       if (candidate_found && candidate_nodes.size() < 2) {
         candidate_found = false;
@@ -2130,10 +2303,11 @@ class ScaleNavGraphNode final : public rclcpp::Node {
             selected->geometry_state_ == TopoGeometryState::Verified ? "VERIFIED" : "UNKNOWN",
             selected->center_.x(), selected->center_.y(), selected->center_.z());
         }
-        route_switch_reason = frontier_progress_replan ?
-          "FRONTIER_PROGRESS" :
-          (accepted_route_forced_replan ? accepted_route_forced_reason :
-          (accepted_witness_usable ? "ROUTE_UNREACHABLE" : "INITIAL_ACCEPT"));
+        route_switch_reason = accepted_route_forced_replan ?
+          accepted_route_forced_reason :
+          (frontier_progress_replan ? "FRONTIER_PROGRESS" :
+          (semantic_opportunity_replan ? "SEMANTIC_OPPORTUNITY" :
+          (accepted_witness_usable ? "ROUTE_UNREACHABLE" : "INITIAL_ACCEPT")));
       } else if (accepted_witness_usable) {
         // A failed refresh does not splice a partial candidate into the old
         // route. Hold the previous complete segment until a new full search
@@ -2234,6 +2408,30 @@ class ScaleNavGraphNode final : public rclcpp::Node {
           &local_semantic_nodes);
       }
       metrics.goal_distance = (points.back() - layer_goal).norm();
+      // The frontier selector adds a frame-relative semantic term for virtual
+      // endpoints. Apply the same term to the incumbent so a probe compares
+      // complete routes under one objective instead of receiving a free route
+      // switch merely because it was triggered by a heatmap change.
+      const auto &endpoint = nodes.back();
+      if (endpoint && isVirtualSemanticEndpoint(endpoint)) {
+        float frame_min = endpoint->semantic_score_;
+        float frame_max = endpoint->semantic_score_;
+        for (const auto &semantic_node : local_semantic_nodes) {
+          if (!semantic_node || !isVirtualSemanticEndpoint(semantic_node) ||
+              semantic_node->semantic_frame_stamp_ns_ != endpoint->semantic_frame_stamp_ns_)
+            continue;
+          const float score = std::clamp(semantic_node->semantic_score_, 0.0F, 1.0F);
+          frame_min = std::min(frame_min, score);
+          frame_max = std::max(frame_max, score);
+        }
+        const float frame_range = std::max(0.0F, frame_max - frame_min);
+        const float regret = std::clamp(
+          (std::clamp(endpoint->semantic_score_, 0.0F, 1.0F) - frame_min) /
+            std::max(static_cast<float>(frontier_semantic_noise_floor_), frame_range),
+          0.0F, 1.0F);
+        metrics.route_cost += static_cast<float>(frontier_semantic_frame_budget_m_) * frame_min +
+          static_cast<float>(frontier_semantic_detour_budget_m_) * regret;
+      }
       // Keep route arbitration identical to frontier A*: semantic and
       // clearance costs remain in route_cost, while mission distance uses the
       // configured frontier weight and the same dimensionless scale.
@@ -2245,10 +2443,27 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     RouteMetrics incumbent_metrics{
       0.0F, 0.0F, std::numeric_limits<float>::infinity(),
       std::numeric_limits<float>::infinity(), 0.0F};
+    if (accepted_route_.valid && accepted_route_.topology_path.size() >= 2) {
+      auto incumbent_nodes = accepted_route_.topology_path;
+      // The rolling odom node is replaced as the vehicle moves. Compare from
+      // the current odom while retaining the accepted downstream topology.
+      if (incumbent_nodes.front() && incumbent_nodes.front()->role_ == TopoNodeRole::Odom &&
+          active_topo->odom_node_) {
+        incumbent_nodes.front() = active_topo->odom_node_;
+      }
+      incumbent_metrics = metrics_for(incumbent_nodes);
+    }
     RouteMetrics candidate_metrics{
       0.0F, 0.0F, std::numeric_limits<float>::infinity(),
       std::numeric_limits<float>::infinity(), 0.0F};
-    if (candidate_found) candidate_metrics = metrics_for(candidate_nodes);
+    if (candidate_found) {
+      const auto &candidate_metric_nodes = candidate_topology_path.empty() ?
+        candidate_nodes : candidate_topology_path;
+      candidate_metrics = metrics_for(candidate_metric_nodes);
+    }
+    const bool compared_route_metrics = std::isfinite(incumbent_metrics.objective);
+    const float current_route_risk = incumbent_metrics.risk;
+    const char *incumbent_result = compared_route_metrics ? "ACCEPTED_ROUTE" : "NONE";
     const double incumbent_goal_distance_log =
       std::isfinite(incumbent_metrics.goal_distance) ?
       static_cast<double>(incumbent_metrics.goal_distance) : -1.0;
@@ -2301,6 +2516,48 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     const std::uint64_t proposed_frontier_goal_id = mission_goal_direct ? 0ULL :
       ((found && !path_nodes.empty()) ? path_nodes.back()->persistent_id_ :
        accepted_route_.frontier_goal_id);
+    if (semantic_opportunity_replan && candidate_found && accepted_route_.valid) {
+      const float incumbent_loss_m = std::isfinite(incumbent_metrics.objective) ?
+        incumbent_metrics.objective * frontier_objective_scale :
+        std::numeric_limits<float>::infinity();
+      const float candidate_loss_m = std::isfinite(candidate_metrics.objective) ?
+        candidate_metrics.objective * frontier_objective_scale :
+        std::numeric_limits<float>::infinity();
+      const float improvement_m = incumbent_loss_m - candidate_loss_m;
+      const bool same_endpoint = proposed_frontier_goal_id == accepted_route_.frontier_goal_id &&
+        (proposed_frontier_goal - accepted_route_.frontier_goal).norm() <= 1e-3F;
+      const bool switch_allowed = !same_endpoint && std::isfinite(improvement_m) &&
+        improvement_m >= static_cast<float>(semantic_opportunity_switch_margin_m_);
+      RCLCPP_INFO(
+        get_logger(),
+        "[ScaleNav semantic probe] incumbent=%.3f candidate=%.3f "
+        "improvement=%.2f m margin=%.2f same_endpoint=%d switch=%d old_id=%llu new_id=%llu",
+        static_cast<double>(incumbent_metrics.objective),
+        static_cast<double>(candidate_metrics.objective),
+        static_cast<double>(improvement_m), semantic_opportunity_switch_margin_m_,
+        static_cast<int>(same_endpoint),
+        static_cast<int>(switch_allowed),
+        static_cast<unsigned long long>(accepted_route_.frontier_goal_id),
+        static_cast<unsigned long long>(proposed_frontier_goal_id));
+      if (!switch_allowed) {
+        // The probe is diagnostic only when it does not beat the incumbent by
+        // the configured hysteresis margin. Keep the complete accepted segment.
+      path_nodes = accepted_route_.execution_path;
+      found = true;
+      using_accepted_route = true;
+      candidate_accepted = false;
+      route_switch_reason = "SEMANTIC_OPPORTUNITY_HOLD";
+      }
+    }
+    // A semantic search is a consumed probe whether it switches, holds, or
+    // fails. Without this reset, persistence stays above its threshold and
+    // every subsequent heatmap frame launches another A* search.
+    if (semantic_opportunity_replan) {
+      last_semantic_opportunity_probe_time_ = now_steady;
+      have_semantic_opportunity_probe_time_ = true;
+      pending_semantic_opportunity_direction_.setZero();
+      pending_semantic_opportunity_frames_ = 0;
+    }
     const std::size_t route_memory_points = accepted_route_.witness_path.size();
     const auto publish_start = std::chrono::steady_clock::now();
     const float publish_progress_t = using_accepted_route ?
@@ -2443,6 +2700,14 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         candidate_search_stats.selected_semantic_frame_stamp_ns
       << ",\"selected_semantic_column\":" <<
         static_cast<int>(candidate_search_stats.selected_semantic_column)
+      << ",\"selected_semantic_frame_min_risk\":" <<
+        candidate_search_stats.selected_semantic_frame_min_risk
+      << ",\"selected_semantic_frame_risk_range\":" <<
+        candidate_search_stats.selected_semantic_frame_risk_range
+      << ",\"selected_semantic_risk_regret\":" <<
+        candidate_search_stats.selected_semantic_risk_regret
+      << ",\"selected_semantic_cost_m\":" <<
+        candidate_search_stats.selected_semantic_cost_m
       << ",\"astar_best_semantic_frontier_objective\":" <<
         candidate_search_stats.best_semantic_frontier_objective
       << ",\"astar_best_ordinary_frontier_objective\":" <<
@@ -2463,6 +2728,10 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         << ",\"astar_cost\":" << candidate.astar_cost
         << ",\"route_distance\":" << candidate.route_distance
         << ",\"mission_distance\":" << candidate.mission_distance
+        << ",\"frame_min_risk\":" << candidate.frame_min_risk
+        << ",\"frame_risk_range\":" << candidate.frame_risk_range
+        << ",\"risk_regret\":" << candidate.risk_regret
+        << ",\"semantic_cost_m\":" << candidate.semantic_cost_m
         << ",\"objective\":" << candidate.objective << '}';
     }
     const TopoNode::Ptr committed_frontier =
@@ -2479,7 +2748,25 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       << (frontier_progress_replan ? "true" : "false")
       << ",\"frontier_replan_ratio\":" << frontier_replan_progress_ratio_
       << ",\"frontier_goal_distance_weight\":" << frontier_goal_distance_weight_
-      << ",\"frontier_semantic_score_weight\":" << frontier_semantic_score_weight_
+      << ",\"frontier_semantic_detour_budget_m\":" << frontier_semantic_detour_budget_m_
+      << ",\"frontier_semantic_frame_budget_m\":" << frontier_semantic_frame_budget_m_
+      << ",\"frontier_semantic_noise_floor\":" << frontier_semantic_noise_floor_
+      << ",\"semantic_opportunity_observed\":" <<
+        (semantic_opportunity_observed ? "true" : "false")
+      << ",\"semantic_opportunity_persistent\":" <<
+        (semantic_opportunity_persistent ? "true" : "false")
+      << ",\"semantic_opportunity_cooldown_ready\":" <<
+        (semantic_opportunity_cooldown_ready ? "true" : "false")
+      << ",\"semantic_opportunity_waiting_for_progress\":"
+      << (semantic_opportunity_waiting_for_progress ? "true" : "false")
+      << ",\"semantic_opportunity_replan\":" <<
+        (semantic_opportunity_replan ? "true" : "false")
+      << ",\"semantic_opportunity_best_column\":" << semantic_opportunity.best_column
+      << ",\"semantic_opportunity_route_column\":" << semantic_opportunity.route_column
+      << ",\"semantic_opportunity_best_risk\":" << semantic_opportunity.best_risk
+      << ",\"semantic_opportunity_route_risk\":" << semantic_opportunity.route_risk
+      << ",\"semantic_opportunity_improvement_m\":" << semantic_opportunity.improvement_m
+      << ",\"semantic_opportunity_pending_frames\":" << pending_semantic_opportunity_frames_
       << ",\"frontier_objective_scale\":" << frontier_objective_scale
       << ",\"incumbent_frontier_distance\":" << incumbent_goal_distance_log
       << ",\"candidate_frontier_distance\":" << candidate_goal_distance_log
@@ -2498,6 +2785,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       << (accepted_connectivity.terminal_unknown_edge_usable ? "true" : "false")
       << ",\"verified_nodes_visited\":" << accepted_connectivity.verified_nodes_visited
       << ",\"route_reachable\":" << (accepted_route_reachable ? "true" : "false")
+      << ",\"accepted_route_stale_but_safe\":"
+      << (accepted_route_stale_but_safe ? "true" : "false")
       << ",\"frontier_progress_t\":"
       << static_cast<double>(accepted_route_.frontier_goal_progress_t)
       << '}';
@@ -2552,7 +2841,10 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       "switch_reason=%s route_decision=%s "
       "route_compare=%d incumbent_loss=%.2f candidate_loss=%.2f "
       "frontier_goal_distance_weight=%.2f frontier_objective_scale=%.2f "
-      "frontier_semantic_score_weight=%.2f "
+      "semantic_detour_budget=%.1f semantic_frame_budget=%.1f semantic_noise_floor=%.3f "
+      "semantic_opportunity=%d persistent=%d cooldown=%d replan=%d "
+      "semantic_waiting_for_progress=%d "
+      "semantic_columns=%d->%d improvement=%.2f m pending=%d "
       "incumbent_frontier_distance=%.2f candidate_frontier_distance=%.2f "
       "incumbent_route_cost=%.2f candidate_route_cost=%.2f "
       "incumbent_frontier_objective=%.3f candidate_frontier_objective=%.3f "
@@ -2567,6 +2859,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       "horizon_ready=%d frontier_progress_replan=%d frontier_replan_ratio=%.2f "
       "route_reachable=%d accepted_head_edge_usable=%d verified_prefix_reachable=%d terminal_unknown=%d "
       "terminal_unknown_edge_usable=%d verified_nodes_visited=%zu route_head_attached=%d "
+      "accepted_route_stale_but_safe=%d "
       "mission_goal_direct=%d "
       "route_length=%.2f route_remaining=%.2f "
       "frontier_initial_route_length=%.2f frontier_progress=%.2f frontier_progress_t=%.4f "
@@ -2607,7 +2900,16 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       static_cast<double>(incumbent_metrics.objective),
       static_cast<double>(candidate_metrics.objective),
       frontier_goal_distance_weight_, frontier_objective_scale,
-      frontier_semantic_score_weight_,
+      frontier_semantic_detour_budget_m_, frontier_semantic_frame_budget_m_,
+      frontier_semantic_noise_floor_,
+      static_cast<int>(semantic_opportunity_observed),
+      static_cast<int>(semantic_opportunity_persistent),
+      static_cast<int>(semantic_opportunity_cooldown_ready),
+      static_cast<int>(semantic_opportunity_replan),
+      static_cast<int>(semantic_opportunity_waiting_for_progress),
+      semantic_opportunity.route_column, semantic_opportunity.best_column,
+      static_cast<double>(semantic_opportunity.improvement_m),
+      pending_semantic_opportunity_frames_,
       incumbent_goal_distance_log, candidate_goal_distance_log,
       incumbent_route_cost_log, candidate_route_cost_log,
       incumbent_objective_log, candidate_objective_log,
@@ -2635,6 +2937,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       static_cast<int>(accepted_connectivity.terminal_unknown_edge_usable),
       accepted_connectivity.verified_nodes_visited,
       static_cast<int>(accepted_route_head_attached),
+      static_cast<int>(accepted_route_stale_but_safe),
       static_cast<int>(mission_goal_direct),
       static_cast<double>(accepted_route_length),
       static_cast<double>(accepted_route_remaining),
@@ -3027,20 +3330,20 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     return std::clamp(risk, 0.0F, 1.0F);
   }
 
-  void updateTopoSemanticMemory(const TopoGraph::Ptr &topo)
+  bool updateTopoSemanticMemory(const TopoGraph::Ptr &topo)
   {
-    if (!topo) return;
+    if (!topo) return false;
     std::optional<SemanticFrame> frame;
     {
       std::lock_guard<std::mutex> lock(semantic_mutex_);
       if (!semantic_frame_ ||
           (semantic_applied_topo_ == topo &&
            semantic_frame_->stamp_ns == last_semantic_applied_stamp_ns_)) {
-        return;
+        return false;
       }
       const double age_ms = static_cast<double>(std::llabs(
         get_clock()->now().nanoseconds() - semantic_frame_->stamp_ns)) / 1.0e6;
-      if (age_ms > semantic_max_age_ms_) return;
+      if (age_ms > semantic_max_age_ms_) return false;
       frame = semantic_frame_;
     }
 
@@ -3209,6 +3512,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     // latest frame once to that graph even when its timestamp was already
     // consumed by the previous graph.
     semantic_applied_topo_ = topo;
+    return true;
   }
 
   static std_msgs::msg::ColorRGBA semanticColor(float normalized, bool enabled)
@@ -3406,8 +3710,9 @@ class ScaleNavGraphNode final : public rclcpp::Node {
           std_msgs::msg::ColorRGBA marker_color;
           setColor(marker_color, marker_rgb);
           semantic_nodes_marker.colors.push_back(marker_color);
-          const float semantic_risk = std::clamp(
-            node->semantic_score_ * node->semantic_confidence_, 0.0F, 1.0F);
+          // Match frontier ranking: confidence determines whether an
+          // observation is usable, but does not rescale its patch mean.
+          const float semantic_risk = std::clamp(node->semantic_score_, 0.0F, 1.0F);
           // Highlight the minimum-risk candidate from the latest heatmap
           // frame, rather than the minimum over the retained memory window.
           // This makes the per-frame choice visible in RViz even while older
@@ -4004,10 +4309,14 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   bool use_edge_witness_path_ = false;
   double goal_path_cost_weight_ = 1.0;
   double frontier_goal_distance_weight_ = 2.0;
-  double frontier_semantic_score_weight_ = 1.0;
+  double frontier_semantic_detour_budget_m_ = 45.0;
+  double frontier_semantic_frame_budget_m_ = 12.0;
+  double frontier_semantic_noise_floor_ = 0.08;
   double semantic_cost_weight_ = 2.0;
-  double semantic_route_switch_risk_margin_ = 0.08;
-  double semantic_route_switch_cost_ratio_ = 0.90;
+  int semantic_opportunity_persistence_frames_ = 2;
+  double semantic_opportunity_switch_margin_m_ = 3.0;
+  double semantic_opportunity_cooldown_s_ = 0.8;
+  double semantic_opportunity_direction_tolerance_deg_ = 30.0;
   double semantic_route_influence_m_ = 8.0;
   double semantic_point_influence_m_ = 8.0;
   double semantic_visualization_max_score_ = 0.4;
@@ -4094,7 +4403,12 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   std::deque<SemanticDepthFrame> semantic_depth_history_;
   static constexpr std::size_t max_semantic_depth_history_size_ = 64;
   std::int64_t last_semantic_applied_stamp_ns_ = 0;
+  std::int64_t last_semantic_opportunity_evaluated_stamp_ns_ = 0;
   TopoGraph::Ptr semantic_applied_topo_;
+  Eigen::Vector3f pending_semantic_opportunity_direction_ = Eigen::Vector3f::Zero();
+  int pending_semantic_opportunity_frames_ = 0;
+  std::chrono::steady_clock::time_point last_semantic_opportunity_probe_time_{};
+  bool have_semantic_opportunity_probe_time_ = false;
   std::mutex semantic_mutex_;
   mutable std::mutex semantic_memory_mutex_;
   std::unordered_map<std::uint64_t, TopoSemanticRecord> semantic_memory_;

@@ -435,4 +435,75 @@ TEST(RouteMemory, ConstrainedPolynomialUsesExactReplanState)
   EXPECT_TRUE(physical_initial_velocity.isApprox(velocity, 1e-4F));
 }
 
+TEST(SemanticOpportunity, RequiresTwoConsistentWorldDirectionFrames)
+{
+  const std::vector<Eigen::Vector3f> candidates{
+    point(10.0F, -10.0F), point(10.0F, -5.0F), point(10.0F),
+    point(10.0F, 5.0F), point(10.0F, 10.0F)};
+  const std::vector<float> scores{0.10F, 0.30F, 0.90F, 0.50F, 0.40F};
+  const std::vector<std::uint8_t> virtual_flags(5, 1U);
+  const std::vector<std::int8_t> columns{0, 1, 2, 3, 4};
+  const auto observation = scalenav_graph::evaluateSemanticOpportunity(
+    candidates, scores, virtual_flags, columns, point(0.0F), point(20.0F),
+    45.0F, 0.08F);
+
+  ASSERT_TRUE(observation.valid);
+  EXPECT_EQ(observation.best_column, 0);
+  EXPECT_EQ(observation.route_column, 2);
+  EXPECT_GT(observation.improvement_m, 3.0F);
+  Eigen::Vector3f pending = Eigen::Vector3f::Zero();
+  int frames = 0;
+  EXPECT_FALSE(scalenav_graph::updateSemanticOpportunityPersistence(
+    observation, 3.0F, 0.85F, 2, pending, frames));
+  EXPECT_EQ(frames, 1);
+  EXPECT_TRUE(scalenav_graph::updateSemanticOpportunityPersistence(
+    observation, 3.0F, 0.85F, 2, pending, frames));
+  EXPECT_EQ(frames, 2);
+}
+
+TEST(SemanticOpportunity, CameraColumnChangesStillAccumulateByWorldDirection)
+{
+  scalenav_graph::SemanticOpportunity first;
+  first.valid = true;
+  first.best_column = 0;
+  first.route_column = 2;
+  first.improvement_m = 10.0F;
+  first.best_world_direction = point(1.0F, 0.1F).normalized();
+  auto second = first;
+  second.best_column = 1;
+  second.best_world_direction = point(1.0F, 0.12F).normalized();
+
+  Eigen::Vector3f pending = Eigen::Vector3f::Zero();
+  int frames = 0;
+  EXPECT_FALSE(scalenav_graph::updateSemanticOpportunityPersistence(
+    first, 3.0F, 0.85F, 2, pending, frames));
+  EXPECT_TRUE(scalenav_graph::updateSemanticOpportunityPersistence(
+    second, 3.0F, 0.85F, 2, pending, frames));
+}
+
+TEST(SemanticOpportunity, AlternatingDirectionsAndSmallBenefitsDoNotTrigger)
+{
+  scalenav_graph::SemanticOpportunity left;
+  left.valid = true;
+  left.best_column = 0;
+  left.route_column = 2;
+  left.improvement_m = 10.0F;
+  left.best_world_direction = point(1.0F, -1.0F).normalized();
+  auto right = left;
+  right.best_column = 4;
+  right.best_world_direction = point(1.0F, 1.0F).normalized();
+
+  Eigen::Vector3f pending = Eigen::Vector3f::Zero();
+  int frames = 0;
+  EXPECT_FALSE(scalenav_graph::updateSemanticOpportunityPersistence(
+    left, 3.0F, 0.85F, 2, pending, frames));
+  EXPECT_FALSE(scalenav_graph::updateSemanticOpportunityPersistence(
+    right, 3.0F, 0.85F, 2, pending, frames));
+  EXPECT_EQ(frames, 1);
+  right.improvement_m = 2.9F;
+  EXPECT_FALSE(scalenav_graph::updateSemanticOpportunityPersistence(
+    right, 3.0F, 0.85F, 2, pending, frames));
+  EXPECT_EQ(frames, 0);
+}
+
 }  // namespace

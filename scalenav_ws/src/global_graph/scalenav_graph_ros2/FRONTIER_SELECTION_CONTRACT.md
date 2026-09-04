@@ -52,38 +52,61 @@ not encode only three named cases. The following rules cover the combinations:
   when no active semantic candidate from any frame is reachable. This fallback
   is explicit in diagnostics.
 
-The five columns are relative alternatives from one observation. Their
-semantic term can be written as `frame_min + (score - frame_min)`, which equals
-the raw patch mean with equal weights. Do not stretch every frame's smallest
-and largest score to `0..1`: doing so would make tiny low-risk differences
-dominate distance. Treating each column as an unrelated untyped global
-frontier also recreates the current failure mode.
+The five columns are relative alternatives from one observation. Preserve both
+the absolute frame minimum and the difference of every column from that
+minimum. Treating each column as an unrelated untyped global frontier
+recreates the current failure mode.
 
 ## 3. Objective and temporal stability
 
-For candidates that remain eligible after connectivity filtering, use one
-dimensionless objective:
+For each frame, define a continuous relative risk without a low/high threshold:
 
 ```
-(A* route cost + frontier_goal_distance_weight * distance_to_mission_goal)
-  / max(1 m, current_to_mission_goal_distance)
-  + frontier_semantic_score_weight * patch_mean
+frame_min = min(all five usable patch means in the frame)
+frame_range = max(all five usable patch means) - frame_min
+risk_regret = (patch_mean - frame_min) / max(frame_range, risk_noise_floor)
 ```
 
-The mission-distance term is therefore comparable across replans and cannot be
-silently overwhelmed by metres of route length. The semantic term participates
-continuously in the same comparison as the distance terms.
+Convert semantics to equivalent metres before normalization:
 
-The active route segment is held until its progress/replan condition is met;
-selection must not oscillate on every heatmap callback. At a replan, retain the
-incumbent column/frame when its candidate remains eligible and the new winner
-does not improve the objective by a configured margin. When switching columns,
-use a deterministic tie break (objective, then greater forward mission
-progress, then smaller column change) so equal evidence cannot cause left/right
-flapping. Expiry of the incumbent removes this hold immediately.
+```
+semantic_cost_m = semantic_frame_budget_m * frame_min
+                + semantic_detour_budget_m * risk_regret
 
-Temporal route holding and deterministic tie breaks still prevent oscillation,
-but no threshold hysteresis is applied to semantic scores.
+objective = (A* route cost
+             + frontier_goal_distance_weight * distance_to_mission_goal
+             + semantic_cost_m)
+            / max(1 m, current_to_mission_goal_distance)
+```
+
+The A* term contains the complete route, including any retreat needed to leave
+a dead end. There is no straight-line substitute for backtracking. The mission,
+semantic, and route terms are all expressed in equivalent metres and share one
+normalization scale. `risk_noise_floor` suppresses amplification of small score
+noise; it never removes a candidate.
+
+All five usable directions define the frame-relative risk scale. Graph
+reachability filters which candidates can win, but does not recompute that
+scale. A transiently detached direction therefore cannot change every other
+candidate's cost without a semantic change.
+
+The active route segment is held until progress, hard invalidation, terminal
+handoff, or a persistent semantic opportunity at a progress boundary. A
+semantic opportunity requires the same world-frame low-risk direction for at
+least two observations and an equivalent-metre improvement above the switch
+margin. Before the current segment reaches its configured progress boundary,
+the opportunity is recorded but cannot replace the route; this prevents a new
+heatmap frame from steering left/right repeatedly within one segment. Every
+resulting A* probe, including a hold or failed probe, consumes the evidence and
+starts cooldown; the next probe must accumulate fresh persistent observations.
+Hard edge invalidation bypasses persistence and cooldown. At a replan, use a
+deterministic tie break (objective, then greater route progress, then column)
+so equal evidence cannot cause left/right flapping.
+
+Temporal route holding and deterministic tie breaks prevent oscillation. The
+switch margin is applied to the decision in equivalent metres, not as a
+low/high classification threshold on semantic scores. Semantic evidence expiry
+alone never invalidates a collision-free accepted route.
 
 ## 4. Safety and reachability
 
@@ -97,6 +120,16 @@ intermediate nodes for execution, the complete unshortened A* sequence remains
 the accepted route's topology contract. The shortened sequence is kept
 separately for node-center trajectory generation; a shortcut chord must never
 be checked as though it were a `neighbors_`/`paths_` topology edge.
+
+The separation does not exempt shortcut geometry from live safety validation.
+`topology_path` proves that the selected frontier was reachable when A* ran;
+`execution_path` is the geometry actually sent downstream. While a shortened
+segment is held, the not-yet-executed suffix of `execution_path` must remain
+collision-free in the current map. If it becomes blocked, the accepted segment
+is cleared and the next search starts at the current odometry node. Checking
+only `topology_path` here is incorrect because a shortcut chord is not one of
+its edges and may cross newly observed occupancy while every original topology
+edge still exists.
 
 The direct endpoint check applies only between an Unknown virtual semantic
 endpoint and a Verified/Odom backbone endpoint. Edges between two Verified
@@ -125,10 +158,12 @@ when present, `terminal_unknown_edge_usable`.  The diagnostic
 to the route's original second node is expected to disappear as the vehicle
 moves. This does not
 reject Unknown routes.  It rejects only a missing Verified prefix or a missing
-or blocked final provisional edge.  Stable interior edges of the accepted A*
-node sequence must still exist; when one disappears, the planner runs a fresh
-odom-rooted A* instead of publishing the stale node sequence or splicing an
-alternate prefix into it.
+or blocked final provisional edge.  If a stable interior edge disappears
+during a sliding-window skeleton rebuild, the complete accepted witness is
+checked first: a collision-free witness allows the current route segment to be
+held while the topology pointer refreshes; a witness collision or an
+ordinary-semantic edge failure still forces a fresh odom-rooted A* instead of
+publishing unsafe geometry or splicing an alternate prefix into it.
 
 The rolling odom connection is checked after odom reconnection. Endpoint BFS
 may discover an alternate Verified path to the old anchor; that is sufficient

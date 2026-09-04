@@ -340,7 +340,7 @@ def colored_trajectory(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--baseline", action="append", required=True,
+    parser.add_argument("--baseline", action="append", default=[],
                         metavar="LABEL=JSONL")
     parser.add_argument(
         "--failed-baseline", action="append", default=[],
@@ -348,6 +348,7 @@ def main():
         help="plot a recorded non-goal-reaching flight with an X endpoint",
     )
     parser.add_argument("--scalenav", required=True, type=Path)
+    parser.add_argument("--scalenav-label", default="ScaleNav (ours)")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--goal", nargs=3, type=float, default=(0.0, 140.0, 1.6))
     parser.add_argument("--goal-radius", type=float, default=0.5)
@@ -411,7 +412,7 @@ def main():
         "ytick.labelsize": 7,
         "font.family": "DejaVu Sans",
     })
-    runs = baselines + [("ScaleNav (ours)", *ours)]
+    runs = baselines + [(args.scalenav_label, *ours)]
     row_count = len(runs)
     figure, axes = plt.subplots(
         row_count, 1, figsize=(4.5, 2.30 * row_count + 1.20), sharex=True,
@@ -421,19 +422,7 @@ def main():
     axes = axes[:, 0]
     norm = Normalize(0.0, args.speed_max)
 
-    if args.truth_map and args.truth_map.is_file():
-        image, bounds, accepted_points, occupied_cells = load_truth_voxel_map(
-            args.truth_map, args.voxel_size,
-        )
-        print(
-            f"UE truth backdrop: {accepted_points} points, {occupied_cells} "
-            f"occupied {args.voxel_size:g} m voxels; display dilation "
-            f"{args.voxel_dilation_cells} cells"
-        )
-        display_image = dilate_voxels(image, args.voxel_dilation_cells)
-        for axis in axes:
-            draw_voxels(axis, display_image, bounds)
-    elif args.pointcloud_session:
+    if args.pointcloud_session:
         image, bounds, frame_count, occupied_cells, accepted_points = load_voxel_map(
             args.pointcloud_session,
             args.pointcloud_start_ns,
@@ -449,7 +438,18 @@ def main():
         display_image = dilate_voxels(image, args.voxel_dilation_cells)
         for axis in axes:
             draw_voxels(axis, display_image, bounds)
-
+    elif args.truth_map and args.truth_map.is_file():
+        image, bounds, accepted_points, occupied_cells = load_truth_voxel_map(
+            args.truth_map, args.voxel_size,
+        )
+        print(
+            f"UE truth backdrop: {accepted_points} points, {occupied_cells} "
+            f"occupied {args.voxel_size:g} m voxels; display dilation "
+            f"{args.voxel_dilation_cells} cells"
+        )
+        display_image = dilate_voxels(image, args.voxel_dilation_cells)
+        for axis in axes:
+            draw_voxels(axis, display_image, bounds)
     collection = None
     for axis, (
         label, positions, speeds, completed, collision_position

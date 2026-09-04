@@ -56,9 +56,17 @@ def generate_launch_description():
         DeclareLaunchArgument("goal_path_cost_weight", default_value="1.0"),
         DeclareLaunchArgument("frontier_goal_distance_weight", default_value="2.0"),
         DeclareLaunchArgument("frontier_semantic_score_weight", default_value="1.0"),
+        DeclareLaunchArgument("frontier_semantic_detour_budget_m", default_value="45.0"),
+        DeclareLaunchArgument("frontier_semantic_frame_budget_m", default_value="12.0"),
+        DeclareLaunchArgument("frontier_semantic_noise_floor", default_value="0.08"),
         DeclareLaunchArgument("semantic_cost_weight", default_value="2.0"),
         DeclareLaunchArgument("semantic_route_switch_risk_margin", default_value="0.08"),
         DeclareLaunchArgument("semantic_route_switch_cost_ratio", default_value="0.90"),
+        DeclareLaunchArgument("semantic_opportunity_persistence_frames", default_value="2"),
+        DeclareLaunchArgument("semantic_opportunity_switch_margin_m", default_value="3.0"),
+        DeclareLaunchArgument("semantic_opportunity_cooldown_s", default_value="0.8"),
+        DeclareLaunchArgument(
+            "semantic_opportunity_direction_tolerance_deg", default_value="30.0"),
         DeclareLaunchArgument("semantic_route_influence_m", default_value="8.0"),
         DeclareLaunchArgument("semantic_visualization_max_score", default_value="0.4"),
         DeclareLaunchArgument("semantic_baseline_quantile", default_value="0.25"),
@@ -147,11 +155,25 @@ def generate_launch_description():
                     "frontier_goal_distance_weight"),
                 "frontier_semantic_score_weight": LaunchConfiguration(
                     "frontier_semantic_score_weight"),
+                "frontier_semantic_detour_budget_m": LaunchConfiguration(
+                    "frontier_semantic_detour_budget_m"),
+                "frontier_semantic_frame_budget_m": LaunchConfiguration(
+                    "frontier_semantic_frame_budget_m"),
+                "frontier_semantic_noise_floor": LaunchConfiguration(
+                    "frontier_semantic_noise_floor"),
                 "semantic_cost_weight": LaunchConfiguration("semantic_cost_weight"),
                 "semantic_route_switch_risk_margin": LaunchConfiguration(
                     "semantic_route_switch_risk_margin"),
                 "semantic_route_switch_cost_ratio": LaunchConfiguration(
                     "semantic_route_switch_cost_ratio"),
+                "semantic_opportunity_persistence_frames": LaunchConfiguration(
+                    "semantic_opportunity_persistence_frames"),
+                "semantic_opportunity_switch_margin_m": LaunchConfiguration(
+                    "semantic_opportunity_switch_margin_m"),
+                "semantic_opportunity_cooldown_s": LaunchConfiguration(
+                    "semantic_opportunity_cooldown_s"),
+                "semantic_opportunity_direction_tolerance_deg": LaunchConfiguration(
+                    "semantic_opportunity_direction_tolerance_deg"),
                 "semantic_route_influence_m": LaunchConfiguration(
                     "semantic_route_influence_m"),
                 "semantic_visualization_max_score": LaunchConfiguration(

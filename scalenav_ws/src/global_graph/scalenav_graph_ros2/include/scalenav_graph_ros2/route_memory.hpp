@@ -3,12 +3,125 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <vector>
 
 #include <Eigen/Dense>
 
 namespace scalenav_graph {
+
+struct SemanticOpportunity
+{
+  bool valid = false;
+  int best_column = -1;
+  int route_column = -1;
+  float best_risk = 0.0F;
+  float route_risk = 0.0F;
+  float frame_range = 0.0F;
+  float risk_regret = 0.0F;
+  float improvement_m = 0.0F;
+  Eigen::Vector3f best_world_direction = Eigen::Vector3f::Zero();
+};
+
+inline SemanticOpportunity evaluateSemanticOpportunity(
+  const std::vector<Eigen::Vector3f> &points,
+  const std::vector<float> &scores,
+  const std::vector<std::uint8_t> &is_virtual,
+  const std::vector<std::int8_t> &columns,
+  const Eigen::Vector3f &origin,
+  const Eigen::Vector3f &route_target,
+  float detour_budget_m,
+  float risk_noise_floor)
+{
+  SemanticOpportunity result;
+  if (points.size() != scores.size() || points.size() != is_virtual.size() ||
+      points.size() != columns.size() || !origin.allFinite() ||
+      !route_target.allFinite()) {
+    return result;
+  }
+  const Eigen::Vector3f target_delta = route_target - origin;
+  const float target_norm = target_delta.norm();
+  if (!std::isfinite(target_norm) || target_norm < 1e-3F) return result;
+  const Eigen::Vector3f target_direction = target_delta / target_norm;
+
+  std::size_t best_index = points.size();
+  std::size_t route_index = points.size();
+  float frame_max = -std::numeric_limits<float>::infinity();
+  float best_alignment = -std::numeric_limits<float>::infinity();
+  for (std::size_t index = 0; index < points.size(); ++index) {
+    if (is_virtual[index] == 0U || columns[index] < 0 ||
+        !points[index].allFinite() || !std::isfinite(scores[index])) {
+      continue;
+    }
+    const float risk = std::clamp(scores[index], 0.0F, 1.0F);
+    frame_max = std::max(frame_max, risk);
+    if (best_index == points.size() || risk < result.best_risk - 1e-6F ||
+        (std::abs(risk - result.best_risk) <= 1e-6F &&
+         columns[index] < columns[best_index])) {
+      best_index = index;
+      result.best_risk = risk;
+    }
+    const Eigen::Vector3f delta = points[index] - origin;
+    const float norm = delta.norm();
+    if (!std::isfinite(norm) || norm < 1e-3F) continue;
+    const float alignment = (delta / norm).dot(target_direction);
+    if (route_index == points.size() || alignment > best_alignment) {
+      best_alignment = alignment;
+      route_index = index;
+    }
+  }
+  if (best_index == points.size() || route_index == points.size() ||
+      !std::isfinite(frame_max)) {
+    return result;
+  }
+
+  result.valid = true;
+  result.best_column = static_cast<int>(columns[best_index]);
+  result.route_column = static_cast<int>(columns[route_index]);
+  result.route_risk = std::clamp(scores[route_index], 0.0F, 1.0F);
+  result.frame_range = std::max(0.0F, frame_max - result.best_risk);
+  result.risk_regret = std::clamp(
+    (result.route_risk - result.best_risk) /
+      std::max(std::clamp(risk_noise_floor, 1e-3F, 1.0F), result.frame_range),
+    0.0F, 1.0F);
+  result.improvement_m = std::max(0.0F, detour_budget_m) * result.risk_regret;
+  result.best_world_direction = (points[best_index] - origin).normalized();
+  return result;
+}
+
+inline bool updateSemanticOpportunityPersistence(
+  const SemanticOpportunity &observation,
+  float minimum_improvement_m,
+  float direction_match_cosine,
+  int required_frames,
+  Eigen::Vector3f &pending_world_direction,
+  int &pending_frames)
+{
+  const bool is_opportunity = observation.valid &&
+    observation.best_column != observation.route_column &&
+    observation.improvement_m >= std::max(0.0F, minimum_improvement_m) &&
+    observation.best_world_direction.allFinite() &&
+    observation.best_world_direction.norm() > 0.5F;
+  if (!is_opportunity) {
+    pending_world_direction.setZero();
+    pending_frames = 0;
+    return false;
+  }
+
+  const Eigen::Vector3f direction = observation.best_world_direction.normalized();
+  const float threshold = std::clamp(direction_match_cosine, -1.0F, 1.0F);
+  if (pending_frames > 0 && pending_world_direction.norm() > 0.5F &&
+      pending_world_direction.normalized().dot(direction) >= threshold) {
+    ++pending_frames;
+    pending_world_direction =
+      (pending_world_direction.normalized() + direction).normalized();
+  } else {
+    pending_world_direction = direction;
+    pending_frames = 1;
+  }
+  return pending_frames >= std::max(1, required_frames);
+}
 
 inline float pointSegmentDistance(const Eigen::Vector3f &point,
                                   const Eigen::Vector3f &start,

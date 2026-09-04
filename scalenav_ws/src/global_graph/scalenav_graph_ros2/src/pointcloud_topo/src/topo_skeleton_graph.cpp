@@ -1015,7 +1015,9 @@ bool TopoGraph::goalDirectedSearch(
     float smoothness_penalty_weight, TopoGraphSearchStats *search_stats,
     std::int64_t active_virtual_semantic_stamp_ns,
     float frontier_goal_distance_weight,
-    float frontier_semantic_score_weight) {
+    float frontier_semantic_detour_budget_m,
+    float frontier_semantic_frame_budget_m,
+    float frontier_semantic_noise_floor) {
   path.clear();
   if (search_stats) *search_stats = {};
   if (start_node == nullptr || !start_node->center_.allFinite() || !goal.allFinite())
@@ -1035,7 +1037,10 @@ bool TopoGraph::goalDirectedSearch(
   // normalized weight to route cost and remaining mission distance.
   frontier_goal_distance_weight = std::clamp(
     frontier_goal_distance_weight, 0.0F, 10.0F);
-  frontier_semantic_score_weight = std::max(0.0F, frontier_semantic_score_weight);
+  frontier_semantic_detour_budget_m = std::max(0.0F, frontier_semantic_detour_budget_m);
+  frontier_semantic_frame_budget_m = std::max(0.0F, frontier_semantic_frame_budget_m);
+  frontier_semantic_noise_floor = std::clamp(
+    frontier_semantic_noise_floor, 1e-3F, 1.0F);
   const bool radial_preference_enabled = std::isfinite(preferred_frontier_goal_radial_m) &&
     preferred_frontier_goal_radial_m >= 0.0F;
   if (radial_preference_enabled) {
@@ -1060,12 +1065,13 @@ bool TopoGraph::goalDirectedSearch(
   const float semantic_query_radius = bounded_search ?
     max_search_radius_m + static_cast<float>(std::max(0.0, semantic_point_influence_m_)) :
     std::numeric_limits<float>::infinity();
-  const std::vector<TopoNode::Ptr> semantic_nodes = semantic_cost_weight > 0.0F ?
-    semanticNodes(
-      &start_node->center_, semantic_query_radius,
-      active_virtual_semantic_stamp_ns,
-      search_stats ? &search_stats->semantic_inactive_virtual_nodes_skipped : nullptr) :
-    std::vector<TopoNode::Ptr>();
+  // Frontier scoring always needs the active five-direction observations.
+  // semantic_cost_weight only controls risk integrated along graph edges; it
+  // must not disable semantic endpoint ranking or its per-frame reference.
+  const std::vector<TopoNode::Ptr> semantic_nodes = semanticNodes(
+    &start_node->center_, semantic_query_radius,
+    active_virtual_semantic_stamp_ns,
+    search_stats ? &search_stats->semantic_inactive_virtual_nodes_skipped : nullptr);
   const SemanticSpatialIndex semantic_index(
     semantic_nodes, static_cast<float>(std::max(0.5, semantic_point_influence_m_)));
   if (search_stats) search_stats->semantic_query_nodes = semantic_nodes.size();
@@ -1176,6 +1182,11 @@ bool TopoGraph::goalDirectedSearch(
   TopoNode::Ptr best_ordinary_frontier;
   float best_ordinary_frontier_objective = std::numeric_limits<float>::infinity();
   float best_ordinary_frontier_route_distance = -std::numeric_limits<float>::infinity();
+  struct ReachableSemanticFrontier {
+    TopoNode::Ptr node;
+    TopoFrontierCandidateStats stats;
+  };
+  std::vector<ReachableSemanticFrontier> reachable_semantic_frontiers;
 
   const auto search_start = std::chrono::steady_clock::now();
   while (!open.empty()) {
@@ -1200,60 +1211,29 @@ bool TopoGraph::goalDirectedSearch(
     if (isFrontierEndpoint(entry.node, route_dist)) {
       const float h = goalDistance(entry.node);
       const bool semantic_frontier = isActiveSemanticFrontier(entry.node);
-      // Select every semantic candidate with one continuous objective. The
-      // score is never converted into a low/high gate; lower semantic score
-      // simply contributes less cost after the distance terms are normalized.
-      // Confidence decides whether an observation is usable; it must not
-      // rescale a usable patch mean. In particular, the lower FOV confidence
-      // of an outer column must not make a risky direction appear safer.
       const float raw_semantic_risk = semantic_frontier ?
         std::clamp(entry.node->semantic_score_, 0.0F, 1.0F) : 0.0F;
-      // Keep PEARL's patch mean continuous. Per-frame min/max stretching made
-      // a 0.01 difference in an otherwise safe frame as strong as a 0.9 risk
-      // gap and contradicted the intended distance-dominant low-risk case.
-      const float semantic_risk = raw_semantic_risk;
-      const float frontier_objective = entry.g / objective_scale +
-        frontier_goal_distance_weight * h / objective_scale +
-        frontier_semantic_score_weight * semantic_risk;
-      if (search_stats) {
-        if (semantic_frontier) {
-          ++search_stats->semantic_frontier_candidates;
-          search_stats->semantic_frontier_ranking.push_back(
-            TopoFrontierCandidateStats{
-              entry.node->persistent_id_, entry.node->semantic_frame_stamp_ns_,
-              entry.node->semantic_column_, semantic_risk, entry.g, route_dist,
-              h, frontier_objective});
-          if (frontier_objective < search_stats->best_semantic_frontier_objective) {
-            search_stats->best_semantic_frontier_objective = frontier_objective;
-            search_stats->best_semantic_frontier_id = entry.node->persistent_id_;
-          }
-        } else {
+      if (semantic_frontier) {
+        TopoFrontierCandidateStats candidate;
+        candidate.node_id = entry.node->persistent_id_;
+        candidate.frame_stamp_ns = entry.node->semantic_frame_stamp_ns_;
+        candidate.column = entry.node->semantic_column_;
+        candidate.semantic_risk = raw_semantic_risk;
+        candidate.astar_cost = entry.g;
+        candidate.route_distance = route_dist;
+        candidate.mission_distance = h;
+        reachable_semantic_frontiers.push_back({entry.node, candidate});
+        if (search_stats) ++search_stats->semantic_frontier_candidates;
+      } else {
+        const float frontier_objective =
+          (entry.g + frontier_goal_distance_weight * h) / objective_scale;
+        if (search_stats) {
           ++search_stats->ordinary_frontier_candidates;
           if (frontier_objective < search_stats->best_ordinary_frontier_objective) {
             search_stats->best_ordinary_frontier_objective = frontier_objective;
             search_stats->best_ordinary_frontier_id = entry.node->persistent_id_;
           }
         }
-      }
-      // Every semantic frontier participates in one continuous objective. The
-      // semantic score term is already included above; no low/high threshold
-      // gate is applied before route and mission-distance comparison.
-      if (semantic_frontier) {
-        const bool objective_tie = std::abs(frontier_objective -
-          best_semantic_frontier_objective) <= 1e-5F;
-        const bool route_tie = std::abs(route_dist -
-          best_semantic_frontier_route_distance) <= 1e-3F;
-        if (best_semantic_frontier == nullptr ||
-            frontier_objective < best_semantic_frontier_objective - 1e-5F ||
-            (objective_tie && (route_dist > best_semantic_frontier_route_distance + 1e-3F ||
-              (route_tie && static_cast<int>(entry.node->semantic_column_) <
-                best_semantic_column)))) {
-          best_semantic_frontier = entry.node;
-          best_semantic_frontier_objective = frontier_objective;
-          best_semantic_frontier_route_distance = route_dist;
-          best_semantic_column = static_cast<int>(entry.node->semantic_column_);
-        }
-      } else if (!semantic_frontier) {
         if (best_ordinary_frontier == nullptr ||
             frontier_objective < best_ordinary_frontier_objective - 1e-5F ||
             (std::abs(frontier_objective - best_ordinary_frontier_objective) <= 1e-5F &&
@@ -1262,13 +1242,14 @@ bool TopoGraph::goalDirectedSearch(
           best_ordinary_frontier_objective = frontier_objective;
           best_ordinary_frontier_route_distance = route_dist;
         }
-      }
-      if (best_frontier == nullptr || frontier_objective < best_frontier_objective - 1e-5F ||
-          (std::abs(frontier_objective - best_frontier_objective) <= 1e-5F &&
-           route_dist > best_frontier_route_distance + 1e-3F)) {
-        best_frontier = entry.node;
-        best_frontier_objective = frontier_objective;
-        best_frontier_route_distance = route_dist;
+        if (best_frontier == nullptr ||
+            frontier_objective < best_frontier_objective - 1e-5F ||
+            (std::abs(frontier_objective - best_frontier_objective) <= 1e-5F &&
+             route_dist > best_frontier_route_distance + 1e-3F)) {
+          best_frontier = entry.node;
+          best_frontier_objective = frontier_objective;
+          best_frontier_route_distance = route_dist;
+        }
       }
     }
 
@@ -1334,12 +1315,74 @@ bool TopoGraph::goalDirectedSearch(
     }
   }
 
-  // Semantic and ordinary Verified frontiers share the same objective above.
-  // Do not force a semantic endpoint here: when the mission is outside the
-  // local search radius, prefer_mission_goal is false, but the selected
-  // frontier must still minimize route cost plus normalized mission distance.
-  // The previous unconditional semantic return caused every refresh to jump
-  // to a potentially poor semantic endpoint and ignored the mission term.
+  // The five columns from one heatmap are relative alternatives.  Rank them
+  // only after the complete A* expansion has established which columns are
+  // reachable, then convert semantic regret to equivalent metres before the
+  // same normalization used by route and mission distance.
+  std::unordered_map<std::int64_t, std::pair<float, float>> frame_risk_bounds;
+  // Use every active virtual direction as the per-frame reference, including
+  // directions whose provisional edge is currently unreachable. Reachability
+  // decides which endpoint may be selected; it must not change the semantic
+  // scale of the remaining directions from one graph update to the next.
+  for (const auto &node : semantic_nodes) {
+    if (!isVirtualSemanticEndpoint(node) || node->semantic_frame_stamp_ns_ <= 0)
+      continue;
+    const float risk = std::clamp(node->semantic_score_, 0.0F, 1.0F);
+    auto [it, inserted] = frame_risk_bounds.emplace(
+      node->semantic_frame_stamp_ns_, std::make_pair(risk, risk));
+    if (!inserted) {
+      it->second.first = std::min(it->second.first, risk);
+      it->second.second = std::max(it->second.second, risk);
+    }
+  }
+  for (auto &candidate : reachable_semantic_frontiers) {
+    const auto bounds_it = frame_risk_bounds.find(candidate.stats.frame_stamp_ns);
+    const auto bounds = bounds_it != frame_risk_bounds.end() ? bounds_it->second :
+      std::make_pair(candidate.stats.semantic_risk, candidate.stats.semantic_risk);
+    candidate.stats.frame_min_risk = bounds.first;
+    candidate.stats.frame_risk_range = std::max(0.0F, bounds.second - bounds.first);
+    candidate.stats.risk_regret = std::clamp(
+      (candidate.stats.semantic_risk - bounds.first) /
+        std::max(frontier_semantic_noise_floor, candidate.stats.frame_risk_range),
+      0.0F, 1.0F);
+    candidate.stats.semantic_cost_m =
+      frontier_semantic_frame_budget_m * candidate.stats.frame_min_risk +
+      frontier_semantic_detour_budget_m * candidate.stats.risk_regret;
+    candidate.stats.objective =
+      (candidate.stats.astar_cost +
+       frontier_goal_distance_weight * candidate.stats.mission_distance +
+       candidate.stats.semantic_cost_m) / objective_scale;
+
+    const bool objective_tie = std::abs(candidate.stats.objective -
+      best_semantic_frontier_objective) <= 1e-5F;
+    const bool route_tie = std::abs(candidate.stats.route_distance -
+      best_semantic_frontier_route_distance) <= 1e-3F;
+    if (best_semantic_frontier == nullptr ||
+        candidate.stats.objective < best_semantic_frontier_objective - 1e-5F ||
+        (objective_tie &&
+         (candidate.stats.route_distance > best_semantic_frontier_route_distance + 1e-3F ||
+          (route_tie && static_cast<int>(candidate.stats.column) < best_semantic_column)))) {
+      best_semantic_frontier = candidate.node;
+      best_semantic_frontier_objective = candidate.stats.objective;
+      best_semantic_frontier_route_distance = candidate.stats.route_distance;
+      best_semantic_column = static_cast<int>(candidate.stats.column);
+      if (search_stats) {
+        search_stats->selected_semantic_frame_min_risk = candidate.stats.frame_min_risk;
+        search_stats->selected_semantic_frame_risk_range = candidate.stats.frame_risk_range;
+        search_stats->selected_semantic_risk_regret = candidate.stats.risk_regret;
+        search_stats->selected_semantic_cost_m = candidate.stats.semantic_cost_m;
+      }
+    }
+    if (search_stats) search_stats->semantic_frontier_ranking.push_back(candidate.stats);
+  }
+  if (search_stats && best_semantic_frontier) {
+    search_stats->best_semantic_frontier_objective = best_semantic_frontier_objective;
+    search_stats->best_semantic_frontier_id = best_semantic_frontier->persistent_id_;
+  }
+
+  // Keep an ordinary fallback for the case where no semantic endpoint is
+  // reachable. Normal exploration commits the best semantic frontier after
+  // the complete, odom-rooted search.
   if (best_frontier == nullptr) {
     for (const auto &entry : route_distance) {
       if (!isFrontierEndpoint(entry.first, entry.second)) continue;

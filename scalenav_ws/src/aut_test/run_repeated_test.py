@@ -24,10 +24,16 @@ PROJECT_ROOT = WS.parent
 START_SCRIPT = WS / "scripts" / "start.sh"
 ROUTE_YOPO_SCRIPT = WS / "scripts" / "start_route_yopo.sh"
 YOPO_SIMPLE_SCRIPT = WS / "scripts" / "start_yopo_simple_control.sh"
+SCALENAV_EGO_SCRIPT = WS / "scripts" / "start_scalenav_ego.sh"
+SCALENAV_SUPER_SCRIPT = WS / "scripts" / "start_scalenav_super.sh"
 BASELINE_ROOT = PROJECT_ROOT / "bc" / "third_party" / "compare"
 BASELINE_SCRIPTS = {
     "ego": BASELINE_ROOT / "run_ego_map2.sh",
     "super": BASELINE_ROOT / "run_super_map2.sh",
+}
+COMBINED_SCRIPTS = {
+    "scalenav_ego": SCALENAV_EGO_SCRIPT,
+    "scalenav_super": SCALENAV_SUPER_SCRIPT,
 }
 AIRSIM_PYTHON = (
     WS
@@ -79,7 +85,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stack",
-        choices=("scalenav", "yopo_simple", "route_yopo", "ego", "super"),
+        choices=(
+            "scalenav", "yopo_simple", "route_yopo", "ego", "super",
+            "scalenav_ego", "scalenav_super",
+        ),
         default="scalenav",
         help="planner stack to launch for each isolated trial (default: scalenav)",
     )
@@ -94,6 +103,15 @@ def parse_args() -> argparse.Namespace:
         type=finite_positive,
         default=60.0,
         help="maximum stack and ROS readiness wait in seconds (default: 60)",
+    )
+    parser.add_argument(
+        "--max-startup-failures",
+        type=int,
+        default=3,
+        help=(
+            "stop after this many consecutive startup failures; startup "
+            "failures do not count toward --count (default: 3)"
+        ),
     )
     parser.add_argument(
         "--cooldown",
@@ -189,6 +207,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.count < 0:
         parser.error("--count must be zero or greater")
+    if args.max_startup_failures < 1:
+        parser.error("--max-startup-failures must be at least one")
     for name in ("goal_x", "goal_y", "goal_z", "start_x", "start_y", "start_z"):
         if not math.isfinite(getattr(args, name)):
             parser.error(f"--{name.replace('_', '-')} must be finite")
@@ -232,6 +252,10 @@ def conflicting_processes() -> list[tuple[int, str]]:
         "text_heatmap_ros2.py",
         "online_planner_ros2.py",
         "scalenav_graph_node",
+        "ego_planner_node",
+        "traj_server",
+        "fsm_node",
+        "scalenav_goal_bridge",
     }
     own = {os.getpid(), os.getppid()}
     conflicts: list[tuple[int, str]] = []
@@ -254,6 +278,8 @@ def validate_environment(args: argparse.Namespace) -> None:
         launcher = YOPO_SIMPLE_SCRIPT
     elif args.stack == "route_yopo":
         launcher = ROUTE_YOPO_SCRIPT
+    elif args.stack in COMBINED_SCRIPTS:
+        launcher = COMBINED_SCRIPTS[args.stack]
     else:
         launcher = BASELINE_SCRIPTS[args.stack]
     if not launcher.is_file():
@@ -352,6 +378,8 @@ def start_stack(
         command = [str(launcher)]
         if args.no_semantic and args.stack in {"scalenav", "route_yopo"}:
             command.append("--no-semantic")
+    elif args.stack in COMBINED_SCRIPTS:
+        command = [str(COMBINED_SCRIPTS[args.stack])]
     else:
         command = [
             "bash",
@@ -360,7 +388,12 @@ def start_stack(
         ]
     environment = os.environ.copy()
     environment["SCALENAV_LOG_DIR"] = str(args.log_root.resolve())
-    if args.stack == "scalenav":
+    if args.stack in {"scalenav_ego", "scalenav_super"}:
+        environment["PROMPT"] = args.prompt
+        environment["SEMANTIC_COST_WEIGHT"] = str(args.semantic_cost_weight)
+        environment["SEMANTIC_ROUTE_INFLUENCE_M"] = str(args.semantic_route_influence_m)
+        environment["SEMANTIC_POINT_INFLUENCE_M"] = str(args.semantic_point_influence_m)
+    elif args.stack == "scalenav":
         environment["PROMPT"] = args.prompt
         environment["SEMANTIC_COST_WEIGHT"] = str(args.semantic_cost_weight)
         environment["SEMANTIC_ROUTE_INFLUENCE_M"] = str(args.semantic_route_influence_m)
@@ -420,15 +453,18 @@ class MissionMonitor:
         self.odom_received_at = 0.0
         self.collision: bool | None = None
         self.collision_received_at = 0.0
-        self.goal_topic = (
-            "/goal_pose"
-            if args.stack in {"scalenav", "yopo_simple", "route_yopo"}
-            else "/move_base_simple/goal"
-        )
+        self.goal_topic = "/goal_pose" if args.stack in {
+            "scalenav", "yopo_simple", "route_yopo",
+            "scalenav_ego", "scalenav_super",
+        } else "/move_base_simple/goal"
         # Every benchmark launch has one planner and one structured logger on
         # the goal topic. Waiting for both prevents the logger from accepting a
         # goal before the planner subscription has finished starting.
-        self.minimum_goal_subscribers = 2
+        # Baseline launches subscribe to /move_base_simple/goal, while the
+        # combined stacks receive the mission goal only in ScaleNav's graph.
+        self.minimum_goal_subscribers = 1 if args.stack in {
+            "scalenav_ego", "scalenav_super"
+        } else 2
         self.goal_pub = self.node.create_publisher(PoseStamped, self.goal_topic, 10)
         self.reset_client = self.node.create_client(Trigger, "/scalenav/reset_sim")
         self.node.create_subscription(Odometry, "/sim/odom", self.on_odom, 1)
@@ -800,6 +836,7 @@ def configuration(args: argparse.Namespace) -> dict[str, Any]:
         "count": args.count,
         "timeout_s": args.timeout,
         "startup_timeout_s": args.startup_timeout,
+        "max_startup_failures": args.max_startup_failures,
         "cooldown_s": args.cooldown,
         "start": [args.start_x, args.start_y, args.start_z],
         "goal": [args.goal_x, args.goal_y, args.goal_z],
@@ -836,15 +873,41 @@ def main() -> int:
     summary_path = run_dir / "summary.csv"
     print(f"results: {run_dir}", flush=True)
 
-    trial = 1
-    while not STOP_REQUESTED and (args.count == 0 or trial <= args.count):
-        run_trial(args, run_dir, summary_path, trial)
-        if STOP_REQUESTED or (args.count != 0 and trial >= args.count):
+    attempt = 1
+    valid_trials = 0
+    consecutive_startup_failures = 0
+    while not STOP_REQUESTED and (args.count == 0 or valid_trials < args.count):
+        result = run_trial(args, run_dir, summary_path, attempt)
+        outcome = result.get("outcome")
+        if outcome in {"success", "collision", "timeout"}:
+            consecutive_startup_failures = 0
+            valid_trials += 1
+        elif outcome == "startup_failed":
+            consecutive_startup_failures += 1
+            print(
+                f"startup failure does not count toward --count "
+                f"({valid_trials}/{args.count or 'unbounded'} valid flights)",
+                flush=True,
+            )
+            if consecutive_startup_failures >= args.max_startup_failures:
+                print(
+                    f"stopping after {consecutive_startup_failures} consecutive "
+                    "startup failures",
+                    flush=True,
+                )
+                break
+        else:
+            print(
+                f"{outcome or 'unknown'} attempt does not count toward --count "
+                f"({valid_trials}/{args.count or 'unbounded'} valid flights)",
+                flush=True,
+            )
+        if STOP_REQUESTED or (args.count != 0 and valid_trials >= args.count):
             break
         deadline = time.monotonic() + args.cooldown
         while time.monotonic() < deadline and not STOP_REQUESTED:
             time.sleep(min(0.1, deadline - time.monotonic()))
-        trial += 1
+        attempt += 1
     # Keep the descriptor referenced until every trial and cleanup has completed.
     _ = lock_file
     print(f"test stopped; summary={summary_path}", flush=True)

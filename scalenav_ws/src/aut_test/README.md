@@ -11,8 +11,11 @@
    `0.3 m/s`, or until timeout/collision.
 6. Stop the complete stack, record the result, and repeat.
 
-AirSim must already be running. The default batch contains 10 trials; stop
-cleanly at any point with `Ctrl-C`. Use `--count 0` for an unlimited run.
+AirSim must already be running. The default batch contains 10 valid flights;
+startup failures are recorded but do not consume the requested trial count.
+After three consecutive startup failures the runner stops instead of waiting
+indefinitely. Stop cleanly at any point with `Ctrl-C`. Use `--count 0` for an
+unlimited run.
 
 For a normal manual run, `scalenav_ws/scripts/start.sh` also resets AirSim by
 default before launching any ROS nodes. Set `AIRSIM_RESET_ON_START=false` only
@@ -45,3 +48,15 @@ Each invocation creates `results/run_<time>_<pid>/summary.csv`, one JSON result
 per trial, and one full stack console log per trial. ScaleNav's sensor and graph
 logs remain in `log_scalenav/session_*`, with the matching session path recorded
 in both CSV and JSON.
+
+Generate success-only completion statistics and separate collision/timeout
+diagnostics with:
+
+```bash
+python3 scalenav_ws/src/aut_test/aggregate_results.py \
+  --batch 'ScaleNav=path/to/summary.csv' \
+  --output-csv path/to/aggregate_metrics.csv
+```
+
+The `failure_observed_path_*` fields describe distance flown before collision
+or timeout. They must not be interpreted as completed path length.

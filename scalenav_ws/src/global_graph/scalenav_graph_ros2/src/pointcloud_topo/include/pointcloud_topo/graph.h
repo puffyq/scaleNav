@@ -284,6 +284,28 @@ inline bool hasExecutableTopologyEdge(const TopoNode::Ptr &from,
          forward_weight != from->weight_.end() && std::isfinite(forward_weight->second);
 }
 
+inline bool executionPathContainsShortcutChord(
+    const std::vector<TopoNode::Ptr> &topology_path,
+    const std::vector<TopoNode::Ptr> &execution_path) {
+  if (topology_path.size() < 2 || execution_path.size() < 2) return false;
+  std::size_t topology_cursor = 0;
+  std::size_t previous_index = 0;
+  bool have_previous = false;
+  for (const auto &execution_node : execution_path) {
+    const auto match = std::find(
+      topology_path.begin() + static_cast<std::ptrdiff_t>(topology_cursor),
+      topology_path.end(), execution_node);
+    if (match == topology_path.end()) return true;
+    const std::size_t index = static_cast<std::size_t>(
+      std::distance(topology_path.begin(), match));
+    if (have_previous && index > previous_index + 1) return true;
+    previous_index = index;
+    topology_cursor = index + 1;
+    have_previous = true;
+  }
+  return false;
+}
+
 struct AcceptedRouteConnectivity {
   bool verified_prefix_reachable = false;
   bool accepted_head_edge_usable = false;
@@ -541,6 +563,10 @@ struct TopoFrontierCandidateStats {
   float astar_cost = 0.0F;
   float route_distance = 0.0F;
   float mission_distance = 0.0F;
+  float frame_min_risk = 0.0F;
+  float frame_risk_range = 0.0F;
+  float risk_regret = 0.0F;
+  float semantic_cost_m = 0.0F;
   float objective = std::numeric_limits<float>::infinity();
 };
 
@@ -564,6 +590,10 @@ struct TopoGraphSearchStats {
   size_t semantic_all_high_frames = 0;
   std::int64_t selected_semantic_frame_stamp_ns = 0;
   std::int8_t selected_semantic_column = -1;
+  float selected_semantic_frame_min_risk = 0.0F;
+  float selected_semantic_frame_risk_range = 0.0F;
+  float selected_semantic_risk_regret = 0.0F;
+  float selected_semantic_cost_m = 0.0F;
   vector<TopoFrontierCandidateStats> semantic_frontier_ranking;
   bool timed_out = false;
 };
@@ -667,7 +697,9 @@ public:
       TopoGraphSearchStats *search_stats = nullptr,
       std::int64_t active_virtual_semantic_stamp_ns = 0,
       float frontier_goal_distance_weight = 1.0F,
-      float frontier_semantic_score_weight = 1.0F);
+      float frontier_semantic_detour_budget_m = 45.0F,
+      float frontier_semantic_frame_budget_m = 12.0F,
+      float frontier_semantic_noise_floor = 0.08F);
   float semanticRiskForEdge(
       const TopoNode::Ptr &from, const TopoNode::Ptr &to,
       const std::vector<TopoNode::Ptr> *semantic_nodes = nullptr) const;

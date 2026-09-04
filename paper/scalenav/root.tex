@@ -76,8 +76,8 @@ generator: online, a frontier-conditioned YOPO policy refined by an
 ordered-bubble MPC; offline, a corridor-conditioned network trained on the
 same contract.  Semantic observations modify route costs but do not certify free
 space; geometric verification and depth-based local execution remain
-authoritative.  In 140-m closed-loop missions, ScaleNav completes all ten
-trials at $4.134\pm0.141$~m/s, compared with $3.759\pm0.009$~m/s for YOPO.  On
+authoritative.  In the latest 140-m closed-loop batch, ScaleNav completes all
+ten trials at $4.134\pm0.141$~m/s with zero collisions.  On
 a paired 1,479-route offline benchmark, corridor conditioning reduces
 collision from $8.05\%$ to $0.14\%$ and corridor violation from $50.10\%$ to
 $25.22\%$, while raising average progress from $6.225$ to $6.502$~m.
@@ -600,11 +600,14 @@ rates, and continuous flight metrics use successful trials only.
 
 \subsection{Closed-Loop System Evaluation}
 \subsubsection{Methods and Conditions}
-We compare frontier-only YOPO, EGO-Planner \cite{egoplanner}, SUPER
-\cite{super}, and full ScaleNav.  Language conditions hold geometry and planner
-weights fixed while changing only the query; ablations retain the same
-primitive generator and state.  PEARL runs in all semantic-enabled conditions.
-Table~\ref{tab:params} lists the shared ScaleNav configuration.
+We compare YOPO-Simple, EGO-Planner \cite{egoplanner}, SUPER \cite{super}, and
+full ScaleNav with its YOPO executor.  Two executor-substitution conditions,
+ScaleNav+EGO and ScaleNav+SUPER, retain the same semantic topological route
+layer and feed its rolling local goal to EGO-Planner or SUPER.  Language
+conditions hold geometry and planner weights fixed while changing only the
+query; ablations retain the same primitive generator and state.  PEARL runs in
+all semantic-enabled conditions.  Table~\ref{tab:params} lists the shared
+ScaleNav configuration.
 
 \begin{table}[t]
 \caption{Fixed Parameters Used by the Current Implementation}
@@ -634,68 +637,77 @@ Replan progress ratio $\rho_r$ & 0.4 & Frontier weights $w_g,w_q$ & 2.0, 1.0 \\
 \end{table}
 
 \subsubsection{Scenarios}
-Map2 contains isolated and dense trees, long walls, buildings, and mixed-scale
-clusters (Fig.~1(b)).  Its truth export spans $140.0\times132.0$~m.  In the
-evaluation corridor $x\in[-45,45]$~m, $y\in[0,120]$~m, $3.91\%$ of 0.5-m cells
-intersect truth geometry in the navigation slab $z\in[0.6,2.6]$~m.  These
-statistics come from UE truth, never a method's partial online map.  Matched
-language trials additionally include the unseen query ``avoid power lines.''
+The current Map2 scene contains trees, long walls, and block structures along
+the 140-m mission corridor.  All methods in the main comparison use this same
+scene and mission endpoints.  Figure~\ref{fig:map2_speed_trajectories} uses the
+point-cloud reconstruction recorded with the latest ScaleNav batch; statistics
+from the superseded UE truth export are not carried into this comparison.
+Matched language trials additionally include the unseen query ``avoid power
+lines.''
 
 \subsubsection{Metrics}
 Closed-loop metrics are success, collision, timeout, path length $L$, flight
-time $T$, $\bar v=L/T$, and maximum speed.  Continuous metrics use successful
-trials; no-success conditions receive \blank{}.  Language trials also report
+time $T$, $\bar v=L/T$, and maximum speed.  Completion metrics ($L$, $T$, and
+speed) use successful trials only.  For a condition with no successful trial,
+we additionally report the mean collision/timeout-truncated observed path
+$L_{\rm obs}$ as a diagnostic; it is never presented as a completed mission.
+Language trials also report
 route change, compliance, decision distance, switches, and exposure
 $E_{\mathrm{sem}}=L^{-1}\int_0^T r(\vect{p}(t))v(t)\,dt$.  Profiling separates
 point processing, graph construction, A*, planning, and PEARL latency.
 
 \subsubsection{Results}
-Figure~\ref{fig:map2_speed_trajectories} shows one recorded run per method on
-common truth geometry; incomplete baselines end at their recorded collisions.
+Figure~\ref{fig:map2_speed_trajectories} shows one run from each current-scene
+batch on a common reconstruction; incomplete baselines end at their recorded
+collisions.
 
 \begin{figure}[!ht]
 \centering
-\includegraphics[width=0.72\columnwidth]{pics/experiments/map2_0_140_1p6/trajectory_speed_comparison.pdf}
+\includegraphics[width=0.72\columnwidth]{pics/experiments/map2_0_140_1p6/trajectory_speed_comparison_current.pdf}
 \vspace{-2pt}
 \caption{Recorded Map2 trajectories from $(0,0,1.6)$~m to
-$(0,140,1.6)$~m over the complete UE Map2 truth map, voxelized at 0.3~m
-with one-cell display dilation.  Color denotes executed speed; circles, stars,
+$(0,140,1.6)$~m over the point-cloud reconstruction recorded in the latest
+ScaleNav batch, voxelized at 0.3~m with one-cell display dilation.  Colored
+curves denote executed trajectories and gray marks denote reconstructed scene
+geometry; circles, stars,
 and crosses mark starts, completed goals, and incomplete collision endpoints,
 respectively.}
 \label{fig:map2_speed_trajectories}
 \end{figure}
 
-Table~\ref{tab:single_run_validation} reports ten trials per setting; the
-5~m/s SUPER row is a separate batch.
+Table~\ref{tab:single_run_validation} reports the latest ten-trial batch for
+each method on the current scene.
 
-\begin{table}[t]
+\begin{table*}[t]
 \caption{Ten-Trial Map2 Closed-Loop Comparison Using Conventional Flight Metrics}
 \label{tab:single_run_validation}
 \centering
 \small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lccccccc}
+\resizebox{0.98\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
 \toprule
-Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
+Method & Success (\%) & Collision (\%) & Timeout (\%) & $L_{\rm succ}$ (m) & $L_{\rm obs}$ (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
 \midrule
-YOPO            & 100 & 0 & 0 & $158.678\pm0.169$ & $42.210\pm0.128$ & $3.759\pm0.009$ & $5.913\pm0.060$ \\
-EGO-Planner     & 0   & 100 & 0 & \blank & \blank & \blank & \blank \\
-SUPER & 0 & 80 & 20 & \blank & \blank & \blank & \blank \\
-SUPER (5 m/s) & 10 & 60 & 30 & 144.658 & 30.614 & 4.725 & 5.082 \\
-ScaleNav (ours) & 100 & 0 & 0 & $196.850\pm6.843$ & $47.679\pm2.573$ & $4.134\pm0.141$ & $5.476\pm0.117$ \\
+YOPO-Simple     & 0   & 100 & 0  & \blank & $129.79\pm0.58$ & \blank & \blank & \blank \\
+EGO-Planner     & 0   & 100 & 0  & \blank & $73.24\pm0.69$ & \blank & \blank & \blank \\
+SUPER           & 0   & 100 & 0  & \blank & $47.07\pm28.27$ & \blank & \blank & \blank \\
+ScaleNav (YOPO) & 100 & 0   & 0  & $196.85\pm6.84$ & \blank & $47.68\pm2.57$ & $4.13\pm0.14$ & $5.48\pm0.12$ \\
+ScaleNav+EGO    & 0   & 90  & 10 & \blank & $26.57\pm17.61$ & \blank & \blank & \blank \\
+ScaleNav+SUPER  & 50  & 40  & 10 & $205.16\pm14.52$ & $50.08\pm37.17$ & $41.42\pm3.40$ & $4.96\pm0.13$ & $5.96\pm0.02$ \\
 \bottomrule
 \end{tabular}
 }
-\end{table}
+\end{table*}
 
-Outcome rates use all trials; continuous entries are mean $\pm$ standard
-deviation over successes.  SUPER at 5~m/s succeeded once, so it has no
-dispersion estimate; one startup failure was replaced.  The latest ScaleNav
-batch completed all ten trials with the deployed semantic query.  All
-closed-loop ScaleNav rows
-use the deployed execution variant---frontier-conditioned YOPO with
-ordered-bubble MPC refinement---not the corridor-trained network evaluated
-offline below.
+Outcome rates use all ten valid trials.  $L_{\rm succ}$, completion time, and
+speed are mean $\pm$ sample standard deviation over successful flights;
+$L_{\rm obs}$ is the corresponding statistic over collision/timeout-truncated
+flights and is not a completion path.  ScaleNav+SUPER completes 5/10 trials,
+whereas directly feeding the same rolling route goals to EGO completes none.
+The ScaleNav (YOPO) row uses the deployed frontier-conditioned YOPO with
+ordered-bubble MPC refinement, not the corridor-trained network evaluated
+offline below.  The two added rows replace this executor with EGO-Planner or
+SUPER while retaining the ScaleNav semantic topological route layer.
 
 \subsubsection{Language-Condition Comparison}
 Ten paired language trials hold geometry, state, weights, and seed fixed;
@@ -721,14 +733,14 @@ Avoid power lines & \blank & \blank & \blank & \blank & \blank & \blank & \blank
 \end{table}
 
 \subsubsection{Component Ablation}
-Table~\ref{tab:component_ablation} retains available independent 6~m/s batches
-and pending matched ablations.  They are condition checks, not paired causal
-estimates; ``no target'' keeps PEARL active with an absent queried object.
+Table~\ref{tab:component_ablation} reports the current-scene full-system batch
+and reserves the seed-matched ablations.  Superseded-scene batches are retained
+in the data archive but are not compared against the current scene.
 
 \begin{table}[t]
-\caption{Available ScaleNav Variant Batches (Ten Trials Each). SE: semantic front end;
+\caption{Current-Scene ScaleNav Ablation Status (Ten Trials Each). SE: semantic front end;
 FF: far-field semantic nodes; RM: world-frame route memory; WC: ordered
-witness corridor.  The no-target condition retains the semantic front end.}
+witness corridor.}
 \label{tab:component_ablation}
 \centering
 \small
@@ -741,8 +753,8 @@ Variant & SE & FF & RM & WC & Succ. (\%)$\uparrow$ & Coll. (\%)$\downarrow$ & T/
 \midrule
 \textbf{Full ScaleNav} & \checkmark & \checkmark & \checkmark & \checkmark & 100 & 0 & 0 & 196.850$\pm$6.843 & 47.679$\pm$2.573 & 4.134$\pm$0.141 & 5.476$\pm$0.117 \\
 \midrule
-w/o semantic front end  & $\times$   & $\times$   & \checkmark & \checkmark & 70 & 30 & 0 & 156.510$\pm$3.339 & 33.620$\pm$0.856 & 4.656$\pm$0.071 & 5.445$\pm$0.121 \\
-No task-relevant semantics & \checkmark & \checkmark & \checkmark & \checkmark & 80 & 20 & 0 & 154.205$\pm$1.591 & 49.981$\pm$1.247 & 3.087$\pm$0.093 & 4.491$\pm$0.290 \\
+w/o semantic front end  & $\times$   & $\times$   & \checkmark & \checkmark & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
+No task-relevant semantics & \checkmark & \checkmark & \checkmark & \checkmark & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
 w/o far-field nodes     & \checkmark & $\times$   & \checkmark & \checkmark & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
 w/o route memory        & \checkmark & \checkmark & $\times$   & \checkmark & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
 w/o witness corridor    & \checkmark & \checkmark & \checkmark & $\times$   & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
@@ -751,9 +763,8 @@ w/o witness corridor    & \checkmark & \checkmark & \checkmark & $\times$   & \b
 }
 \end{table}
 
-The no-semantic batch succeeded in seven trials; earlier batches succeeded in
-eight and ten.  This repeat spread precludes a causal semantic claim before
-the seed-matched reruns.
+The current-scene ablations remain pending; no causal semantic claim is made
+from earlier-scene batches.
 
 Table~\ref{tab:online_profile} profiles a separate ten-trial batch.  Rates are
 per-trial mean $\pm$ standard deviation; event latencies pool trials.  A* is a

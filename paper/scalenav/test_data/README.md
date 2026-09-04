@@ -19,20 +19,22 @@ error at most 0.5 m and settling speed at most 0.3 m/s. The mission timeout is
 | `closed_loop/yopo_simple_20260903_085045` | `run_20260903_085045_1991187` | Original YOPO-Simple, direct mission-goal input | 10 collision |
 | `closed_loop/ego_20260903_120321` | `run_20260903_120321_2832657` | EGO-Planner, no low-altitude early termination | 10 collision |
 | `closed_loop/super_20260902_220642` | `run_20260902_220642_4189191` | SUPER | 10 collision |
+| `closed_loop/scalenav_ego_20260904_110038` | `run_20260904_110038_2376695` | ScaleNav semantic route layer with EGO execution | 9 collision, 1 timeout |
+| `closed_loop/scalenav_super_20260904_110656` | `run_20260904_110656_2391835` | ScaleNav semantic route layer with SUPER execution | 5 success, 4 collision, 1 timeout |
 
 Each directory contains:
 
 - `summary.csv`: one row per trial, copied from the automated test output.
 - `config.json`: mission and test-run configuration.
 
-`aggregate_metrics.csv` is derived from these seven `summary.csv` files.
+`aggregate_metrics.csv` is regenerated from the current-scene `summary.csv`
+files with `scalenav_ws/src/aut_test/aggregate_results.py`.
 Completion time, path length, average speed, and maximum speed in the
 `successful_*` columns use successful trials only. Early collision duration
 and path must not be interpreted as completion performance; they are retained
-separately in `failure_observed_*` columns for diagnostic use.
-The latest analyzed ScaleNav batch has heterogeneous failure types (one early
-collision and one 90 s timeout), so its combined failure-observation columns
-are intentionally left blank; use its per-trial `summary.csv` instead.
+separately, with mean and sample standard deviation, in the
+`failure_observed_*` columns for diagnostic use. The paper denotes the latter
+path as $L_{obs}$.
 
 The generic automated-test configuration records semantic fields for every
 stack. They are not applicable to YOPO-Simple, EGO-Planner, or SUPER; those

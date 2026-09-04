@@ -34,7 +34,10 @@ def load_index(session):
     graphs = []
     with (session / "index.jsonl").open("r", encoding="utf-8") as stream:
         for line in stream:
-            record = json.loads(line)
+            line = (line.replace(":-inf", ":-Infinity")
+                    .replace(":inf", ":Infinity")
+                    .replace(":nan", ":NaN"))
+            record = json.loads(line, parse_constant=lambda value: float(value))
             kind = record.get("kind")
             if kind == "odom":
                 odom.append((record["stamp_ns"], record["data"]["position"],

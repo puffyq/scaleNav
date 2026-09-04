@@ -1,0 +1,29 @@
+{
+  "stack": "scalenav_super",
+  "count": 10,
+  "timeout_s": 90.0,
+  "startup_timeout_s": 60.0,
+  "max_startup_failures": 3,
+  "cooldown_s": 3.0,
+  "start": [
+    0.0,
+    0.0,
+    1.6
+  ],
+  "goal": [
+    0.0,
+    140.0,
+    1.6
+  ],
+  "start_tolerance_m": 0.5,
+  "position_tolerance_m": 0.5,
+  "speed_tolerance_mps": 0.3,
+  "airsim": "127.0.0.1:41451",
+  "semantic": true,
+  "prompt": "blocks, wall",
+  "semantic_cost_weight": 2.0,
+  "semantic_route_influence_m": 5.0,
+  "semantic_point_influence_m": 5.0,
+  "log_root": "/mnt/code/lab/yopo/OpenSeek/log_scalenav",
+  "results_root": "/mnt/code/lab/yopo/OpenSeek/scalenav_ws/src/aut_test/results"
+}

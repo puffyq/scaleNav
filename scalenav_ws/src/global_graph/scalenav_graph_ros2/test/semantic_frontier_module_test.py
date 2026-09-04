@@ -20,7 +20,9 @@ PATCH_WIDTH = 2
 MISSION_DISTANCE_WEIGHT = 2.0
 VIRTUAL_DEPTH_M = 35.0
 MEMORY_S = 1.5
-SEMANTIC_SCORE_WEIGHT = 1.0
+SEMANTIC_DETOUR_BUDGET_M = 45.0
+SEMANTIC_FRAME_BUDGET_M = 12.0
+SEMANTIC_NOISE_FLOOR = 0.08
 HORIZONTAL_ANGLES_DEG = (-45.0, -22.5, 0.0, 22.5, 45.0)
 
 
@@ -80,6 +82,9 @@ def make_frame(index: int, time_s: float, odom: dict[str, float], goal: tuple[fl
     report_heatmap = [[value if finite(value) else None for value in row] for row in heatmap]
     candidates: list[dict[str, Any]] = []
     mission_span = distance((odom["x"], odom["y"]), goal)
+    frame_scores = [float(value) for value in means[1] if value is not None]
+    frame_min = min(frame_scores) if frame_scores else math.inf
+    frame_range = max(frame_scores) - frame_min if frame_scores else 0.0
     for column in range(PATCH_COLS):
         score = means[1][column]
         depth_value = depths[column] if column < len(depths) else None
@@ -88,9 +93,12 @@ def make_frame(index: int, time_s: float, odom: dict[str, float], goal: tuple[fl
         point = project_candidate(odom, depth_used, column)
         goal_distance = distance(point, goal)
         route_cost = depth_used + 0.15 * abs(point[0] - odom["x"])
-        semantic_cost = float(score) * SEMANTIC_SCORE_WEIGHT if usable else math.inf
-        objective = ((route_cost + MISSION_DISTANCE_WEIGHT * goal_distance) /
-                     max(1.0, mission_span)) + semantic_cost
+        risk_regret = ((float(score) - frame_min) /
+                       max(frame_range, SEMANTIC_NOISE_FLOOR)) if usable else math.inf
+        semantic_cost = (SEMANTIC_FRAME_BUDGET_M * frame_min +
+                         SEMANTIC_DETOUR_BUDGET_M * risk_regret) if usable else math.inf
+        objective = ((route_cost + MISSION_DISTANCE_WEIGHT * goal_distance + semantic_cost) /
+                     max(1.0, mission_span))
         candidates.append({
             "column": column,
             "angle_deg": HORIZONTAL_ANGLES_DEG[column],
@@ -106,6 +114,10 @@ def make_frame(index: int, time_s: float, odom: dict[str, float], goal: tuple[fl
             "risk": "continuous" if usable else "unavailable",
             "goal_distance_m": round(goal_distance, 4),
             "route_cost": round(route_cost, 4),
+            "frame_min_risk": round(frame_min, 6) if math.isfinite(frame_min) else None,
+            "frame_risk_range": round(frame_range, 6),
+            "risk_regret": round(risk_regret, 6) if math.isfinite(risk_regret) else None,
+            "semantic_cost_m": round(semantic_cost, 4) if math.isfinite(semantic_cost) else None,
             "objective": round(objective, 6) if math.isfinite(objective) else None,
         })
     usable_candidates = [candidate for candidate in candidates if candidate["usable"]]
@@ -136,8 +148,8 @@ def rebase_candidate(candidate: dict[str, Any], odom: dict[str, float],
     rebased["route_cost"] = round(route_cost, 4)
     rebased["goal_distance_m"] = round(goal_distance, 4)
     rebased["objective"] = round(
-        (route_cost + MISSION_DISTANCE_WEIGHT * goal_distance) / max(1.0, mission_span)
-        + float(candidate["score"]) * SEMANTIC_SCORE_WEIGHT, 6)
+        (route_cost + MISSION_DISTANCE_WEIGHT * goal_distance +
+         float(candidate["semantic_cost_m"])) / max(1.0, mission_span), 6)
     rebased["retained_rebased"] = True
     return rebased
 
@@ -161,7 +173,7 @@ def select_frames(frames: list[dict[str, Any]]) -> None:
             active.append(candidate)
         if active:
             selected = min(active, key=lambda item: (item["objective"], item["column"]))
-            reason = "continuous_semantic_route_objective"
+            reason = "equivalent_metre_semantic_route_objective"
         if selected is None:
             reason = "ordinary_verified_fallback"
             selected = {
@@ -224,10 +236,10 @@ def simulate() -> dict[str, Any]:
         "depth_never_replaces_virtual_candidate": all(
             candidate["depth_source"] == "virtual"
             for frame in frames for candidate in frame["candidates"]),
-        "frame_0_uses_continuous_objective": frames[0]["selected_reason"] == "continuous_semantic_route_objective",
+        "frame_0_uses_continuous_objective": frames[0]["selected_reason"] == "equivalent_metre_semantic_route_objective",
         "frame_2_high_current_can_use_retained_frame": frames[2]["selected"].get("source_frame") in (0, 1),
         "retained_candidate_rebased_from_current_odom": frames[2]["selected"].get("retained_rebased", False),
-        "frame_3_uses_objective_without_threshold": frames[3]["selected_reason"] == "continuous_semantic_route_objective",
+        "frame_3_uses_objective_without_threshold": frames[3]["selected_reason"] == "equivalent_metre_semantic_route_objective",
         "ordinary_only_fallback": frames[5]["selected_reason"] == "ordinary_verified_fallback",
         "hot_pixel_does_not_define_patch_mean": abs(frames[0]["patch_means"][1][2] - 0.325) < 1e-6,
     }
@@ -239,6 +251,9 @@ def simulate() -> dict[str, Any]:
             "mission_distance_weight": MISSION_DISTANCE_WEIGHT,
             "virtual_depth_m": VIRTUAL_DEPTH_M,
             "semantic_memory_s": MEMORY_S,
+            "semantic_detour_budget_m": SEMANTIC_DETOUR_BUDGET_M,
+            "semantic_frame_budget_m": SEMANTIC_FRAME_BUDGET_M,
+            "semantic_noise_floor": SEMANTIC_NOISE_FLOOR,
             "horizontal_angles_deg": HORIZONTAL_ANGLES_DEG,
         },
         "goal": {"x": goal[0], "y": goal[1]},
@@ -268,7 +283,7 @@ pre{white-space:pre-wrap;background:#0d1728;border:1px solid var(--line);padding
 <div id="controls" class="controls"></div><section class="grid"><article class="panel"><h2>Heatmap and projection input</h2><div id="facts" class="facts"></div><div class="rowlabel">Upper row (diagnostic only)</div><div id="heat-upper" class="heat"></div><div class="rowlabel">Middle row (5 planar candidates)</div><div id="heat-middle" class="heat"></div><div class="rowlabel">Lower row (diagnostic only)</div><div id="heat-lower" class="heat"></div></article><article class="panel"><h2>World-frame output</h2><svg id="scene" viewBox="0 0 700 460" role="img" aria-label="Projected semantic candidates and selected frontier"></svg></article><article class="panel wide"><h2>Candidate nodes and frontier choice</h2><div id="decision"></div></article><article class="panel wide"><h2>Module checks</h2><div id="checks" class="check"></div><pre id="json"></pre></article></section></main><script>
 const DATA=__DATA__;let current=0;const $=id=>document.getElementById(id);const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function color(v){if(v===null||!Number.isFinite(v))return '#53647d';let t=Math.max(0,Math.min(1,v));return `hsl(${145-145*t} 72% ${72-28*t}%)`}
-function render(){const f=DATA.frames[current];$('controls').innerHTML=DATA.frames.map((x,i)=>`<button class="${i===current?'active':''}" onclick="current=${i};render()">Frame ${i}<br><small>${x.time_s.toFixed(1)} s</small></button>`).join('');const selected=f.selected||{};$('facts').innerHTML=`<div class="fact"><b>${f.mode}</b><small>frame mode</small></div><div class="fact"><b>${f.odom.x.toFixed(1)}, ${f.odom.y.toFixed(1)}</b><small>odom (m)</small></div><div class="fact"><b>${selected.column===null?'ordinary':`col ${selected.column}`}</b><small>frontier goal</small></div>`;['upper','middle','lower'].forEach((name,row)=>{$('heat-'+name).innerHTML=f.patch_means[row].map((v,c)=>`<div class="cell" style="background:${color(v)}"><small>col ${c}</small><span>${v===null?'n/a':v.toFixed(3)}</span></div>`).join('')});renderScene(f);$('decision').innerHTML=`<div style="margin-bottom:10px"><b>Decision:</b> ${esc(f.selected_reason)} &nbsp; <b>goal:</b> ${selected.x===undefined?'n/a':`${selected.x.toFixed(2)}, ${selected.y.toFixed(2)}`}</div><table><thead><tr><th>col</th><th>angle</th><th>mean</th><th>depth</th><th>node</th><th>risk</th><th>route cost</th><th>goal dist</th><th>objective</th></tr></thead><tbody>${f.candidates.map(c=>`<tr><td>${c.column}</td><td>${c.angle_deg.toFixed(1)} deg</td><td>${c.score===null?'n/a':c.score.toFixed(3)}</td><td>${c.depth_m.toFixed(1)} (${c.depth_source})</td><td>(${c.x.toFixed(2)}, ${c.y.toFixed(2)})</td><td class="${c.risk}">${c.risk}</td><td>${c.route_cost.toFixed(2)}</td><td>${c.goal_distance_m.toFixed(2)}</td><td>${c.objective==null?'n/a':c.objective.toFixed(4)}</td></tr>`).join('')}</tbody></table>`;$('checks').innerHTML=Object.entries(DATA.checks).map(([k,v])=>`<span class="${v?'pass':'fail'}">${v?'PASS':'FAIL'} ${esc(k)}</span>`).join('');$('json').textContent=JSON.stringify(f,null,2)}
+function render(){const f=DATA.frames[current];$('controls').innerHTML=DATA.frames.map((x,i)=>`<button class="${i===current?'active':''}" onclick="current=${i};render()">Frame ${i}<br><small>${x.time_s.toFixed(1)} s</small></button>`).join('');const selected=f.selected||{};$('facts').innerHTML=`<div class="fact"><b>${f.mode}</b><small>frame mode</small></div><div class="fact"><b>${f.odom.x.toFixed(1)}, ${f.odom.y.toFixed(1)}</b><small>odom (m)</small></div><div class="fact"><b>${selected.column===null?'ordinary':`col ${selected.column}`}</b><small>frontier goal</small></div>`;['upper','middle','lower'].forEach((name,row)=>{$('heat-'+name).innerHTML=f.patch_means[row].map((v,c)=>`<div class="cell" style="background:${color(v)}"><small>col ${c}</small><span>${v===null?'n/a':v.toFixed(3)}</span></div>`).join('')});renderScene(f);$('decision').innerHTML=`<div style="margin-bottom:10px"><b>Decision:</b> ${esc(f.selected_reason)} &nbsp; <b>goal:</b> ${selected.x===undefined?'n/a':`${selected.x.toFixed(2)}, ${selected.y.toFixed(2)}`}</div><table><thead><tr><th>col</th><th>angle</th><th>mean</th><th>frame min/range</th><th>regret</th><th>semantic m</th><th>route cost</th><th>goal dist</th><th>objective</th></tr></thead><tbody>${f.candidates.map(c=>`<tr><td>${c.column}</td><td>${c.angle_deg.toFixed(1)} deg</td><td>${c.score===null?'n/a':c.score.toFixed(3)}</td><td>${c.frame_min_risk==null?'n/a':c.frame_min_risk.toFixed(3)} / ${c.frame_risk_range.toFixed(3)}</td><td>${c.risk_regret==null?'n/a':c.risk_regret.toFixed(3)}</td><td>${c.semantic_cost_m==null?'n/a':c.semantic_cost_m.toFixed(2)}</td><td>${c.route_cost.toFixed(2)}</td><td>${c.goal_distance_m.toFixed(2)}</td><td>${c.objective==null?'n/a':c.objective.toFixed(4)}</td></tr>`).join('')}</tbody></table>`;$('checks').innerHTML=Object.entries(DATA.checks).map(([k,v])=>`<span class="${v?'pass':'fail'}">${v?'PASS':'FAIL'} ${esc(k)}</span>`).join('');$('json').textContent=JSON.stringify(f,null,2)}
 function renderScene(f){const all=f.candidates.filter(c=>Number.isFinite(c.x));const pts=all.concat([{x:f.goal.x,y:f.goal.y}]);const minX=Math.min(...pts.map(p=>p.x),f.odom.x)-5,maxX=Math.max(...pts.map(p=>p.x),f.odom.x)+5,minY=Math.min(...pts.map(p=>p.y),f.odom.y)-5,maxY=Math.max(...pts.map(p=>p.y),f.odom.y)+5;const sx=x=>40+(x-minX)/(maxX-minX)*620,sy=y=>430-(y-minY)/(maxY-minY)*390;let out='';for(let i=0;i<6;i++){const x=40+i*124;out+=`<line class="axis" x1="${x}" y1="40" x2="${x}" y2="430"/>`}out+=`<circle class="odom" cx="${sx(f.odom.x)}" cy="${sy(f.odom.y)}" r="8"/><text x="${sx(f.odom.x)+10}" y="${sy(f.odom.y)-10}" fill="#53c7e8">odom</text><circle class="mission" cx="${sx(f.goal.x)}" cy="${sy(f.goal.y)}" r="8"/><text x="${sx(f.goal.x)+10}" y="${sy(f.goal.y)-10}" fill="#f5c451">mission goal</text>`;if(f.selected&&f.selected.column!==null){out+=`<line class="route" x1="${sx(f.odom.x)}" y1="${sy(f.odom.y)}" x2="${sx(f.selected.x)}" y2="${sy(f.selected.y)}"/>`}for(const c of all){const selected=f.selected&&c.column===f.selected.column;const fill=c.risk==='low'?'#42d392':c.risk==='high'?'#ff6b6b':'#53647d';out+=`<circle class="candidate ${selected?'selected':''}" cx="${sx(c.x)}" cy="${sy(c.y)}" r="${selected?10:7}" fill="${fill}"/><text x="${sx(c.x)+9}" y="${sy(c.y)+4}" fill="#dfe8f5" font-size="12">c${c.column}</text>`} $('scene').innerHTML=out}
 render();
 </script></body></html>""".replace("__DATA__", payload)
@@ -493,8 +508,20 @@ def offline_astar(graph: dict[str, Any], odom: dict[str, Any], candidates: list[
         path.reverse(); return path, g[target], synthetic_used
     paths = []
     mission_span = max(1.0, math.hypot(nodes[start][0] - goal[0], nodes[start][1] - goal[1]))
+    frame_scores = [float(candidate["score"]) for candidate in candidates
+                    if finite(candidate.get("score"))]
+    frame_min = min(frame_scores) if frame_scores else math.inf
+    frame_range = max(frame_scores) - frame_min if frame_scores else 0.0
     for candidate in candidates:
         point = (float(candidate["x"]), float(candidate["y"]))
+        if not finite(candidate.get("score")):
+            paths.append({"column": candidate["column"], "points": [],
+                          "route_cost": math.inf, "goal_distance": math.inf,
+                          "frame_min_risk": frame_min, "frame_risk_range": frame_range,
+                          "risk_regret": math.inf, "semantic_cost_m": math.inf,
+                          "objective": math.inf, "synthetic_connection": False,
+                          "risk": candidate.get("risk")})
+            continue
         candidate_idx = node_index(point)
         nearest = min(range(len(skeleton)), key=lambda i: math.hypot(nodes[i][0] - point[0], nodes[i][1] - point[1]))
         add_edge(candidate_idx, nearest, True)
@@ -502,17 +529,25 @@ def offline_astar(graph: dict[str, Any], odom: dict[str, Any], candidates: list[
         adjacency.setdefault(candidate_idx, []).append((nearest, math.hypot(point[0] - nodes[nearest][0], point[1] - nodes[nearest][1]), True))
         adjacency.setdefault(nearest, []).append((candidate_idx, math.hypot(point[0] - nodes[nearest][0], point[1] - nodes[nearest][1]), True))
         path, route_cost, synthetic = search(candidate_idx)
-        semantic_cost = float(candidate.get("score") or 0.0) * SEMANTIC_SCORE_WEIGHT
-        objective = ((route_cost + 2.0 * math.hypot(point[0] - goal[0], point[1] - goal[1])) / mission_span) + semantic_cost
+        candidate_score = float(candidate.get("score"))
+        risk_regret = ((candidate_score - frame_min) /
+                       max(frame_range, SEMANTIC_NOISE_FLOOR))
+        semantic_cost = (SEMANTIC_FRAME_BUDGET_M * frame_min +
+                         SEMANTIC_DETOUR_BUDGET_M * risk_regret)
+        objective = ((route_cost + MISSION_DISTANCE_WEIGHT *
+                      math.hypot(point[0] - goal[0], point[1] - goal[1]) +
+                      semantic_cost) / mission_span)
         paths.append({"column": candidate["column"], "points": [[nodes[i][0], nodes[i][1]] for i in path],
                       "route_cost": route_cost, "goal_distance": math.hypot(point[0] - goal[0], point[1] - goal[1]),
-                      "semantic_cost": semantic_cost, "objective": objective, "synthetic_connection": synthetic,
+                      "frame_min_risk": frame_min, "frame_risk_range": frame_range,
+                      "risk_regret": risk_regret, "semantic_cost_m": semantic_cost,
+                      "objective": objective, "synthetic_connection": synthetic,
                       "risk": candidate.get("risk")})
     eligible = [p for p in paths if math.isfinite(p["objective"])]
     selected = min(eligible, key=lambda p: (p["objective"], p["column"])) if eligible else None
     return {"selected_column": selected["column"] if selected else None, "paths": paths,
             "selected_path": selected["points"] if selected else [],
-            "selection_reason": "lowest_continuous_semantic_route_objective",
+            "selection_reason": "lowest_equivalent_metre_semantic_route_objective",
             "status": "ok" if selected else "no_path"}
 
 
@@ -670,7 +705,10 @@ def build_log_result(session: Path) -> dict[str, Any]:
         last_progress < replan_ratio)
     return {"session": session.name, "goal": {"x": goal[0], "y": goal[1], "z": goal[2]},
             "config": {"patch_grid": "3x5", "planar_row": "middle row (5 columns)",
-                       "patch_aggregation": "finite pixel mean", "semantic_score_weight": SEMANTIC_SCORE_WEIGHT,
+                       "patch_aggregation": "finite pixel mean",
+                       "semantic_detour_budget_m": SEMANTIC_DETOUR_BUDGET_M,
+                       "semantic_frame_budget_m": SEMANTIC_FRAME_BUDGET_M,
+                       "semantic_noise_floor": SEMANTIC_NOISE_FLOOR,
                        "virtual_range_m": 35.0, "semantic_memory_s": 1.5},
             "diagnosis": {
                 "measured_surface_selected_as_semantic_frontier_frames": measured_frontier_frames,
@@ -730,7 +768,7 @@ function stopAutoplay(){if(autoplayTimer){clearInterval(autoplayTimer);autoplayT
 function startAutoplay(){stopAutoplay();if(!autoplay)return;autoplayTimer=setInterval(()=>{if(current>=DATA.frames.length-1){autoplay=false;stopAutoplay();return}current++;render()},900)}
 function renderTimeline(){const events=DATA.route_events||[];$('timeline').innerHTML=events.map((e,i)=>`<button class="event ${e.severity} ${e.frame_index===current?'current':''}" onclick="current=${e.frame_index};render()"><b>${i+1}. ${e.time_s.toFixed(2)} s · ${esc(e.reason)}</b><br>${esc(e.label)}<br><small>frontier ${e.frontier_id||'-'} · rejected ${e.semantic_edges_rejected}</small></button>`).join('')}
 function renderDiagnosis(f){const p=f.planner||{},run=DATA.route_diagnosis||{},progress=Number(p.frontier_progress_t||0),ratio=Number(p.frontier_replan_ratio||run.replan_ratio||0.4),held=p.route_decision==='ROUTE_HELD'&&!p.searched,below=held&&progress<ratio;const event=(DATA.route_events||[]).find(e=>e.frame_index===f.index);let headline,detail;if(event){headline=event.label;detail=`本帧 route_decision=${event.decision}，searched=${event.searched}，frontier=${event.frontier_id||'-'}。`}else if(below){headline='旧路线被继续持有，未运行 A*';detail=`progress=${(progress*100).toFixed(1)}%，尚未达到 ${(ratio*100).toFixed(0)}% 触发阈值。拓扑图即使已经出现绕路，只要旧 frontier 仍被判为可达，当前逻辑也不会搜索新路径。`}else{headline='当前帧继续执行已接收路线';detail=`route_decision=${p.route_decision||'-'}，searched=${!!p.searched}，progress=${(progress*100).toFixed(1)}%。`}const alert=below&&f.index===DATA.frames.length-1?'diagnostic-alert':'';$('diagnosis').innerHTML=`<div class="${alert}"><p><b>${esc(headline)}</b></p><p>${esc(detail)}</p></div><p class="muted">全程：${run.progress_replans??0} 次 progress 重规划，${run.route_unreachable_replans??0} 次 endpoint 不可达重规划，${run.semantic_edge_route_clears??0} 次语义末边拒绝并清空路线。末帧 searched=${run.final_searched}，progress=${fmt((run.final_progress||0)*100,1)}%，speed=${fmt(run.final_speed_mps)} m/s。</p>`}
-function renderCandidateDecision(f){const paths=new Map((f.recomputed_astar?.paths||[]).map(p=>[p.column,p])),selected=f.recomputed_astar?.selected_column;$('decision').innerHTML=`<p><b>Current-contract winner:</b> ${selected==null?'none':'V'+selected} · <b>historical online endpoint:</b> ${f.selected_frontier?f.selected_frontier.slice(0,2).map(v=>fmt(v)).join(', '):'none'} · <b>online reported column:</b> ${f.planner?.selected_semantic_column??'-'}</p><table><thead><tr><th>candidate</th><th>patch mean</th><th>A* route cost</th><th>mission distance</th><th>semantic cost</th><th>normalized objective</th><th>status</th></tr></thead><tbody>${f.candidates.map(c=>{const p=paths.get(c.column)||{};return `<tr><td>${c.column===selected?'SELECTED ':''}V${c.column}</td><td>${fmt(c.score,4)}</td><td>${fmt(p.route_cost)}</td><td>${fmt(p.goal_distance)}</td><td>${fmt(p.semantic_cost,4)}</td><td>${fmt(p.objective,5)}</td><td>${p.synthetic_connection?'diagnostic link':'logged graph link'}</td></tr>`}).join('')}</tbody></table>`}
+function renderCandidateDecision(f){const paths=new Map((f.recomputed_astar?.paths||[]).map(p=>[p.column,p])),selected=f.recomputed_astar?.selected_column;$('decision').innerHTML=`<p><b>Current-contract winner:</b> ${selected==null?'none':'V'+selected} · <b>historical online endpoint:</b> ${f.selected_frontier?f.selected_frontier.slice(0,2).map(v=>fmt(v)).join(', '):'none'} · <b>online reported column:</b> ${f.planner?.selected_semantic_column??'-'} · <b>persistence:</b> ${f.planner?.semantic_opportunity_pending_frames??'-'} frames</p><table><thead><tr><th>candidate</th><th>patch mean</th><th>frame min/range</th><th>risk regret</th><th>A* route cost</th><th>mission distance</th><th>semantic cost (m)</th><th>normalized objective</th><th>status</th></tr></thead><tbody>${f.candidates.map(c=>{const p=paths.get(c.column)||{};return `<tr><td>${c.column===selected?'SELECTED ':''}V${c.column}</td><td>${fmt(c.score,4)}</td><td>${fmt(p.frame_min_risk,4)} / ${fmt(p.frame_risk_range,4)}</td><td>${fmt(p.risk_regret,4)}</td><td>${fmt(p.route_cost)}</td><td>${fmt(p.goal_distance)}</td><td>${fmt(p.semantic_cost_m,2)}</td><td>${fmt(p.objective,5)}</td><td>${p.synthetic_connection?'diagnostic link':'logged graph link'}</td></tr>`}).join('')}</tbody></table>`}
 const rendered=render;render=function(){rendered();const frame=DATA.frames[current];highlightChoice(frame);renderTimeline();renderDiagnosis(frame);renderCandidateDecision(frame);const old=$('autoplay');if(old)old.remove();const button=document.createElement('button');button.id='autoplay';button.textContent=autoplay?'暂停自动播放':'继续自动播放';button.onclick=()=>{autoplay=!autoplay;if(autoplay)startAutoplay();else stopAutoplay();button.textContent=autoplay?'暂停自动播放':'继续自动播放'};$('controls').prepend(button);if(autoplay&&!autoplayTimer)startAutoplay()};render();
 </script></body></html>'''.replace('__DATA__', payload)
 
