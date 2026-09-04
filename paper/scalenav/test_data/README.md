@@ -7,8 +7,10 @@ files are copied without changing their contents.
 
 All selected batches contain ten valid trial records for the Map2 mission
 from `(0, 0, 1.6)` m to `(0, 140, 1.6)` m. Goal acceptance requires position
-error at most 0.5 m and settling speed at most 0.3 m/s. The mission timeout is
-90 s.
+error at most 0.5 m and settling speed at most 0.3 m/s. Most archived batches
+use a 90-s mission timeout. The latest ScaleNav+EGO and ScaleNav+SUPER batches
+use a 600-s mission timeout plus a no-progress termination when displacement
+remains below 0.5 m for 60 s; none reaches the 600-s limit.
 
 | Directory | Source run | Condition | Outcomes |
 | --- | --- | --- | --- |
@@ -20,6 +22,8 @@ error at most 0.5 m and settling speed at most 0.3 m/s. The mission timeout is
 | `closed_loop/yopo_simple_20260903_085045` | `run_20260903_085045_1991187` | Original YOPO-Simple, direct mission-goal input | 10 collision |
 | `closed_loop/ego_20260903_120321` | `run_20260903_120321_2832657` | EGO-Planner, no low-altitude early termination | 10 collision |
 | `closed_loop/super_20260902_220642` | `run_20260902_220642_4189191` | SUPER | 10 collision |
+| `closed_loop/scalenav_ego_20260904_170548` | `run_20260904_170548_2795763` | ScaleNav graph route layer with EGO execution; 600-s/60-s no-progress protocol | 5 collision, 5 no-progress timeout |
+| `closed_loop/scalenav_super_20260904_171954` | `run_20260904_171954_2826552` | ScaleNav graph route layer with SUPER execution; 600-s/60-s no-progress protocol | 1 success, 7 collision, 2 no-progress timeout |
 | `closed_loop/scalenav_ego_20260904_110038` | `run_20260904_110038_2376695` | ScaleNav semantic route layer with EGO execution | 9 collision, 1 timeout |
 | `closed_loop/scalenav_super_20260904_110656` | `run_20260904_110656_2391835` | ScaleNav semantic route layer with SUPER execution | 5 success, 4 collision, 1 timeout |
 

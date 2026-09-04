@@ -21,7 +21,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 POINTCLOUD_ANALYSIS = (
     REPO_ROOT / "scalenav_ws/docs/test_reports/analyze_round_trip_density.py"
 )
-DEFAULT_TRUTH_MAP = Path(__file__).resolve().parent / "pics/map2_ground_truth.ply"
+DEFAULT_TRUTH_MAP = (
+    Path(__file__).resolve().parent / "pics/map2_ground_truth_airsim_20260904.ply"
+)
 
 
 def load_ply_xyz(path: Path) -> np.ndarray:
@@ -49,10 +51,10 @@ def load_ply_xyz(path: Path) -> np.ndarray:
 def load_truth_voxel_map(
     path: Path,
     voxel_size: float,
-    z_min: float = 0.3,
-    z_max: float = 3.2,
+    z_min: float = 0.0,
+    z_max: float = 40.0,
 ):
-    """Build a complete Map2 top view from the static UE truth cloud."""
+    """Build a solid top-view voxel footprint from the AirSim truth cloud."""
     points = load_ply_xyz(path)
     points = points[(points[:, 2] >= z_min) & (points[:, 2] <= z_max)]
     if not len(points):
@@ -250,6 +252,38 @@ def dilate_voxels(image: np.ndarray, radius_cells: int) -> np.ndarray:
     return dilated
 
 
+def fill_voxel_footprints(image: np.ndarray) -> np.ndarray:
+    """Fill enclosed holes so each projected obstacle is an opaque footprint."""
+    occupied = image.astype(bool)
+    if not np.any(occupied):
+        return image
+    empty = ~occupied
+    reachable = np.zeros_like(empty)
+    rows, columns = empty.shape
+    frontier = [(row, column) for row, column in np.argwhere(
+        empty & ((np.indices(empty.shape)[0] == 0)
+                 | (np.indices(empty.shape)[0] == rows - 1)
+                 | (np.indices(empty.shape)[1] == 0)
+                 | (np.indices(empty.shape)[1] == columns - 1))
+    )]
+    for row, column in frontier:
+        reachable[row, column] = True
+    cursor = 0
+    while cursor < len(frontier):
+        row, column = frontier[cursor]
+        cursor += 1
+        for row_next, column_next in (
+            (row - 1, column), (row + 1, column),
+            (row, column - 1), (row, column + 1),
+        ):
+            if (0 <= row_next < rows and 0 <= column_next < columns
+                    and empty[row_next, column_next]
+                    and not reachable[row_next, column_next]):
+                reachable[row_next, column_next] = True
+                frontier.append((row_next, column_next))
+    return (occupied | (empty & ~reachable)).astype(np.uint8)
+
+
 def draw_voxels(ax, image, bounds):
     x_min, x_max, y_min, y_max = bounds
     masked = np.ma.masked_equal(image, 0)
@@ -264,7 +298,7 @@ def draw_voxels(ax, image, bounds):
         # Keep the voxel cells square in world coordinates.  ``auto`` makes
         # the long mission corridor visibly stretch the UE geometry.
         aspect="equal",
-        alpha=0.82,
+        alpha=1.0,
         zorder=0,
     )
 
@@ -364,6 +398,10 @@ def main():
         help="number of subplot columns (default: 1)",
     )
     parser.add_argument(
+        "--column-title", action="append", default=[], metavar="TITLE",
+        help="title for each subplot column, in display order",
+    )
+    parser.add_argument(
         "--pointcloud-session", "--density-session", dest="pointcloud_session",
         type=Path,
         help="session used to reconstruct the voxelized point-cloud backdrop",
@@ -436,6 +474,10 @@ def main():
         runs.sort(key=lambda run: requested.get(run[0], len(requested)))
     row_count = len(runs)
     column_count = min(args.columns, row_count)
+    if args.column_title and len(args.column_title) != column_count:
+        parser.error(
+            f"--column-title requires exactly {column_count} values for this layout"
+        )
     grid_rows = math.ceil(row_count / column_count)
     figure, axes = plt.subplots(
         grid_rows, column_count,
@@ -444,6 +486,8 @@ def main():
         squeeze=False,
     )
     axes = axes.ravel()
+    for index, title in enumerate(args.column_title):
+        axes[index].set_title(title, fontsize=9, fontweight="semibold", pad=5)
     norm = Normalize(0.0, args.speed_max)
 
     if args.pointcloud_session:
@@ -459,7 +503,9 @@ def main():
             f"{args.voxel_size:g} m voxels; display dilation "
             f"{args.voxel_dilation_cells} cells"
         )
-        display_image = dilate_voxels(image, args.voxel_dilation_cells)
+        display_image = fill_voxel_footprints(
+            dilate_voxels(image, args.voxel_dilation_cells)
+        )
         for axis in axes:
             draw_voxels(axis, display_image, bounds)
     elif args.truth_map and args.truth_map.is_file():
@@ -467,11 +513,12 @@ def main():
             args.truth_map, args.voxel_size,
         )
         print(
-            f"UE truth backdrop: {accepted_points} points, {occupied_cells} "
-            f"occupied {args.voxel_size:g} m voxels; display dilation "
-            f"{args.voxel_dilation_cells} cells"
+            f"AirSim truth voxel backdrop: {accepted_points} source points, "
+            f"{occupied_cells} occupied {args.voxel_size:g} m cells"
         )
-        display_image = dilate_voxels(image, args.voxel_dilation_cells)
+        display_image = fill_voxel_footprints(
+            dilate_voxels(image, args.voxel_dilation_cells)
+        )
         for axis in axes:
             draw_voxels(axis, display_image, bounds)
     collection = None

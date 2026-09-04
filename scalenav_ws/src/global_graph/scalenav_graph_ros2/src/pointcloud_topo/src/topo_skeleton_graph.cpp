@@ -1193,7 +1193,6 @@ bool TopoGraph::goalDirectedSearch(
   (void)radial_preference_enabled;
   (void)view_direction;
   (void)horizontal_fov_deg;
-  (void)progress_penalty_weight;
   (void)fov_penalty_weight;
   (void)smoothness_penalty_weight;
 
@@ -1294,9 +1293,14 @@ bool TopoGraph::goalDirectedSearch(
     // equivalent metres before the common objective normalization. A reverse
     // branch pays the full cost and a lateral switch pays half; a straight
     // continuation pays nothing.
-    const float cost_m = direction_penalty_weight * objective_scale *
+    const float direction_cost_m = direction_penalty_weight * objective_scale *
       0.5F * (1.0F - cosine);
-    return std::make_pair(cosine, cost_m);
+    // Keep a backward frontier legal when it is the only reachable branch,
+    // but make it lose to a comparable forward branch. This parameter was
+    // exposed by the API but previously never affected frontier ranking.
+    const float backward_progress_m = std::max(0.0F, -forwardProgress(end));
+    const float progress_cost_m = progress_penalty_weight * backward_progress_m;
+    return std::make_pair(cosine, direction_cost_m + progress_cost_m);
   };
   const float start_h = heuristic(start_node);
   g_score[start_node] = 0.0F;

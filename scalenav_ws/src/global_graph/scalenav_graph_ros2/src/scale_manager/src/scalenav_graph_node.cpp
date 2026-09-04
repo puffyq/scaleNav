@@ -161,6 +161,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     odom_topic_ = declare_parameter<std::string>("odom_topic", "/sim/odom");
     goal_topic_ = declare_parameter<std::string>("goal_topic", "/goal");
     next_goal_topic_ = declare_parameter<std::string>("next_goal_topic", "/scalenav/local_goal");
+    frontier_goal_topic_ = declare_parameter<std::string>(
+      "frontier_goal_topic", "/scalenav/frontier_goal");
     clearance_topic_ = declare_parameter<std::string>("clearance_topic", "/scalenav/clearance");
     timing_topic_ = declare_parameter<std::string>("timing_topic", "/scalenav/timing");
     next_goal_frame_ = declare_parameter<std::string>("next_goal_frame", "world_enu");
@@ -408,6 +410,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     path_pub_ = create_publisher<nav_msgs::msg::Path>("/scalenav/path", 1);
     flight_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/scalenav/flight", 1);
     next_goal_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(next_goal_topic_, 10);
+    frontier_goal_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+      frontier_goal_topic_, rclcpp::QoS(1).reliable().transient_local());
     clearance_pub_ =
       create_publisher<geometry_msgs::msg::Vector3Stamped>(clearance_topic_, 10);
     timing_pub_ = create_publisher<std_msgs::msg::String>(timing_topic_, 100);
@@ -511,6 +515,12 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   // graph connectivity validation.
   struct AcceptedRouteState
   {
+    struct ShortcutChord
+    {
+      Eigen::Vector3f from = Eigen::Vector3f::Zero();
+      Eigen::Vector3f to = Eigen::Vector3f::Zero();
+    };
+
     bool valid = false;
     Eigen::Vector3f frontier_goal = Eigen::Vector3f::Zero();
     std::uint64_t frontier_goal_id = 0;
@@ -521,6 +531,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     std::vector<TopoNode::Ptr> topology_path;
     std::vector<TopoNode::Ptr> execution_path;
     std::vector<Eigen::Vector3f> witness_path;
+    std::vector<ShortcutChord> shortcut_chords;
 
     void clear()
     {
@@ -533,7 +544,14 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       topology_path.clear();
       execution_path.clear();
       witness_path.clear();
+      shortcut_chords.clear();
     }
+  };
+
+  struct BlockedShortcut
+  {
+    AcceptedRouteState::ShortcutChord chord;
+    std::chrono::steady_clock::time_point blocked_until{};
   };
 
   void onOdom(const nav_msgs::msg::Odometry::ConstSharedPtr &message)
@@ -1305,6 +1323,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       // A new mission goal starts a fresh route search. The measured graph may
       // still be retained, but no previous route is reused for planning.
       accepted_route_.clear();
+      blocked_shortcuts_.clear();
       mission_direct_goal_latched_ = false;
       polynomial_guide_path_.clear();
       polynomial_curve_ = scalenav_graph::WitnessParametricCurve();
@@ -1796,6 +1815,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     bool accepted_route_forced_replan = false;
     const char *accepted_route_forced_reason = "NONE";
     bool accepted_route_stale_but_safe = false;
+    bool accepted_route_shortcut_feedback = false;
     // Capture continuity before any safety check can invalidate route state.
     // Velocity is the best description of the motion that a replacement
     // route would have to reverse; at low speed use the accepted route ahead.
@@ -1948,7 +1968,83 @@ class ScaleNavGraphNode final : public rclcpp::Node {
             ->collisionCheck_shortenPath(remaining_execution, &execution_info);
           if (!execution_safe) {
             accepted_route_edge_missing = true;
-            accepted_route_shortcut_blocked = true;
+            bool matched_shortcut = false;
+            constexpr float failed_point_match_tolerance_m = 0.50F;
+            for (const auto &chord : accepted_route_.shortcut_chords) {
+              if (pointSegmentDistance(
+                    execution_info.failed_point, chord.from, chord.to) >
+                  failed_point_match_tolerance_m) {
+                continue;
+              }
+              rememberBlockedShortcut(chord, execution_info.failed_point);
+              matched_shortcut = true;
+              accepted_route_shortcut_feedback = true;
+              break;
+            }
+            if (matched_shortcut) {
+              // A failed DP chord is execution geometry, not a graph edge.
+              // Keep the original A* topology intact and let the blacklist
+              // prevent this chord from being regenerated.
+              accepted_route_shortcut_blocked = true;
+            } else {
+              // Only an ordinary-semantic edge is allowed to consume
+              // execution feedback. Backbone connectivity is owned by the
+              // topology witness checks and must never be deleted by a
+              // shortcut/path-level clearance failure.
+              TopoNode::Ptr failed_from;
+              TopoNode::Ptr failed_to;
+              float nearest_edge_distance = std::numeric_limits<float>::infinity();
+              for (std::size_t edge_index = 1;
+                   edge_index < accepted_route_.topology_path.size(); ++edge_index) {
+                const auto &from = accepted_route_.topology_path[edge_index - 1];
+                const auto &to = accepted_route_.topology_path[edge_index];
+                if (!from || !to || (edge_index == 1 && from->role_ == TopoNodeRole::Odom)) {
+                  continue;
+                }
+                const float distance = pointSegmentDistance(
+                  execution_info.failed_point, from->center_, to->center_);
+                if (distance < nearest_edge_distance) {
+                  nearest_edge_distance = distance;
+                  failed_from = from;
+                  failed_to = to;
+                }
+              }
+              constexpr float topology_edge_feedback_tolerance_m = 2.0F;
+              if (failed_from && failed_to &&
+                  nearest_edge_distance <= topology_edge_feedback_tolerance_m) {
+                const bool ordinary_semantic_edge =
+                  isOrdinarySemanticLink(failed_from, failed_to);
+                missing_from = failed_from->persistent_id_;
+                missing_to = failed_to->persistent_id_;
+                const bool removed = ordinary_semantic_edge &&
+                  active_topo->removeEdge(failed_from, failed_to);
+                accepted_route_ordinary_semantic_failure = ordinary_semantic_edge;
+                accepted_route_backbone_edge_missing = false;
+                if (ordinary_semantic_edge) {
+                  accepted_route_edge_missing = true;
+                } else {
+                  preserveAcceptedTopologyPath();
+                  accepted_route_edge_missing = false;
+                }
+                RCLCPP_WARN(
+                  get_logger(),
+                  "[ScaleNav route feedback] execution collision mapped to graph edge "
+                  "%llu->%llu kind=%s distance=%.3f removed=%d action=%s",
+                  static_cast<unsigned long long>(missing_from),
+                  static_cast<unsigned long long>(missing_to),
+                  ordinary_semantic_edge ? "ORDINARY_SEMANTIC" : "BACKBONE",
+                  nearest_edge_distance, static_cast<int>(removed),
+                  ordinary_semantic_edge ? "REPLAN" : "PRESERVE_ASTAR");
+              } else {
+                preserveAcceptedTopologyPath();
+                accepted_route_edge_missing = false;
+                RCLCPP_WARN(
+                  get_logger(),
+                  "[ScaleNav route feedback] execution collision did not map to a "
+                  "topology edge distance=%.3f tolerance=%.3f action=PRESERVE_ASTAR",
+                  nearest_edge_distance, topology_edge_feedback_tolerance_m);
+              }
+            }
             const char *reason = execution_info.reason ==
                 ParallelBubbleAstar::CollisionCheckInfo::CLEARANCE ? "CLEARANCE" :
               execution_info.reason == ParallelBubbleAstar::CollisionCheckInfo::BUBBLE_OVERLAP ?
@@ -1957,12 +2053,14 @@ class ScaleNavGraphNode final : public rclcpp::Node {
               get_logger(),
               "[ScaleNav route] shortcut execution suffix blocked; forcing fresh A* "
               "reason=%s points=%zu minimum_clearance=%.3f failed_index=%zu "
-              "failed_point=(%.2f,%.2f,%.2f) clearance=%.3f safe_distance=%.3f",
+              "failed_point=(%.2f,%.2f,%.2f) clearance=%.3f safe_distance=%.3f "
+              "feedback=%s",
               reason, remaining_execution.size(), execution_info.minimum_clearance,
               execution_info.failed_index, execution_info.failed_point.x(),
               execution_info.failed_point.y(), execution_info.failed_point.z(),
               execution_info.clearance,
-              active_topo->parallel_bubble_astar_->safe_distance_);
+              active_topo->parallel_bubble_astar_->safe_distance_,
+              matched_shortcut ? "SHORTCUT_BLACKLIST" : "NO_CHORD_MATCH");
           }
         }
       }
@@ -2018,10 +2116,29 @@ class ScaleNavGraphNode final : public rclcpp::Node {
           "%llu->%llu; forcing fresh A*",
           static_cast<unsigned long long>(missing_from),
           static_cast<unsigned long long>(missing_to));
-        accepted_route_.clear();
         map_changed_.store(true);
         accepted_route_forced_replan = true;
-        accepted_route_forced_reason = "ROUTE_TOPOLOGY_CHANGED";
+        if (accepted_route_shortcut_blocked && accepted_route_shortcut_feedback) {
+          // A DP shortcut is execution geometry, not the A* topology. Keep
+          // the accepted route as incumbent, remove only its shortcut chords,
+          // and force a fresh search so the original node polyline is retained
+          // if no better route exists. Clearing here made every shortcut
+          // failure look like incumbent=NONE and enabled abrupt U-turns.
+          preserveAcceptedTopologyPath();
+          accepted_route_forced_reason = "SHORTCUT_BLOCKED";
+          RCLCPP_WARN(
+            get_logger(),
+            "[ScaleNav route] shortcut disabled; preserving accepted A* "
+            "topology as incumbent nodes=%zu",
+            accepted_route_.topology_path.size());
+        } else {
+          accepted_route_.clear();
+          if (!accepted_route_shortcut_feedback) {
+            accepted_route_forced_reason = "ROUTE_TOPOLOGY_CHANGED";
+          } else {
+            accepted_route_forced_reason = "SHORTCUT_BLOCKED";
+          }
+        }
       }
     }
 
@@ -2179,6 +2296,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     // Preserve the complete A* sequence separately; shortcut chords are
     // execution geometry, not topology edges.
     std::vector<TopoNode::Ptr> candidate_topology_path;
+    std::vector<AcceptedRouteState::ShortcutChord> candidate_shortcut_chords;
     std::unordered_set<std::pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash>
       last_path_edges;
     // Every planner tick starts a fresh mission-directed A* from odom. Keep
@@ -2317,7 +2435,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     }
     const bool route_has_planning_horizon = accepted_witness_usable &&
       !frontier_progress_replan;
-    const bool need_candidate_search = !accepted_witness_usable ||
+    const bool need_candidate_search = accepted_route_forced_replan ||
+      !accepted_witness_usable ||
       !accepted_route_reachable || frontier_progress_replan ||
       semantic_opportunity_replan;
     bool using_accepted_route = false;
@@ -2345,7 +2464,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         &position_, 0.0F, goal_in_window,
         std::numeric_limits<float>::infinity(),
         effective_lookahead_m, &route_continuity_direction, 0.0F,
-        0.0F, static_cast<float>(frontier_direction_loss_weight_), 0.0F, 0.0F,
+        static_cast<float>(frontier_progress_loss_weight_),
+        static_cast<float>(frontier_direction_loss_weight_), 0.0F, 0.0F,
         &candidate_search_stats, search_semantic_stamp_ns,
         static_cast<float>(frontier_goal_distance_weight_),
         static_cast<float>(frontier_semantic_detour_budget_m_),
@@ -2433,7 +2553,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     std::size_t shortcut_count = 0;
     const std::size_t original_path_nodes = path_nodes.size();
     if (found && candidate_accepted && path_nodes.size() >= 3) {
-      path_nodes = shortcutBubblePath(active_topo, path_nodes, shortcut_count);
+      path_nodes = shortcutBubblePath(
+        active_topo, path_nodes, shortcut_count, candidate_shortcut_chords);
       candidate_nodes = path_nodes;
       if (shortcut_count > 0) {
         RCLCPP_INFO(
@@ -2631,6 +2752,32 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       route_switch_reason = "SEMANTIC_OPPORTUNITY_HOLD";
       }
     }
+    // All refresh causes use the same incumbent comparison.  Previously only
+    // semantic-opportunity probes had hysteresis; progress and topology
+    // refreshes committed every reachable candidate, even when it was a
+    // longer/backtracking route.  Keep the current complete segment unless
+    // the new route strictly improves the normalized objective. A route that
+    // was actually invalidated has already cleared accepted_route_ above and
+    // therefore remains free to accept the first feasible candidate.
+    if (candidate_found && accepted_route_.valid && !using_accepted_route &&
+        std::isfinite(incumbent_metrics.objective) &&
+        std::isfinite(candidate_metrics.objective) &&
+        candidate_metrics.objective >= incumbent_metrics.objective - 1e-4F) {
+      path_nodes = accepted_route_.execution_path;
+      found = true;
+      using_accepted_route = true;
+      candidate_accepted = false;
+      route_switch_reason = "ROUTE_OBJECTIVE_HOLD";
+      RCLCPP_INFO(
+        get_logger(),
+        "[ScaleNav route compare] holding incumbent objective=%.3f "
+        "candidate=%.3f incumbent_goal_distance=%.2f "
+        "candidate_goal_distance=%.2f",
+        static_cast<double>(incumbent_metrics.objective),
+        static_cast<double>(candidate_metrics.objective),
+        static_cast<double>(incumbent_metrics.goal_distance),
+        static_cast<double>(candidate_metrics.goal_distance));
+    }
     // A semantic search is a consumed probe whether it switches, holds, or
     // fails. Without this reset, persistence stays above its threshold and
     // every subsequent heatmap frame launches another A* search.
@@ -2679,6 +2826,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         path_nodes : candidate_topology_path;
       accepted_route_.execution_path = path_nodes;
       accepted_route_.witness_path = stats.witness_path;
+      accepted_route_.shortcut_chords = candidate_shortcut_chords;
       const bool frontier_goal_changed = !accepted_route_.valid ||
         proposed_frontier_goal_id != accepted_route_.frontier_goal_id ||
         (proposed_frontier_goal - accepted_route_.frontier_goal).norm() > 1e-3F;
@@ -2707,6 +2855,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         incumbent_objective_log, candidate_objective_log,
         static_cast<double>(scalenav_graph::routeLength(stats.witness_path)),
         static_cast<double>(scalenav_graph::routeLength(stats.witness_path)));
+      publishAcceptedFrontierGoal();
     }
     if (!found) {
       RCLCPP_WARN_THROTTLE(
@@ -3276,11 +3425,88 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   // covered by the safety bubbles that generated the original route.  This
   // is an execution-path transformation; the topology graph itself is left
   // unchanged so future searches still use its real edges.
+  static float pointSegmentDistance(
+    const Eigen::Vector3f &point, const Eigen::Vector3f &from,
+    const Eigen::Vector3f &to)
+  {
+    const Eigen::Vector3f segment = to - from;
+    const float length_squared = segment.squaredNorm();
+    if (!std::isfinite(length_squared) || length_squared <= 1e-6F) {
+      return (point - from).norm();
+    }
+    const float t = std::clamp((point - from).dot(segment) / length_squared, 0.0F, 1.0F);
+    return (point - (from + t * segment)).norm();
+  }
+
+  bool shortcutMatches(
+    const AcceptedRouteState::ShortcutChord &left,
+    const AcceptedRouteState::ShortcutChord &right) const
+  {
+    constexpr float endpoint_tolerance_m = 0.75F;
+    const bool same_direction =
+      (left.from - right.from).norm() <= endpoint_tolerance_m &&
+      (left.to - right.to).norm() <= endpoint_tolerance_m;
+    const bool reverse_direction =
+      (left.from - right.to).norm() <= endpoint_tolerance_m &&
+      (left.to - right.from).norm() <= endpoint_tolerance_m;
+    return same_direction || reverse_direction;
+  }
+
+  bool isShortcutBlocked(const AcceptedRouteState::ShortcutChord &chord)
+  {
+    const auto now = std::chrono::steady_clock::now();
+    blocked_shortcuts_.erase(
+      std::remove_if(
+        blocked_shortcuts_.begin(), blocked_shortcuts_.end(),
+        [now](const BlockedShortcut &blocked) { return blocked.blocked_until <= now; }),
+      blocked_shortcuts_.end());
+    return std::any_of(
+      blocked_shortcuts_.begin(), blocked_shortcuts_.end(),
+      [&](const BlockedShortcut &blocked) { return shortcutMatches(blocked.chord, chord); });
+  }
+
+  void rememberBlockedShortcut(
+    const AcceptedRouteState::ShortcutChord &chord,
+    const Eigen::Vector3f &failed_point)
+  {
+    constexpr double blocked_duration_s = 3.0;
+    const auto now = std::chrono::steady_clock::now();
+    const auto blocked_duration = std::chrono::duration_cast<
+      std::chrono::steady_clock::duration>(std::chrono::duration<double>(blocked_duration_s));
+    blocked_shortcuts_.erase(
+      std::remove_if(
+        blocked_shortcuts_.begin(), blocked_shortcuts_.end(),
+        [now](const BlockedShortcut &blocked) { return blocked.blocked_until <= now; }),
+      blocked_shortcuts_.end());
+    const auto existing = std::find_if(
+      blocked_shortcuts_.begin(), blocked_shortcuts_.end(),
+      [&](const BlockedShortcut &blocked) { return shortcutMatches(blocked.chord, chord); });
+    if (existing != blocked_shortcuts_.end()) {
+      existing->blocked_until = now + blocked_duration;
+    } else {
+      blocked_shortcuts_.push_back(BlockedShortcut{
+        chord, now + blocked_duration});
+      constexpr std::size_t max_blocked_shortcuts = 32;
+      if (blocked_shortcuts_.size() > max_blocked_shortcuts) {
+        blocked_shortcuts_.erase(blocked_shortcuts_.begin());
+      }
+    }
+    RCLCPP_WARN(
+      get_logger(),
+      "[ScaleNav shortcut feedback] blocked chord from=(%.2f,%.2f,%.2f) "
+      "to=(%.2f,%.2f,%.2f) failed_at=(%.2f,%.2f,%.2f) duration=%.1f s "
+      "action=SKIP_SHORTCUT",
+      chord.from.x(), chord.from.y(), chord.from.z(), chord.to.x(), chord.to.y(),
+      chord.to.z(), failed_point.x(), failed_point.y(), failed_point.z(), blocked_duration_s);
+  }
+
   std::vector<TopoNode::Ptr> shortcutBubblePath(
     const TopoGraph::Ptr &topo, const std::vector<TopoNode::Ptr> &path,
-    std::size_t &shortcut_count) const
+    std::size_t &shortcut_count,
+    std::vector<AcceptedRouteState::ShortcutChord> &shortcut_chords)
   {
     shortcut_count = 0;
+    shortcut_chords.clear();
     if (!topo || !topo->parallel_bubble_astar_ || path.size() < 3) return path;
 
     const double safe_distance = std::max(
@@ -3362,7 +3588,10 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         }
         if (semantic_between) continue;
         const bool adjacent = end == begin + 1;
-        if (!adjacent && !chord_covered(begin, end)) continue;
+        if (!adjacent) {
+          AcceptedRouteState::ShortcutChord chord{path[begin]->center_, path[end]->center_};
+          if (isShortcutBlocked(chord) || !chord_covered(begin, end)) continue;
+        }
         const float length = (path[end]->center_ - path[begin]->center_).norm();
         if (!std::isfinite(length)) continue;
         const float transition_cost = length + waypoint_penalty;
@@ -3385,6 +3614,14 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     std::vector<TopoNode::Ptr> shortened;
     shortened.reserve(selected_indices.size());
     for (const std::size_t index : selected_indices) shortened.push_back(path[index]);
+    for (std::size_t i = 1; i < selected_indices.size(); ++i) {
+      const std::size_t begin = selected_indices[i - 1];
+      const std::size_t end = selected_indices[i];
+      if (end > begin + 1) {
+        shortcut_chords.push_back(AcceptedRouteState::ShortcutChord{
+          path[begin]->center_, path[end]->center_});
+      }
+    }
     shortcut_count = path.size() - shortened.size();
     return shortened;
   }
@@ -4370,8 +4607,49 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     return stats;
   }
 
+  void preserveAcceptedTopologyPath() {
+    if (accepted_route_.topology_path.size() < 2) return;
+    accepted_route_.execution_path = accepted_route_.topology_path;
+    accepted_route_.witness_path.clear();
+    accepted_route_.witness_path.reserve(accepted_route_.topology_path.size());
+    for (const auto &node : accepted_route_.topology_path) {
+      if (!node) continue;
+      Eigen::Vector3f point = node->center_;
+      if (graph_fixed_layer_) point.z() = static_cast<float>(graph_layer_z_);
+      if (accepted_route_.witness_path.empty() ||
+          (accepted_route_.witness_path.back() - point).norm() > 1e-3F) {
+        accepted_route_.witness_path.push_back(point);
+      }
+    }
+    accepted_route_.shortcut_chords.clear();
+    const float route_length = scalenav_graph::routeLength(accepted_route_.witness_path);
+    const float progress = scalenav_graph::routeProgressAlongPath(
+      accepted_route_.witness_path, position_);
+    if (std::isfinite(route_length) && route_length > 1e-3F && std::isfinite(progress)) {
+      accepted_route_.frontier_goal_progress_m = std::clamp(progress, 0.0F, route_length);
+      accepted_route_.frontier_goal_progress_t =
+        accepted_route_.frontier_goal_progress_m / route_length;
+    }
+  }
+
+  void publishAcceptedFrontierGoal() {
+    if (!accepted_route_.valid || !accepted_route_.frontier_goal.allFinite()) return;
+    geometry_msgs::msg::PoseStamped message;
+    message.header.stamp = now();
+    message.header.frame_id = next_goal_frame_;
+    message.pose.position = toPoint(accepted_route_.frontier_goal);
+    message.pose.orientation.w = 1.0;
+    frontier_goal_pub_->publish(message);
+    RCLCPP_INFO(
+      get_logger(),
+      "[ScaleNav frontier command] id=%llu goal=(%.2f,%.2f,%.2f)",
+      static_cast<unsigned long long>(accepted_route_.frontier_goal_id),
+      accepted_route_.frontier_goal.x(), accepted_route_.frontier_goal.y(),
+      accepted_route_.frontier_goal.z());
+  }
+
   std::string cloud_topic_, free_ray_topic_, odom_topic_, goal_topic_, next_goal_topic_,
-    next_goal_frame_, clearance_topic_, timing_topic_;
+    frontier_goal_topic_, next_goal_frame_, clearance_topic_, timing_topic_;
   std::string visualization_frame_;
   std::string odom_twist_frame_ = "world";
   std::string flight_statistics_file_ = "scalenav_flight_statistics.csv";
@@ -4462,6 +4740,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   TopoGraph::Ptr topo_;
   TopoGraph::Ptr graph_odom_topo_;
   AcceptedRouteState accepted_route_;
+  std::vector<BlockedShortcut> blocked_shortcuts_;
   std::vector<Eigen::Vector3f> polynomial_guide_path_;
   scalenav_graph::WitnessParametricCurve polynomial_curve_;
   bool polynomial_curve_valid_ = false;
@@ -4484,6 +4763,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr flight_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr next_goal_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr frontier_goal_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr clearance_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr timing_pub_;
   rclcpp::TimerBase::SharedPtr timer_;

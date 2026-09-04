@@ -52,6 +52,131 @@ class FrontierGCN(nn.Module):
         return logits.masked_fill(~sample["safe_columns"].bool(), torch.finfo(x.dtype).min), hidden
 
 
+class ResidualGraphBlock(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.message = WeightedGCN(hidden_dim, hidden_dim)
+        self.update = nn.Sequential(nn.Linear(hidden_dim * 2, hidden_dim),
+                                    nn.ReLU(), nn.LayerNorm(hidden_dim))
+
+    def forward(self, x, edge_index, edge_weight):
+        message = torch.relu(self.message(x, edge_index, edge_weight))
+        return x + self.update(torch.cat([x, message], dim=-1))
+
+
+class StrongFrontierGCN(nn.Module):
+    """Deeper graph policy with local, global, and odometry context."""
+
+    def __init__(self, input_dim=20, hidden_dim=128, layers=4):
+        super().__init__()
+        self.input = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU(),
+                                   nn.LayerNorm(hidden_dim))
+        self.blocks = nn.ModuleList([ResidualGraphBlock(hidden_dim) for _ in range(layers)])
+        self.gru = nn.GRUCell(hidden_dim * 3 + 5, hidden_dim)
+        self.head = nn.Sequential(nn.Linear(hidden_dim * 3, hidden_dim), nn.ReLU(),
+                                  nn.Linear(hidden_dim, hidden_dim // 2), nn.ReLU(),
+                                  nn.Linear(hidden_dim // 2, 1))
+
+    def forward(self, sample, hidden=None, previous=-1):
+        x = self.input(sample["x"])
+        for block in self.blocks:
+            x = block(x, sample["edge_index"], sample["edge_weight"])
+        odom_mask = sample["x"][:, 10] > 0.5
+        odom = x[odom_mask].mean(0) if odom_mask.any() else x.mean(0)
+        context = torch.cat([x.mean(0), x.max(0).values, odom], dim=-1)[None]
+        previous_onehot = torch.zeros((1, 5), device=x.device)
+        if 0 <= previous < 5:
+            previous_onehot[0, previous] = 1.0
+        hidden = self.gru(torch.cat([context, previous_onehot], -1), hidden)
+        candidates = x[sample["frontier_index"]]
+        values = self.head(torch.cat([candidates,
+                                      context[:, :128].expand(candidates.shape[0], -1),
+                                      hidden.expand(candidates.shape[0], -1)], -1)).squeeze(-1)
+        logits = torch.full((5,), torch.finfo(x.dtype).min, device=x.device)
+        logits[sample["frontier_columns"]] = values
+        return logits.masked_fill(~sample["safe_columns"].bool(), torch.finfo(x.dtype).min), hidden
+
+
+class HybridFrontierGCN(nn.Module):
+    """GCN plus explicit graph statistics that preserve global geometry."""
+
+    def __init__(self, input_dim=20, hidden_dim=128):
+        super().__init__()
+        self.conv1 = WeightedGCN(input_dim, hidden_dim)
+        self.conv2 = WeightedGCN(hidden_dim, hidden_dim)
+        summary_dim = input_dim * 9  # mean/max/min, odom, and five candidates
+        self.summary = nn.Sequential(nn.Linear(summary_dim, hidden_dim * 2), nn.ReLU(),
+                                     nn.LayerNorm(hidden_dim * 2),
+                                     nn.Linear(hidden_dim * 2, hidden_dim), nn.ReLU())
+        self.gru = nn.GRUCell(hidden_dim * 2 + 5, hidden_dim)
+        self.head = nn.Sequential(nn.Linear(hidden_dim * 3 + input_dim, hidden_dim * 2),
+                                  nn.ReLU(), nn.Linear(hidden_dim * 2, hidden_dim),
+                                  nn.ReLU(), nn.Linear(hidden_dim, 1))
+
+    def forward(self, sample, hidden=None, previous=-1):
+        raw = sample["x"]
+        x = torch.relu(self.conv1(raw, sample["edge_index"], sample["edge_weight"]))
+        x = torch.relu(self.conv2(x, sample["edge_index"], sample["edge_weight"]))
+        odom_mask = raw[:, 10] > 0.5
+        odom = raw[odom_mask].mean(0) if odom_mask.any() else raw.mean(0)
+        candidates_raw = raw[sample["frontier_index"]]
+        summary_raw = torch.cat([raw.mean(0), raw.max(0).values, raw.min(0).values,
+                                 odom, candidates_raw.reshape(-1)], dim=0)
+        summary = self.summary(summary_raw[None])
+        previous_onehot = torch.zeros((1, 5), device=x.device)
+        if 0 <= previous < 5:
+            previous_onehot[0, previous] = 1.0
+        hidden = self.gru(torch.cat([x.mean(0, keepdim=True), summary, previous_onehot], -1), hidden)
+        candidates = x[sample["frontier_index"]]
+        values = self.head(torch.cat([candidates, candidates_raw,
+                                      summary.expand(candidates.shape[0], -1),
+                                      hidden.expand(candidates.shape[0], -1)], -1)).squeeze(-1)
+        logits = torch.full((5,), torch.finfo(x.dtype).min, device=x.device)
+        logits[sample["frontier_columns"]] = values
+        return logits.masked_fill(~sample["safe_columns"].bool(), torch.finfo(x.dtype).min), hidden
+
+
+class JointFrontierGCN(nn.Module):
+    """Encode topology with a GCN, then compare all five directions jointly."""
+
+    def __init__(self, input_dim=20, hidden_dim=128):
+        super().__init__()
+        self.conv1 = WeightedGCN(input_dim, hidden_dim)
+        self.conv2 = WeightedGCN(hidden_dim, hidden_dim)
+        self.conv3 = WeightedGCN(hidden_dim, hidden_dim)
+        raw_summary = input_dim * 9
+        graph_summary = hidden_dim * 9
+        self.head = nn.Sequential(
+            nn.Linear(raw_summary + graph_summary, 512), nn.ReLU(), nn.LayerNorm(512),
+            nn.Dropout(0.1), nn.Linear(512, 256), nn.ReLU(), nn.Linear(256, 5))
+
+    def forward(self, sample, hidden=None, previous=-1):
+        raw = sample["x"]
+        x1 = torch.relu(self.conv1(raw, sample["edge_index"], sample["edge_weight"]))
+        x2 = x1 + torch.relu(self.conv2(x1, sample["edge_index"], sample["edge_weight"]))
+        x = x2 + torch.relu(self.conv3(x2, sample["edge_index"], sample["edge_weight"]))
+        odom_mask = raw[:, 10] > 0.5
+        raw_odom = raw[odom_mask].mean(0) if odom_mask.any() else raw.mean(0)
+        graph_odom = x[odom_mask].mean(0) if odom_mask.any() else x.mean(0)
+        frontier = sample["frontier_index"]
+        raw_summary = torch.cat([raw.mean(0), raw.max(0).values, raw.min(0).values,
+                                 raw_odom, raw[frontier].reshape(-1)])
+        graph_summary = torch.cat([x.mean(0), x.max(0).values, x.min(0).values,
+                                   graph_odom, x[frontier].reshape(-1)])
+        logits = self.head(torch.cat([raw_summary, graph_summary])[None]).squeeze(0)
+        return logits.masked_fill(~sample["safe_columns"].bool(), torch.finfo(x.dtype).min), None
+
+
+def build_model(input_dim, architecture="legacy"):
+    if architecture == "strong":
+        return StrongFrontierGCN(input_dim=input_dim)
+    if architecture == "hybrid":
+        return HybridFrontierGCN(input_dim=input_dim)
+    if architecture == "joint":
+        return JointFrontierGCN(input_dim=input_dim)
+    return FrontierGCN(input_dim=input_dim)
+
+
 def sample_to_device(sample, device):
     return {key: value.to(device) if torch.is_tensor(value) else value
             for key, value in sample.items()}
@@ -75,7 +200,7 @@ def accuracy_metrics(predictions, targets):
     return accuracy, sum(per_class) / max(1, len(per_class))
 
 
-def run_epoch(model, samples, device, optimizer=None, class_weights=None):
+def run_epoch(model, samples, device, optimizer=None, class_weights=None, grad_accum=1):
     training = optimizer is not None
     model.train(training)
     predictions = []
@@ -84,6 +209,8 @@ def run_epoch(model, samples, device, optimizer=None, class_weights=None):
     sessions = list(groups)
     if training:
         random.shuffle(sessions)
+        optimizer.zero_grad()
+    pending_gradients = 0
     for session in sessions:
         hidden = None
         previous = -1
@@ -93,14 +220,21 @@ def run_epoch(model, samples, device, optimizer=None, class_weights=None):
             target = torch.tensor([sample["target"]], dtype=torch.long, device=device)
             loss = nn.functional.cross_entropy(logits[None], target, weight=class_weights)
             if training:
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                hidden = hidden.detach()
+                (loss / grad_accum).backward()
+                pending_gradients += 1
+                if pending_gradients >= grad_accum:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    pending_gradients = 0
+                if hidden is not None:
+                    hidden = hidden.detach()
             prediction = int(logits.argmax())
             predictions.append(prediction)
             targets.append(sample["target"])
             previous = prediction
+    if training and pending_gradients:
+        optimizer.step()
+        optimizer.zero_grad()
     return accuracy_metrics(predictions, targets)
 
 
@@ -145,6 +279,9 @@ def main():
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--save", default="train_gcn/frontier_gcn.pt")
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
+    parser.add_argument("--architecture", default="joint", choices=("legacy", "strong", "hybrid", "joint"))
+    parser.add_argument("--grad-accum", type=int, default=32)
+    parser.add_argument("--no-class-weights", action="store_true")
     args = parser.parse_args()
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -175,12 +312,15 @@ def main():
         train_end = max(1, int(len(ordered) * (1.0 - args.val_ratio - args.test_ratio)))
         val_end = max(train_end + 1, int(len(ordered) * (1.0 - args.test_ratio)))
         train, val, test = ordered[:train_end], ordered[train_end:val_end], ordered[val_end:]
-    model = FrontierGCN().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)
+    input_dim = int(train[0]["x"].shape[1])
+    model = build_model(input_dim, args.architecture).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     counts = [sum(sample["target"] == column for sample in train) for column in range(5)]
     class_weights = torch.tensor(
         [len(train) / max(1, 5 * count) for count in counts],
         dtype=torch.float32, device=device)
+    if args.no_class_weights:
+        class_weights = None
     planner_acc, planner_macro, planner_switch_rate = baseline_report(test)
     test_targets = [sample["target"] for sample in test]
     majority = max(range(5), key=lambda column: counts[column])
@@ -196,7 +336,8 @@ def main():
     best_epoch = 0
     best_state = None
     for epoch in range(1, args.epochs + 1):
-        train_acc, train_macro = run_epoch(model, train, device, optimizer, class_weights)
+        train_acc, train_macro = run_epoch(model, train, device, optimizer, class_weights,
+                                           args.grad_accum if args.architecture == "joint" else 1)
         val_acc, val_macro = run_epoch(model, val, device)
         if val_macro > best_macro:
             best_macro = val_macro
@@ -214,7 +355,8 @@ def main():
           f"delta_accuracy={test_acc - planner_acc:+.3f} "
           f"delta_macro_accuracy={test_macro - planner_macro:+.3f} "
           f"delta_switch_rate={gcn_switch_rate - planner_switch_rate:+.3f}")
-    torch.save({"model": model.state_dict(), "input_dim": 12,
+    torch.save({"model": model.state_dict(), "input_dim": input_dim,
+                "architecture": args.architecture,
                 "best_epoch": best_epoch,
                 "train_sessions": sorted(train_sessions),
                 "val_sessions": sorted(val_sessions),

@@ -55,10 +55,10 @@ run "$PYTHON" "$WS/src/scalenav/text_heatmap_ros2.py" \
   --output-topic /scalenav/text_heatmap --device cuda --update-rate 2 \
   --pearl-root "$WS/src/global_graph/heatmap_ws/pearl_ws"
 run ros2 run baseline_adapters scalenav_goal_bridge --ros-args \
-  -p input_topic:=/scalenav/local_goal \
+  -p input_topic:=/scalenav/frontier_goal \
   -p output_topic:=/move_base_simple/goal \
   -p min_interval_s:=0.75 -p min_change_m:=0.75 -p frame_id:=world_enu \
   -p fixed_z:=1.6 -p max_z_error_m:=0.75
 
-echo "started ScaleNav+SUPER; mission_goal=/goal_pose local_goal=/scalenav/local_goal executor_goal=/move_base_simple/goal prompt=$PROMPT"
+echo "started ScaleNav+SUPER; mission_goal=/goal_pose frontier_goal=/scalenav/frontier_goal executor_goal=/move_base_simple/goal prompt=$PROMPT"
 wait -n $PIDS

@@ -599,7 +599,10 @@ synchronized RGB-D and odometry, and a 1.6-m planning layer.  One-way trials
 fly from $(0,0,1.6)$ to $(0,140,1.6)$~m.  Each aggregate row contains ten
 independent resets; existing batches are not seed matched, so we report sample
 statistics without paired significance claims.  Failures remain in outcome
-rates, and continuous flight metrics use successful trials only.
+rates, and continuous flight metrics use successful trials only.  The latest
+executor-substitution batches use a 600-s mission limit and an independent
+no-progress limit: a trial terminates when displacement remains below 0.5~m
+for 60~s.  No trial reaches the 600-s limit.
 
 \subsection{Closed-Loop System Evaluation}
 \subsubsection{Methods and Conditions}
@@ -642,9 +645,9 @@ Replan progress ratio $\rho_r$ & 0.4 & Frontier weights $w_g,w_q$ & 2.0, 1.0 \\
 \subsubsection{Scenarios}
 The current Map2 scene contains trees, long walls, and block structures along
 the 140-m mission corridor.  All methods in the main comparison use this same
-scene and mission endpoints.  Figure~\ref{fig:map2_speed_trajectories} uses the
-point-cloud reconstruction recorded with the latest ScaleNav batch; statistics
-from the superseded UE truth export are not carried into this comparison.
+scene and mission endpoints.  Figure~\ref{fig:map2_speed_trajectories} uses a
+complete Map2 point-cloud reference as a display backdrop; it does not alter
+any trajectory or aggregate metric.
 Matched language trials additionally include the unseen query ``avoid power
 lines.''
 
@@ -664,20 +667,23 @@ Figure~\ref{fig:map2_speed_trajectories} shows one run from each current-scene
 batch on a common reconstruction; incomplete runs end at their recorded
 collisions.  The ScaleNav (YOPO) panel uses trial~1 of the latest batch, which
 has both its shortest completion time and shortest completed path; aggregate
-claims use all ten trials.
+claims use all ten trials.  ScaleNav+EGO uses the failed trial with greatest
+mission progress, while ScaleNav+SUPER uses the shortest-time successful
+trial from its latest rerun.
 
 \begin{figure*}[!t]
 \centering
 \includegraphics[width=0.88\textwidth]{pics/experiments/map2_0_140_1p6/trajectory_speed_comparison_current.pdf}
 \vspace{-2pt}
 \caption{Representative recorded Map2 trajectories from $(0,0,1.6)$~m to
-$(0,140,1.6)$~m over the point-cloud reconstruction recorded in the latest
-ScaleNav batch, voxelized at 0.3~m with one-cell display dilation.  Colored
-curves denote executed trajectories and gray marks denote reconstructed scene
-geometry; circles, stars,
+$(0,140,1.6)$~m over the complete AirSim Map2 point cloud, converted to
+0.3-m top-view voxels.  Colored curves denote executed trajectories and gray
+marks denote occupied voxels; circles, stars,
 and crosses mark starts, completed goals, and incomplete collision endpoints,
-respectively.  Panel labels state the selected trial outcome; aggregate outcomes
-over ten trials are reported in Table~\ref{tab:single_run_validation}.}
+respectively.  The left column contains the three executors without ScaleNav's
+graph route layer, and the right column contains their graph-guided variants.
+Panel labels state the selected trial outcome; aggregate outcomes over ten
+trials are reported in Table~\ref{tab:single_run_validation}.}
 \label{fig:map2_speed_trajectories}
 \end{figure*}
 
@@ -698,8 +704,8 @@ YOPO-Simple     & 0   & 100 & 0  & \blank & $129.79\pm0.58$ & \blank & \blank & 
 EGO-Planner     & 0   & 100 & 0  & \blank & $73.24\pm0.69$ & \blank & \blank & \blank \\
 SUPER           & 0   & 100 & 0  & \blank & $47.07\pm28.27$ & \blank & \blank & \blank \\
 ScaleNav (YOPO) & 100 & 0   & 0  & $196.30\pm13.36$ & \blank & $37.48\pm2.50$ & $5.24\pm0.09$ & $6.42\pm0.05$ \\
-ScaleNav+EGO    & 0   & 90  & 10 & \blank & $26.57\pm17.61$ & \blank & \blank & \blank \\
-ScaleNav+SUPER  & 50  & 40  & 10 & $205.16\pm14.52$ & $50.08\pm37.17$ & $41.42\pm3.40$ & $4.96\pm0.13$ & $5.96\pm0.02$ \\
+ScaleNav+EGO    & 0   & 50  & 50 & \blank & $54.50\pm32.30$ & \blank & \blank & \blank \\
+ScaleNav+SUPER  & 10  & 70  & 20 & $193.78$ & $45.99\pm37.27$ & $39.77$ & $4.87$ & $6.02$ \\
 \bottomrule
 \end{tabular}
 }
@@ -708,8 +714,11 @@ ScaleNav+SUPER  & 50  & 40  & 10 & $205.16\pm14.52$ & $50.08\pm37.17$ & $41.42\p
 Outcome rates use all ten valid trials.  $L_{\rm succ}$, completion time, and
 speed are mean $\pm$ sample standard deviation over successful flights;
 $L_{\rm obs}$ is the corresponding statistic over collision/timeout-truncated
-flights and is not a completion path.  ScaleNav+SUPER completes 5/10 trials,
-whereas directly feeding the same rolling route goals to EGO completes none.
+flights and is not a completion path.  ScaleNav+SUPER completes 1/10 trials;
+its successful-flight columns are therefore single observations rather than
+mean $\pm$ sample standard deviation.  The graph-variant timeouts are all
+no-progress terminations, not 600-s mission-limit terminations.  ScaleNav+EGO
+completes none.
 The ScaleNav (YOPO) row uses the deployed frontier-conditioned YOPO with
 ordered-bubble MPC refinement, not the corridor-trained network evaluated
 offline below.  The two added rows replace this executor with EGO-Planner or

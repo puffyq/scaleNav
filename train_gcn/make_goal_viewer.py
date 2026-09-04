@@ -13,7 +13,22 @@ from heapq import heappop, heappush
 import torch
 from PIL import Image
 
-from train import FrontierGCN, session_groups
+from train import build_model, session_groups
+from collect_privileged_dataset import astar as grid_astar, build_occupancy
+
+
+def lookahead_point(path, distance_m):
+    if len(path) < 2:
+        return None
+    traveled = 0.0
+    for current, following in zip(path, path[1:]):
+        segment = math.dist(current, following)
+        if traveled + segment >= distance_m:
+            ratio = (distance_m - traveled) / max(segment, 1e-9)
+            return [current[0] + ratio * (following[0] - current[0]),
+                    current[1] + ratio * (following[1] - current[1])]
+        traveled += segment
+    return None
 
 
 def read_image(path):
@@ -179,17 +194,20 @@ def main():
     parser.add_argument('--output', default='train_gcn/goal_dataset_viewer.html')
     parser.add_argument('--max-samples', type=int, default=300)
     args = parser.parse_args()
-    raw = torch.load(args.dataset, weights_only=False)['samples']
+    bundle = torch.load(args.dataset, weights_only=False)
+    raw = bundle['samples']
+    privileged = str(bundle.get('schema', '')).startswith('scalenav_gcn_privileged')
     chosen = raw if args.max_samples <= 0 else raw[:args.max_samples]
-    model = FrontierGCN()
-    model.load_state_dict(torch.load(args.model, map_location='cpu', weights_only=False)['model'])
+    checkpoint = torch.load(args.model, map_location='cpu', weights_only=False)
+    model = build_model(int(chosen[0]['x'].shape[1]), checkpoint.get('architecture', 'legacy'))
+    model.load_state_dict(checkpoint['model'])
     model.eval(); predictions = {}; probabilities = {}
     for _, group in session_groups(chosen).items():
         hidden = None; previous = -1
         for sample in group:
             with torch.no_grad(): logits, hidden = model(sample, hidden, previous)
-            predictions[id(sample)] = int(logits.argmax()); probabilities[id(sample)] = torch.softmax(logits, 0).tolist(); previous = predictions[id(sample)]; hidden = hidden.detach()
-    cache = {}; output = []
+            predictions[id(sample)] = int(logits.argmax()); probabilities[id(sample)] = torch.softmax(logits, 0).tolist(); previous = predictions[id(sample)]; hidden = hidden.detach() if hidden is not None else None
+    cache = {}; occupancy_cache = {}; output = []
     for sample in chosen:
         root = os.path.join('log_scalenav', sample['session']); records = cache.setdefault(root, [])
         if not records:
@@ -211,6 +229,29 @@ def main():
             if candidates: assets[kind] = os.path.join(root, min(candidates, key=lambda r: abs(r['stamp_ns'] - stamp))['file'])
         nodes, edges, path, costs, yaw, start, goal_id, chosen = graph_path(sample, position, orientation, goal); cloud = []
         global_path, global_cost, gt_point = snapshot_route(final_snapshot, position, orientation, goal, sample['target'])
+        if privileged:
+            if root not in occupancy_cache:
+                try:
+                    resolution = 0.75
+                    blocked = build_occupancy(root, records, resolution, 1.2, 100)
+                    odom_positions = [r.get('data', {}).get('position', [0, 0, 0]) for r in records if r.get('kind') == 'odom']
+                    xy = [(int(math.floor(goal[0] / resolution)), int(math.floor(goal[1] / resolution)))]
+                    xy += [(int(math.floor(p[0] / resolution)), int(math.floor(p[1] / resolution))) for p in odom_positions]
+                    margin = max(8, math.ceil(40.0 / resolution))
+                    bounds = (min(p[0] for p in xy) - margin, max(p[0] for p in xy) + margin,
+                              min(p[1] for p in xy) - margin, max(p[1] for p in xy) + margin)
+                    occupancy_cache[root] = (blocked, bounds, resolution)
+                except (OSError, ValueError):
+                    occupancy_cache[root] = None
+            if occupancy_cache[root] is not None:
+                blocked, bounds, resolution = occupancy_cache[root]
+                start_cell = (int(math.floor(position[0] / resolution)), int(math.floor(position[1] / resolution)))
+                goal_cell = (int(math.floor(goal[0] / resolution)), int(math.floor(goal[1] / resolution)))
+                cells = grid_astar(start_cell, goal_cell, blocked, bounds)
+                if cells:
+                    global_path = [[(x + 0.5) * resolution, (y + 0.5) * resolution] for x, y in cells]
+                    global_cost = sum(math.dist(global_path[i], global_path[i + 1]) for i in range(len(global_path) - 1))
+                    gt_point = lookahead_point(global_path, 35.0)
         for point in read_pcd(assets.get('pointcloud')):
             rotated = rotate(orientation, point); cloud.append([rotated[0] + position[0], rotated[1] + position[1], rotated[2] + position[2]])
         gt_node = path[1] if len(path) > 1 else None

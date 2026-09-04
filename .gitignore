@@ -41,6 +41,7 @@ saved/
 *.pt
 *.pth
 *.ckpt
+*.joblib
 
 # Runtime event captures and local tool output.
 log_event/

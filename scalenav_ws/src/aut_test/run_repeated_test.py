@@ -99,6 +99,21 @@ def parse_args() -> argparse.Namespace:
         help="mission timeout in seconds; 0 disables the limit (default: 90)",
     )
     parser.add_argument(
+        "--no-progress-timeout",
+        type=finite_nonnegative,
+        default=0.0,
+        help=(
+            "end a flight after this many seconds without the configured "
+            "minimum displacement; 0 disables the check (default: 0)"
+        ),
+    )
+    parser.add_argument(
+        "--progress-distance",
+        type=finite_positive,
+        default=0.5,
+        help="displacement that resets the no-progress timer (default: 0.5 m)",
+    )
+    parser.add_argument(
         "--startup-timeout",
         type=finite_positive,
         default=60.0,
@@ -632,6 +647,8 @@ class MissionMonitor:
         )
         mission_start = time.monotonic()
         previous_position: tuple[float, float, float] | None = None
+        progress_anchor: tuple[float, float, float] | None = None
+        last_progress = mission_start
         path_m = 0.0
         max_speed = 0.0
         samples = 0
@@ -650,7 +667,10 @@ class MissionMonitor:
             if stack_error:
                 outcome, detail = "stack_exited", stack_error
                 break
-            self.spin_once(min(0.05, args.timeout - elapsed))
+            spin_timeout = 0.05
+            if args.timeout > 0.0:
+                spin_timeout = min(spin_timeout, max(0.0, args.timeout - elapsed))
+            self.spin_once(spin_timeout)
             if self.latest_odom is None:
                 continue
             position, speed = self.odom_state()
@@ -659,10 +679,26 @@ class MissionMonitor:
                 if math.isfinite(step) and step < 2.0:
                     path_m += step
             previous_position = position
+            if progress_anchor is None:
+                progress_anchor = position
+                last_progress = time.monotonic()
+            elif math.dist(position, progress_anchor) >= args.progress_distance:
+                progress_anchor = position
+                last_progress = time.monotonic()
             max_speed = max(max_speed, speed)
             samples += 1
             if self.collision is True:
                 outcome, detail = "collision", "/sim/collision became true"
+                break
+            if (
+                args.no_progress_timeout > 0.0
+                and time.monotonic() - last_progress >= args.no_progress_timeout
+            ):
+                outcome = "timeout"
+                detail = (
+                    f"no displacement of {args.progress_distance:.2f} m within "
+                    f"{args.no_progress_timeout:.1f} s"
+                )
                 break
             error = math.dist(
                 position, (args.goal_x, args.goal_y, args.goal_z)
@@ -813,6 +849,8 @@ def run_trial(
             "position_tolerance_m": args.position_tolerance,
             "speed_tolerance_mps": args.speed_tolerance,
             "timeout_s": args.timeout,
+            "no_progress_timeout_s": args.no_progress_timeout,
+            "progress_distance_m": args.progress_distance,
             "session_dir": newest_new_session(args.log_root, known_sessions),
             "console_log": str(console_path),
         }
@@ -835,6 +873,8 @@ def configuration(args: argparse.Namespace) -> dict[str, Any]:
         "stack": args.stack,
         "count": args.count,
         "timeout_s": args.timeout,
+        "no_progress_timeout_s": args.no_progress_timeout,
+        "progress_distance_m": args.progress_distance,
         "startup_timeout_s": args.startup_timeout,
         "max_startup_failures": args.max_startup_failures,
         "cooldown_s": args.cooldown,
@@ -844,7 +884,7 @@ def configuration(args: argparse.Namespace) -> dict[str, Any]:
         "position_tolerance_m": args.position_tolerance,
         "speed_tolerance_mps": args.speed_tolerance,
         "airsim": f"{args.airsim_host}:{args.airsim_port}",
-        "semantic": not args.no_semantic,
+        "semantic": args.stack in COMBINED_SCRIPTS or not args.no_semantic,
         "prompt": args.prompt,
         "semantic_cost_weight": args.semantic_cost_weight,
         "semantic_route_influence_m": args.semantic_route_influence_m,

@@ -84,6 +84,16 @@ def build_occupancy(session, entries, resolution=0.5, inflate=1.2, stride=20):
     return inflated
 
 
+def clear_trajectories(blocked, positions, resolution, radius_m=1.5):
+    radius = max(1, math.ceil(radius_m / resolution))
+    for p in positions:
+        cx, cy = math.floor(p[0] / resolution), math.floor(p[1] / resolution)
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if dx * dx + dy * dy <= radius * radius:
+                    blocked.discard((cx + dx, cy + dy))
+
+
 def astar(start, goal, blocked, bounds):
     if start in blocked or goal in blocked: return []
     minx, maxx, miny, maxy = bounds
@@ -105,25 +115,62 @@ def astar(start, goal, blocked, bounds):
     return []
 
 
-def label_path(path, start_xy, yaw, resolution):
+def label_path(path, start_xy, yaw, resolution, lookahead=35.0):
     if len(path) < 2: return None
-    dx = (path[1][0] - path[0][0]); dy = (path[1][1] - path[0][1])
+    # Use a route point at least lookahead meters away.  The immediate grid
+    # neighbor is too local and makes the label react after it is already too
+    # late to commit to a detour.
+    distance = 0.0
+    selected = None
+    for current, following in zip(path, path[1:]):
+        segment = math.hypot(following[0] - current[0], following[1] - current[1]) * resolution
+        distance += segment
+        if distance >= lookahead:
+            selected = following
+            break
+    if selected is None:
+        return None
+    dx = (selected[0] - path[0][0]); dy = (selected[1] - path[0][1])
     angle = math.atan2(-math.sin(yaw) * dx + math.cos(yaw) * dy,
                        math.cos(yaw) * dx + math.sin(yaw) * dy)
     limit = math.radians(50.0)
     if abs(angle) > limit: return None
-    return max(0, min(4, int(round((angle / limit + 1.0) * 2.0))))
+    # ScaleNav columns are ordered left-to-right: +40, +20, 0, -20, -40 deg.
+    return max(0, min(4, int(round(2.0 - angle / math.radians(20.0)))))
 
 
 def main():
-    p = argparse.ArgumentParser(); p.add_argument("--output", default="train_gcn/dataset_privileged.pt"); p.add_argument("--resolution", type=float, default=0.5); p.add_argument("--inflate", type=float, default=1.2); p.add_argument("--stride", type=int, default=20); p.add_argument("--logs", nargs="*", default=None)
+    p = argparse.ArgumentParser(); p.add_argument("--output", default="train_gcn/dataset_privileged.pt"); p.add_argument("--resolution", type=float, default=0.5); p.add_argument("--inflate", type=float, default=1.2); p.add_argument("--stride", type=int, default=20); p.add_argument("--lookahead", type=float, default=35.0); p.add_argument("--map-scope", choices=("global", "session"), default="global"); p.add_argument("--occupancy-cache", default="train_gcn/global_occupancy.pt"); p.add_argument("--logs", nargs="*", default=None)
     a = p.parse_args(); samples = []; skipped = 0
-    for session in (a.logs or sorted(glob.glob("log_scalenav/session_*"))):
+    sessions = a.logs or sorted(glob.glob("log_scalenav/session_*"))
+    global_blocked = None
+    if a.map_scope == "global":
+        if a.occupancy_cache and os.path.isfile(a.occupancy_cache):
+            cached = torch.load(a.occupancy_cache, weights_only=False)
+            global_blocked = set(map(tuple, cached["blocked"]))
+            print(f"loaded_global_occupied_cells={len(global_blocked)}")
+        else:
+            global_blocked = set(); trajectories = []
+            for session in sessions:
+                if not os.path.isfile(os.path.join(session, "index.jsonl")): continue
+                try: entries = parse_entries(session)
+                except OSError: continue
+                global_blocked.update(build_occupancy(session, entries, a.resolution, a.inflate, a.stride))
+                trajectories.extend(e.get("data", {}).get("position", [0, 0, 0])
+                                    for e in entries if e.get("kind") == "odom")
+            clear_trajectories(global_blocked, trajectories, a.resolution)
+            print(f"global_occupied_cells={len(global_blocked)} trajectories={len(trajectories)}")
+            if a.occupancy_cache:
+                os.makedirs(os.path.dirname(os.path.abspath(a.occupancy_cache)), exist_ok=True)
+                torch.save({"blocked": sorted(global_blocked), "resolution": a.resolution,
+                            "inflate": a.inflate, "stride": a.stride}, a.occupancy_cache)
+    for session in sessions:
         if not os.path.isfile(os.path.join(session, "index.jsonl")): continue
         try: entries = parse_entries(session); frames = load_log_frames(session)
         except (OSError, ValueError): skipped += 1; continue
         if not frames: continue
-        goal = frames[0][4]; blocked = build_occupancy(session, entries, a.resolution, a.inflate, a.stride)
+        goal = frames[0][4]
+        blocked = global_blocked if global_blocked is not None else build_occupancy(session, entries, a.resolution, a.inflate, a.stride)
         positions = [e.get("data", {}).get("position", [0,0,0]) for e in entries if e.get("kind") == "odom"]
         all_xy = [(int(math.floor(goal[0]/a.resolution)), int(math.floor(goal[1]/a.resolution)))]
         all_xy += [(int(math.floor(x[0]/a.resolution)), int(math.floor(x[1]/a.resolution))) for x in positions]
@@ -134,11 +181,34 @@ def main():
             bounds = (min(x[0] for x in all_xy)-margin, max(x[0] for x in all_xy)+margin, min(x[1] for x in all_xy)-margin, max(x[1] for x in all_xy)+margin)
             path = astar(start, goal_cell, blocked, bounds)
             yaw = math.atan2(2 * (orientation[3] * orientation[2] + orientation[0] * orientation[1]), 1 - 2 * (orientation[1] ** 2 + orientation[2] ** 2))
-            target = label_path(path, position[:2], yaw, a.resolution)
+            target = label_path(path, position[:2], yaw, a.resolution, a.lookahead)
             if target is None: skipped += 1; continue
             try: data, _, planner_target, _ = build_log_graph(torch, Data, timing, snapshot, position, orientation, frame_goal, "planner", allow_unreachable=True)
             except (KeyError, ValueError, IndexError): skipped += 1; continue
             data.safe_columns = torch.ones(5, dtype=torch.bool)
+            # The label is body-relative, so the student must observe pose
+            # orientation.  Repeat sin/cos(yaw) on every node to keep the
+            # graph schema simple while making world-to-body conversion
+            # identifiable from the input.
+            pose_yaw = math.atan2(2 * (orientation[3] * orientation[2] + orientation[0] * orientation[1]),
+                                  1 - 2 * (orientation[1] ** 2 + orientation[2] ** 2))
+            pose = torch.tensor([math.sin(pose_yaw), math.cos(pose_yaw)], dtype=data.x.dtype)
+            # Add body-frame geometry and goal bearing.  These are invariant
+            # to the arbitrary world map axes and directly expose what the
+            # 35 m route-direction label depends on.
+            world_x, world_y = data.x[:, 0] * 25.0, data.x[:, 1] * 80.0
+            dx, dy = world_x - float(position[0]), world_y - float(position[1])
+            body_x = math.cos(pose_yaw) * dx + math.sin(pose_yaw) * dy
+            body_y = -math.sin(pose_yaw) * dx + math.cos(pose_yaw) * dy
+            gdx, gdy = float(frame_goal[0]) - float(position[0]), float(frame_goal[1]) - float(position[1])
+            goal_body = torch.tensor([math.cos(pose_yaw) * gdx + math.sin(pose_yaw) * gdy,
+                                      -math.sin(pose_yaw) * gdx + math.cos(pose_yaw) * gdy], dtype=data.x.dtype)
+            extra = torch.stack([body_x / 80.0, body_y / 80.0,
+                                 torch.hypot(body_x, body_y) / 80.0,
+                                 torch.atan2(body_y, body_x) / math.pi,
+                                 goal_body[0].expand_as(body_x) / 140.0,
+                                 goal_body[1].expand_as(body_x) / 140.0], dim=1)
+            data.x = torch.cat([data.x, pose.expand(data.x.shape[0], -1), extra], dim=1)
             samples.append({"x": data.x.cpu(), "edge_index": data.edge_index.cpu(), "edge_weight": data.edge_weight.cpu(), "frontier_index": data.frontier_index.cpu(), "frontier_columns": data.frontier_columns.cpu(), "safe_columns": data.safe_columns.cpu(), "target": int(target), "planner_target": int(planner_target), "map_target": int(target), "session": os.path.basename(session), "seq": int(timing["seq"]), "position": list(position)})
         print(f"session={os.path.basename(session)} frames={len(frames)} collected={len(samples)}")
     os.makedirs(os.path.dirname(os.path.abspath(a.output)), exist_ok=True); torch.save({"schema":"scalenav_gcn_privileged.v1", "samples":samples}, a.output); print(f"wrote={a.output} samples={len(samples)} skipped={skipped}")

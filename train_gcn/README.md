@@ -44,3 +44,26 @@ obstacle cloud, and the recomputed A* path:
 Open `train_gcn/goal_dataset_viewer.html` in a browser. The cyan polyline is
 the feasible A* route to the mission goal; the five column costs on the right
 are the costs of feasible first-step directions.
+
+For privileged labels based on the complete logged point-cloud map (rather
+than the learned skeleton graph), build and train the independent dataset:
+
+```bash
+/mnt/code/lab/yopo/YOPO-Rally/.venv/bin/python \
+  train_gcn/collect_privileged_dataset.py \
+  --output train_gcn/dataset_privileged_35m_pose.pt \
+  --lookahead 35
+/mnt/code/lab/yopo/YOPO-Rally/.venv/bin/python train_gcn/train.py \
+  --dataset train_gcn/dataset_privileged_35m_pose.pt --device cuda \
+  --save train_gcn/frontier_gcn_privileged_35m_pose.pt
+```
+
+This oracle accumulates all session point clouds in world coordinates,
+voxelizes and inflates them by the vehicle radius, then runs an ordinary
+8-connected grid A* from the current odometry cell to the actual mission goal.
+The direction label is taken from the route point at least 35 m ahead, not from
+the immediate `path[1]` grid neighbor, so the policy is trained to commit to
+detours early. Since the label is body-relative, `sin(yaw)` and `cos(yaw)` are
+included in each node feature.
+Sessions/frames without a complete route are excluded instead of snapping the
+goal to a distant skeleton node.

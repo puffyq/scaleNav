@@ -8,7 +8,7 @@ WS="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 TEST_COUNT=10
 
 # Semantic influence switch: 1=enabled, 0=disabled.
-SEMANTIC_INFLUENCE="${SEMANTIC_INFLUENCE:-1}"
+SEMANTIC_INFLUENCE="${SEMANTIC_INFLUENCE:-0}"
 
 if [[ "$SEMANTIC_INFLUENCE" != "0" && "$SEMANTIC_INFLUENCE" != "1" ]]; then
   echo "SEMANTIC_INFLUENCE must be 0 or 1" >&2
