@@ -55,6 +55,7 @@ def generate_launch_description():
         DeclareLaunchArgument("use_edge_witness_path", default_value="false"),
         DeclareLaunchArgument("goal_path_cost_weight", default_value="1.0"),
         DeclareLaunchArgument("frontier_goal_distance_weight", default_value="2.0"),
+        DeclareLaunchArgument("frontier_direction_loss_weight", default_value="0.35"),
         DeclareLaunchArgument("frontier_semantic_score_weight", default_value="1.0"),
         DeclareLaunchArgument("frontier_semantic_detour_budget_m", default_value="45.0"),
         DeclareLaunchArgument("frontier_semantic_frame_budget_m", default_value="12.0"),
@@ -91,6 +92,8 @@ def generate_launch_description():
         DeclareLaunchArgument("semantic_depth_tolerance_ms", default_value="50.0"),
         DeclareLaunchArgument("semantic_depth_max_m", default_value="20.0"),
         DeclareLaunchArgument("semantic_max_age_ms", default_value="1500.0"),
+        DeclareLaunchArgument("semantic_risk_memory_ms", default_value="5000.0"),
+        DeclareLaunchArgument("semantic_risk_accumulation_alpha", default_value="0.25"),
         DeclareLaunchArgument("wait_for_initial_semantic", default_value="true"),
         DeclareLaunchArgument("initial_semantic_wait_timeout_ms", default_value="5000.0"),
         DeclareLaunchArgument("semantic_virtual_depth_m", default_value="35.0"),
@@ -153,6 +156,8 @@ def generate_launch_description():
                 "goal_path_cost_weight": LaunchConfiguration("goal_path_cost_weight"),
                 "frontier_goal_distance_weight": LaunchConfiguration(
                     "frontier_goal_distance_weight"),
+                "frontier_direction_loss_weight": LaunchConfiguration(
+                    "frontier_direction_loss_weight"),
                 "frontier_semantic_score_weight": LaunchConfiguration(
                     "frontier_semantic_score_weight"),
                 "frontier_semantic_detour_budget_m": LaunchConfiguration(
@@ -209,6 +214,11 @@ def generate_launch_description():
                     "semantic_depth_tolerance_ms"),
                 "semantic_depth_max_m": LaunchConfiguration("semantic_depth_max_m"),
                 "semantic_max_age_ms": LaunchConfiguration("semantic_max_age_ms"),
+                "semantic_risk_memory_ms": LaunchConfiguration("semantic_risk_memory_ms"),
+                "bubble_topo/semantic_risk_memory_ms": LaunchConfiguration(
+                    "semantic_risk_memory_ms"),
+                "bubble_topo/semantic_risk_accumulation_alpha": LaunchConfiguration(
+                    "semantic_risk_accumulation_alpha"),
                 "wait_for_initial_semantic": LaunchConfiguration("wait_for_initial_semantic"),
                 "initial_semantic_wait_timeout_ms": LaunchConfiguration(
                     "initial_semantic_wait_timeout_ms"),

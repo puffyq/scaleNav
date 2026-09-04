@@ -563,6 +563,71 @@ TEST(TopoGraphM3Contract, TcM3007SemanticEmaAndClamping)
   }
 }
 
+TEST(TopoSemanticMemory, RepeatedEvidenceAccumulatesForFrontierRisk)
+{
+  TopoGraph graph;
+  auto node = std::make_shared<TopoNode>();
+  node->center_ = Eigen::Vector3f::Zero();
+
+  graph.updateNodeSemantic(node, 0.8F, 1.0F, 1'000'000'000LL, 1.0F);
+  const float first = node->semantic_risk_;
+  graph.updateNodeSemantic(node, 0.8F, 1.0F, 1'500'000'000LL, 1.0F);
+  const float second = node->semantic_risk_;
+  graph.updateNodeSemantic(node, 0.8F, 1.0F, 2'000'000'000LL, 1.0F);
+
+  EXPECT_FLOAT_EQ(node->semantic_score_, 0.8F);
+  EXPECT_GT(second, first);
+  EXPECT_GT(node->semantic_risk_, second);
+  EXPECT_LE(node->semantic_risk_, 1.0F);
+  EXPECT_EQ(node->semantic_risk_stamp_ns_, 2'000'000'000LL);
+}
+
+TEST(TopoSemanticFrameSelection, AccumulatedRiskAffectsFrontierObjective)
+{
+  TopoGraph graph;
+  auto region = std::make_shared<RegionNode>(Eigen::Vector3i::Zero());
+  graph.reg_map_idx2ptr_[Eigen::Vector3i::Zero()] = region;
+  auto start = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f::Zero();
+  start->geometry_state_ = TopoGeometryState::Verified;
+  region->topo_nodes_.insert(start);
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    const float distance = (a->center_ - b->center_).norm();
+    a->neighbors_.insert(b); b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    a->weight_[b] = distance; b->weight_[a] = distance;
+  };
+  auto accumulated_risk = [&](int column, float risk) {
+    auto node = std::make_shared<TopoNode>();
+    node->center_ = Eigen::Vector3f(5.0F, (column - 2) * 0.5F, 0.0F);
+    node->geometry_state_ = TopoGeometryState::Unknown;
+    node->is_virtual_semantic_ = true;
+    node->semantic_observations_ = 1;
+    node->semantic_stamp_ns_ = node->semantic_frame_stamp_ns_ = 1'000;
+    node->semantic_column_ = static_cast<std::int8_t>(column);
+    node->semantic_score_ = 0.2F;
+    node->semantic_confidence_ = 1.0F;
+    node->semantic_risk_ = risk;
+    connect(start, node);
+    region->topo_nodes_.insert(node);
+    return node;
+  };
+  const auto risky = accumulated_risk(1, 0.9F);
+  const auto safer = accumulated_risk(3, 0.1F);
+
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(20.0F, 0.0F, 0.0F), path, 0.2,
+    1.0F, 1.0F, {}, 0.0F, 20.0F, &start->center_, 0.0F, false,
+    std::numeric_limits<float>::infinity(), 0.0F, nullptr, 90.0F,
+    0.0F, 0.0F, 0.0F, 0.0F, nullptr, 1'000,
+    2.0F, 45.0F, 12.0F, 0.08F));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), safer);
+  EXPECT_NE(path.back(), risky);
+}
+
 TEST(TopoGraphM3Contract, TcM3008SemanticQueryFiltersRangeAndEvidence)
 {
   TopoGraph graph;
@@ -969,6 +1034,78 @@ TEST(TopoGraphM3Contract, TcM3021UnknownGenerationUsesOnePointFiveSecondMemory)
     EXPECT_EQ(skipped, 3U);
   }
   EXPECT_EQ(graph.semanticNodes().size(), 4U);
+}
+
+TEST(TopoSemanticMemory, RouteRiskOutlivesFrontierEligibility)
+{
+  TopoGraph graph;
+  auto region = std::make_shared<RegionNode>(Eigen::Vector3i::Zero());
+  auto historical_risk = std::make_shared<TopoNode>();
+  historical_risk->geometry_state_ = TopoGeometryState::Unknown;
+  historical_risk->is_virtual_semantic_ = true;
+  historical_risk->semantic_observations_ = 1;
+  historical_risk->semantic_stamp_ns_ = 1'000'000'000LL;
+  region->topo_nodes_.insert(historical_risk);
+  graph.reg_map_idx2ptr_[Eigen::Vector3i::Zero()] = region;
+
+  constexpr std::int64_t refresh_stamp_ns = 4'000'000'000LL;
+  EXPECT_TRUE(graph.semanticNodes(nullptr,
+    std::numeric_limits<float>::infinity(), refresh_stamp_ns).empty());
+  const auto route_risk = graph.semanticRiskNodes(nullptr,
+    std::numeric_limits<float>::infinity(), refresh_stamp_ns);
+  ASSERT_EQ(route_risk.size(), 1U);
+  EXPECT_EQ(route_risk.front(), historical_risk);
+}
+
+TEST(TopoSemanticMemory, ProgressRefreshKeepsHistoricalRiskInAstar)
+{
+  TopoGraph graph;
+  auto region = std::make_shared<RegionNode>(Eigen::Vector3i::Zero());
+  graph.reg_map_idx2ptr_[Eigen::Vector3i::Zero()] = region;
+
+  auto start = std::make_shared<TopoNode>();
+  auto direct = std::make_shared<TopoNode>();
+  auto detour = std::make_shared<TopoNode>();
+  auto goal = std::make_shared<TopoNode>();
+  auto historical_risk = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  direct->center_ = Eigen::Vector3f(10.0F, 0.0F, 1.6F);
+  detour->center_ = Eigen::Vector3f(10.0F, 8.0F, 1.6F);
+  goal->center_ = Eigen::Vector3f(20.0F, 0.0F, 1.6F);
+  historical_risk->center_ = Eigen::Vector3f(10.0F, 0.2F, 1.6F);
+  for (const auto &node : {start, direct, detour, goal}) {
+    node->geometry_state_ = TopoGeometryState::Verified;
+    region->topo_nodes_.insert(node);
+  }
+  historical_risk->geometry_state_ = TopoGeometryState::Unknown;
+  historical_risk->is_virtual_semantic_ = true;
+  historical_risk->semantic_score_ = 0.9F;
+  historical_risk->semantic_confidence_ = 1.0F;
+  historical_risk->semantic_observations_ = 1;
+  historical_risk->semantic_stamp_ns_ = 1'000'000'000LL;
+  region->topo_nodes_.insert(historical_risk);
+
+  auto connect = [](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
+    left->neighbors_.insert(right);
+    right->neighbors_.insert(left);
+    left->paths_[right] = {left->center_, right->center_};
+    right->paths_[left] = {right->center_, left->center_};
+    const float length = (left->center_ - right->center_).norm();
+    left->weight_[right] = length;
+    right->weight_[left] = length;
+  };
+  connect(start, direct);
+  connect(direct, goal);
+  connect(start, detour);
+  connect(detour, goal);
+
+  constexpr std::int64_t refresh_stamp_ns = 4'000'000'000LL;
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.graphSearch(
+    start, goal, path, 0.2, false, {}, 4.0F,
+    std::numeric_limits<float>::infinity(), nullptr, refresh_stamp_ns));
+  ASSERT_EQ(path.size(), 3U);
+  EXPECT_EQ(path[1], detour);
 }
 
 TEST(TopoGraphPersistence, KeepsAOneFrameGeometryMiss)
@@ -2465,6 +2602,101 @@ TEST(TopoSemanticFrameSelection, SemanticBudgetCanPayForThirtyMetreDetour)
   ASSERT_EQ(path.size(), 3U);
   EXPECT_EQ(path.back(), safe);
   EXPECT_LT(stats.best_semantic_frontier_objective, 0.7F);
+}
+
+TEST(TopoSemanticFrameSelection, BacktrackCostBreaksSymmetricChoiceTowardMotion)
+{
+  TopoGraph graph;
+  auto region = std::make_shared<RegionNode>(Eigen::Vector3i(0, 0, 0));
+  graph.reg_map_idx2ptr_[Eigen::Vector3i(0, 0, 0)] = region;
+  auto start = std::make_shared<TopoNode>();
+  auto forward = std::make_shared<TopoNode>();
+  auto reverse = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f::Zero();
+  start->geometry_state_ = TopoGeometryState::Verified;
+  forward->center_ = Eigen::Vector3f(4.0F, 0.0F, 0.0F);
+  reverse->center_ = Eigen::Vector3f(-4.0F, 0.0F, 0.0F);
+  for (const auto &node : {forward, reverse}) {
+    node->geometry_state_ = TopoGeometryState::Unknown;
+    node->is_virtual_semantic_ = true;
+    node->semantic_observations_ = 1;
+    node->semantic_stamp_ns_ = node->semantic_frame_stamp_ns_ = 7000;
+    node->semantic_score_ = 0.2F;
+    node->semantic_confidence_ = 1.0F;
+  }
+  // Without continuity both objectives are symmetric and column 0 wins the
+  // tie. The direction term must make the forward column win instead.
+  reverse->persistent_id_ = 701;
+  reverse->semantic_column_ = 0;
+  forward->persistent_id_ = 702;
+  forward->semantic_column_ = 1;
+  auto connect = [](const TopoNode::Ptr &a, const TopoNode::Ptr &b) {
+    const float distance = (a->center_ - b->center_).norm();
+    a->neighbors_.insert(b); b->neighbors_.insert(a);
+    a->paths_[b] = {a->center_, b->center_};
+    b->paths_[a] = {b->center_, a->center_};
+    a->weight_[b] = distance; b->weight_[a] = distance;
+  };
+  connect(start, forward);
+  connect(start, reverse);
+  for (const auto &node : {start, forward, reverse}) region->topo_nodes_.insert(node);
+
+  const Eigen::Vector3f motion_direction = Eigen::Vector3f::UnitX();
+  TopoGraphSearchStats stats;
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(0.0F, 10.0F, 0.0F), path, 0.2, 1.0F, 1.0F, {},
+    0.0F, 20.0F, &start->center_, 0.0F, false,
+    std::numeric_limits<float>::infinity(), 0.0F, &motion_direction, 90.0F,
+    0.0F, 0.35F, 0.0F, 0.0F, &stats, 7000, 2.0F, 45.0F, 12.0F, 0.08F));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), forward);
+  const auto reverse_stats = std::find_if(
+    stats.semantic_frontier_ranking.begin(), stats.semantic_frontier_ranking.end(),
+    [&](const TopoFrontierCandidateStats &candidate) {
+      return candidate.node_id == reverse->persistent_id_;
+    });
+  ASSERT_NE(reverse_stats, stats.semantic_frontier_ranking.end());
+  EXPECT_NEAR(reverse_stats->direction_cosine, -1.0F, 1e-5F);
+  EXPECT_NEAR(reverse_stats->backtrack_cost_m, 3.5F, 1e-5F);
+}
+
+TEST(TopoSemanticFrameSelection, BacktrackCostDoesNotForbidOnlyReachableRoute)
+{
+  TopoGraph graph;
+  auto region = std::make_shared<RegionNode>(Eigen::Vector3i(0, 0, 0));
+  graph.reg_map_idx2ptr_[Eigen::Vector3i(0, 0, 0)] = region;
+  auto start = std::make_shared<TopoNode>();
+  auto reverse = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f::Zero();
+  start->geometry_state_ = TopoGeometryState::Verified;
+  reverse->center_ = Eigen::Vector3f(-4.0F, 0.0F, 0.0F);
+  reverse->geometry_state_ = TopoGeometryState::Unknown;
+  reverse->is_virtual_semantic_ = true;
+  reverse->semantic_observations_ = 1;
+  reverse->semantic_stamp_ns_ = reverse->semantic_frame_stamp_ns_ = 7100;
+  reverse->semantic_score_ = 0.2F;
+  reverse->semantic_confidence_ = 1.0F;
+  reverse->semantic_column_ = 0;
+  reverse->persistent_id_ = 711;
+  start->neighbors_.insert(reverse); reverse->neighbors_.insert(start);
+  start->paths_[reverse] = {start->center_, reverse->center_};
+  reverse->paths_[start] = {reverse->center_, start->center_};
+  start->weight_[reverse] = 4.0F; reverse->weight_[start] = 4.0F;
+  region->topo_nodes_.insert(start); region->topo_nodes_.insert(reverse);
+
+  const Eigen::Vector3f motion_direction = Eigen::Vector3f::UnitX();
+  TopoGraphSearchStats stats;
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, Eigen::Vector3f(0.0F, 10.0F, 0.0F), path, 0.2, 1.0F, 1.0F, {},
+    0.0F, 20.0F, &start->center_, 0.0F, false,
+    std::numeric_limits<float>::infinity(), 0.0F, &motion_direction, 90.0F,
+    0.0F, 0.35F, 0.0F, 0.0F, &stats, 7100, 2.0F, 45.0F, 12.0F, 0.08F));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), reverse);
+  ASSERT_EQ(stats.semantic_frontier_ranking.size(), 1U);
+  EXPECT_GT(stats.semantic_frontier_ranking.front().backtrack_cost_m, 0.0F);
 }
 
 TEST(TopoSemanticEndpointType, MeasuredAnnotationRemainsOrdinaryBackbone)

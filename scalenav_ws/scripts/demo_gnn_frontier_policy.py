@@ -160,50 +160,61 @@ def load_log_frames(session: str, max_frames: int = 0):
         graph_path = os.path.join(session, graph["file"])
         with open(graph_path, encoding="utf-8") as stream:
             snapshot = json.load(stream)
-        frames.append((timing, snapshot, pose["data"]["position"]))
+        goal = next((entry["data"]["position"] for entry in entries
+                     if entry.get("kind") == "goal"), [0.0, 140.0, 1.6])
+        frames.append((timing, snapshot, pose["data"]["position"],
+                       pose["data"].get("orientation", [0.0, 0.0, 0.0, 1.0]), goal))
     return frames
 
 
-def map_oracle_label(nodes, edges, vehicle_position):
-    """Derive a geometry-only five-column label from the logged free-space map."""
+def goal_oracle_label(nodes, edges, vehicle_position, orientation, goal,
+                      require_route=True):
+    """Choose the feasible first direction on the shortest graph route to goal."""
     adjacency = {node.node_id: [] for node in nodes}
     for left, right in edges:
         adjacency.setdefault(left, []).append(right)
         adjacency.setdefault(right, []).append(left)
     start = min(nodes, key=lambda node: math.dist(
         (node.x, node.y), vehicle_position[:2])).node_id
-    reachable = {start}
-    queue = [start]
-    while queue:
-        current = queue.pop()
+    goal_id = min(nodes, key=lambda node: math.dist((node.x, node.y), goal[:2])).node_id
+    distances = {node.node_id: float("inf") for node in nodes}
+    distances[goal_id] = 0.0
+    pending = [(0.0, goal_id)]
+    while pending:
+        distance, current = min(pending)
+        pending.remove((distance, current))
+        if distance != distances[current]: continue
         for neighbor in adjacency.get(current, []):
-            if neighbor not in reachable:
-                reachable.add(neighbor)
-                queue.append(neighbor)
-    # The log starts aligned with +Y in world coordinates. Columns are
-    # left-to-right angles [-40,-20,0,20,40] degrees around that direction.
-    limits = math.radians(50.0)
-    best = [-float("inf")] * 5
-    for node in nodes:
-        if node.node_id not in reachable:
-            continue
-        dx = node.x - vehicle_position[0]
-        dy = node.y - vehicle_position[1]
-        distance = math.hypot(dx, dy)
-        angle = math.atan2(dx, dy)
-        if dy < 3.0 or distance < 3.0 or abs(angle) > limits:
-            continue
-        column = int(round((angle / limits + 1.0) * 2.0))
-        column = max(0, min(4, column))
-        best[column] = max(best[column], dy - 0.20 * abs(dx))
-    safe = [math.isfinite(value) for value in best]
-    if not any(safe):
-        return 2, [True] * 5
-    return max(range(5), key=lambda column: best[column]), safe
+            edge = math.dist((nodes[current].x, nodes[current].y),
+                             (nodes[neighbor].x, nodes[neighbor].y))
+            candidate = distance + edge
+            if candidate < distances[neighbor]:
+                distances[neighbor] = candidate
+                pending.append((candidate, neighbor))
+    # Use the same yaw convention as ScaleNav: body X is world heading.
+    yaw = math.atan2(2 * (orientation[3] * orientation[2] + orientation[0] * orientation[1]),
+                     1 - 2 * (orientation[1] ** 2 + orientation[2] ** 2))
+    costs = [float("inf")] * 5
+    limit = math.radians(50.0)
+    for neighbor in adjacency.get(start, []):
+        if not math.isfinite(distances.get(neighbor, float("inf"))): continue
+        dx, dy = nodes[neighbor].x - nodes[start].x, nodes[neighbor].y - nodes[start].y
+        angle = math.atan2(-math.sin(yaw) * dx + math.cos(yaw) * dy,
+                           math.cos(yaw) * dx + math.sin(yaw) * dy)
+        if abs(angle) > limit: continue
+        column = max(0, min(4, int(round((angle / limit + 1.0) * 2.0))))
+        edge = math.hypot(dx, dy)
+        costs[column] = min(costs[column], edge + distances[neighbor])
+    safe = [math.isfinite(value) for value in costs]
+    if not any(safe) and require_route:
+        raise ValueError("current skeleton has no feasible route to mission goal")
+    target = min(range(5), key=lambda column: costs[column]) if any(safe) else -1
+    return target, safe, costs
 
 
 def build_log_graph(torch, Data, timing, snapshot, vehicle_position,
-                    label_source: str = "map"):
+                    orientation=None, goal=None, label_source: str = "map",
+                    allow_unreachable=False):
     """Convert one RViz graph marker snapshot into a policy Data object."""
     node_marker = next((m for m in snapshot["markers"]
                         if m.get("ns") == "scalenav_skeleton_nodes"), None)
@@ -229,18 +240,17 @@ def build_log_graph(torch, Data, timing, snapshot, vehicle_position,
 
     ranking = timing["data"].get("semantic_frontier_ranking", [])
     ranking_by_column = {int(item.get("column", -1)): item for item in ranking}
-    frontier_marker = next((m for m in snapshot["markers"]
-                            if m.get("ns") == "scalenav_frontier_goal"
-                            and m.get("action") == 0), None)
-    center = (frontier_marker or {}).get("pose", {}).get("position", vehicle_position)
+    orientation = orientation or [0.0, 0.0, 0.0, 1.0]
+    goal = goal or [0.0, 140.0, 1.6]
     base_id = -1
     safe = [False] * 5
     for column in range(5):
         item = ranking_by_column.get(column, {})
-        # Candidate positions are diagnostic only: the graph snapshot does not
-        # store semantic-column coordinates, so spread them around the logged goal.
-        x = float(center[0]) + (column - 2) * 3.0
-        y = float(center[1])
+        yaw = math.atan2(2 * (orientation[3] * orientation[2] + orientation[0] * orientation[1]),
+                         1 - 2 * (orientation[1] ** 2 + orientation[2] ** 2))
+        angle = yaw + (2 - column) * math.radians(20.0)
+        x = float(vehicle_position[0]) + math.cos(angle) * 10.0
+        y = float(vehicle_position[1]) + math.sin(angle) * 10.0
         objective = float(item.get("objective", float("inf")))
         score = 1.0 / (1.0 + max(float(item.get("risk", 1.0)), 0.0))
         candidate = DemoNode(base_id, x, y, 1.0, score, 1.0, column, True)
@@ -250,15 +260,17 @@ def build_log_graph(torch, Data, timing, snapshot, vehicle_position,
         edges.add((nodes[nearest].node_id, base_id))
         safe[column] = math.isfinite(objective)
         base_id -= 1
-    map_target, map_safe = map_oracle_label(nodes[:len(points)],
-                                            [(a, b) for a, b in edges
-                                             if a >= 0 and b >= 0],
-                                            vehicle_position)
+    map_target, map_safe, goal_costs = goal_oracle_label(
+        nodes[:len(points)], [(a, b) for a, b in edges if a >= 0 and b >= 0],
+        vehicle_position, orientation, goal,
+        require_route=not allow_unreachable)
     planner_target = int(timing["data"]["selected_semantic_column"])
     selected_safe = map_safe if label_source == "map" else safe
+    if allow_unreachable and not any(selected_safe):
+        selected_safe = safe if any(safe) else [True] * 5
     target = map_target if label_source == "map" else planner_target
     return (make_data(torch, Data, nodes, sorted(edges), selected_safe,
-                      goal=(0.0, 140.0)), target, planner_target, map_target)
+                      goal=tuple(goal[:2])), target, planner_target, map_target)
 
 
 def load_torch_geometric():
@@ -370,9 +382,10 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             log_hidden = None
             previous = -1
             losses = []
-            for timing, snapshot, position in frames:
+            for timing, snapshot, position, orientation, goal in frames:
                 data, target, _, _ = build_log_graph(
-                    torch, Data, timing, snapshot, position, args.label_source)
+                    torch, Data, timing, snapshot, position, orientation, goal,
+                    args.label_source)
                 logits, log_hidden = model(data, log_hidden, previous)
                 loss = nn.functional.cross_entropy(logits[None, :],
                                                    torch.tensor([target]))
@@ -390,9 +403,10 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         previous = -1
         selected = []
         print("\nlog replay:")
-        for timing, snapshot, position in frames:
+        for timing, snapshot, position, orientation, goal in frames:
             data, target, planner_target, map_target = build_log_graph(
-                torch, Data, timing, snapshot, position, args.label_source)
+                torch, Data, timing, snapshot, position, orientation, goal,
+                args.label_source)
             with torch.no_grad():
                 logits, log_hidden = model(data, log_hidden, previous)
                 prediction = int(torch.argmax(logits).item())

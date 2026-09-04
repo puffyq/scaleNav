@@ -227,6 +227,11 @@ public:
   // Planning reads semantics directly from the persistent topology node.
   float semantic_score_ = 0.0F;
   float semantic_confidence_ = 0.0F;
+  // Latest patch evidence is kept separately from the bounded, time-decayed
+  // risk memory used by frontier ranking and route costs. This preserves the
+  // five-way frame ranking while allowing repeated observations to accumulate.
+  float semantic_risk_ = 0.0F;
+  std::int64_t semantic_risk_stamp_ns_ = 0;
   std::uint32_t semantic_observations_ = 0;
   std::int64_t semantic_stamp_ns_ = 0;
   // True only for a fixed-depth projection created as one of the five
@@ -413,6 +418,19 @@ inline bool semanticNodeActiveForPlanning(
   return age_ns >= 0 && age_ns <= kSemanticPlanningMemoryNs;
 }
 
+inline bool semanticNodeActiveForRisk(
+    const TopoNode &node, std::int64_t reference_stamp_ns,
+    std::int64_t risk_memory_ns) {
+  if (node.geometry_state_ == TopoGeometryState::Verified || reference_stamp_ns == 0) {
+    return true;
+  }
+  if (reference_stamp_ns < 0 || node.semantic_stamp_ns_ <= 0 || risk_memory_ns < 0) {
+    return false;
+  }
+  const std::int64_t age_ns = reference_stamp_ns - node.semantic_stamp_ns_;
+  return age_ns >= 0 && age_ns <= risk_memory_ns;
+}
+
 struct PairPtrHash {
   std::size_t operator()(const std::pair<TopoNode::Ptr, TopoNode::Ptr> &p) const {
     return std::hash<TopoNode::Ptr>()(p.first) ^ std::hash<TopoNode::Ptr>()(p.second);
@@ -542,6 +560,8 @@ struct TopoSemanticRecord {
   float confidence = 0.0F;
   std::uint32_t observations = 0;
   std::int64_t stamp_ns = 0;
+  float risk = 0.0F;
+  std::int64_t risk_stamp_ns = 0;
   bool is_virtual = false;
   std::int64_t frame_stamp_ns = 0;
   std::int8_t column = -1;
@@ -567,6 +587,8 @@ struct TopoFrontierCandidateStats {
   float frame_risk_range = 0.0F;
   float risk_regret = 0.0F;
   float semantic_cost_m = 0.0F;
+  float direction_cosine = 1.0F;
+  float backtrack_cost_m = 0.0F;
   float objective = std::numeric_limits<float>::infinity();
 };
 
@@ -770,6 +792,11 @@ public:
       float maximum_distance_m = std::numeric_limits<float>::infinity(),
       std::int64_t active_virtual_stamp_ns = 0,
       size_t *inactive_virtual_nodes_skipped = nullptr) const;
+  std::vector<TopoNode::Ptr> semanticRiskNodes(
+      const Eigen::Vector3f *origin = nullptr,
+      float maximum_distance_m = std::numeric_limits<float>::infinity(),
+      std::int64_t reference_stamp_ns = 0,
+      size_t *inactive_virtual_nodes_skipped = nullptr) const;
   size_t nodeCountWithinRadius(
       const Eigen::Vector3f &origin,
       float maximum_distance_m = std::numeric_limits<float>::infinity()) const;
@@ -802,6 +829,10 @@ private:
   // Bound per-edge semantic field evaluation when a long-lived map contains
   // many overlapping risk spheres. Zero disables the bound.
   int semantic_edge_candidate_limit_ = 8;
+  double semantic_risk_memory_ms_ = 5000.0;
+  // Fraction of each valid observation admitted into the accumulated risk
+  // memory. The result remains bounded in [0, 1].
+  double semantic_risk_accumulation_alpha_ = 0.25;
   double clearance_cost_weight_ = 2.0;
   double clearance_target_m_ = 1.2;
   mutable std::mutex semantic_memory_mutex_;

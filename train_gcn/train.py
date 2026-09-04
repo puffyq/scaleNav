@@ -20,9 +20,11 @@ class WeightedGCN(nn.Module):
     def forward(self, x, edge_index, edge_weight):
         source, target = edge_index
         messages = x[source] * edge_weight[:, None]
-        aggregate = torch.zeros_like(x)
+        # Match GCNConv's self-loop behavior so every node retains its own
+        # candidate features instead of being replaced by neighbor averages.
+        aggregate = x.clone()
         aggregate.index_add_(0, target, messages)
-        degree = torch.zeros(x.shape[0], device=x.device)
+        degree = torch.ones(x.shape[0], device=x.device)
         degree.index_add_(0, target, edge_weight)
         return self.linear(aggregate / degree.clamp_min(1e-6)[:, None])
 

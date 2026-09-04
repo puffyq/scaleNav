@@ -77,7 +77,7 @@ ordered-bubble MPC; offline, a corridor-conditioned network trained on the
 same contract.  Semantic observations modify route costs but do not certify free
 space; geometric verification and depth-based local execution remain
 authoritative.  In the latest 140-m closed-loop batch, ScaleNav completes all
-ten trials at $4.134\pm0.141$~m/s with zero collisions.  On
+ten trials at $5.238\pm0.091$~m/s with zero collisions.  On
 a paired 1,479-route offline benchmark, corridor conditioning reduces
 collision from $8.05\%$ to $0.14\%$ and corridor violation from $50.10\%$ to
 $25.22\%$, while raising average progress from $6.225$ to $6.502$~m.
@@ -490,12 +490,15 @@ the failed witness executable.
 
 Let $V$ and $E$ denote the vertices and candidate edges in the local graph,
 $M$ the retained semantic nodes, and $Q$ the number of samples used to measure
-each witness.  A naive semantic edge evaluation is $O(EQM)$, but the planner
-first restricts nodes to the edge influence radius, so the practical work is
-proportional to the local semantic neighborhood rather than the full history.
-The bounded point buffer, graph window, and semantic-node cap give memory
-growth $O(N_{\max}+V+E+M)$ independent of flight duration.  These bounds keep
-the slow route layer from competing with the fixed-rate local controller.
+each witness.  A naive semantic edge evaluation is $O(EQM)$.  The search
+expansion and edge scoring use a finite local radius and a bounded semantic
+candidate set, but the current semantic-record collection still traverses the
+topology region table before applying that radius.  We therefore make no
+asymptotic claim that latency is independent of an arbitrarily large persistent
+graph.  The retained point buffer and virtual semantic set have explicit caps,
+whereas the verified persistent backbone requires $O(V+E)$ storage as explored
+area grows.  The closed-loop evidence below therefore reports the local search
+working set separately from persistent storage.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{FAST CORRIDOR-CONDITIONED EXECUTION}
@@ -621,7 +624,7 @@ Parameter & Value & Parameter & Value \\
 \midrule
 Point voxel & 0.10 m & Point budget & 100,000 \\
 Frame history & current frame only & Graph update & 100 ms \\
-Graph rebuild & 100 ms & Search radius & 45 m \\
+Graph rebuild & 100 ms & Search radius & 40 m \\
 Local lookahead & 15 m & Goal-connect budget & 20 ms \\
 $\lambda_{\rm sem}$ & 2.0 & $R_s$ & 8 m \\
 $\lambda_{\rm clr}$ & 2.0 & $\rho^\star$ & 1.2 m \\
@@ -658,22 +661,25 @@ point processing, graph construction, A*, planning, and PEARL latency.
 
 \subsubsection{Results}
 Figure~\ref{fig:map2_speed_trajectories} shows one run from each current-scene
-batch on a common reconstruction; incomplete baselines end at their recorded
-collisions.
+batch on a common reconstruction; incomplete runs end at their recorded
+collisions.  The ScaleNav (YOPO) panel uses trial~1 of the latest batch, which
+has both its shortest completion time and shortest completed path; aggregate
+claims use all ten trials.
 
-\begin{figure}[!ht]
+\begin{figure*}[!t]
 \centering
-\includegraphics[width=0.72\columnwidth]{pics/experiments/map2_0_140_1p6/trajectory_speed_comparison_current.pdf}
+\includegraphics[width=0.88\textwidth]{pics/experiments/map2_0_140_1p6/trajectory_speed_comparison_current.pdf}
 \vspace{-2pt}
-\caption{Recorded Map2 trajectories from $(0,0,1.6)$~m to
+\caption{Representative recorded Map2 trajectories from $(0,0,1.6)$~m to
 $(0,140,1.6)$~m over the point-cloud reconstruction recorded in the latest
 ScaleNav batch, voxelized at 0.3~m with one-cell display dilation.  Colored
 curves denote executed trajectories and gray marks denote reconstructed scene
 geometry; circles, stars,
 and crosses mark starts, completed goals, and incomplete collision endpoints,
-respectively.}
+respectively.  Panel labels state the selected trial outcome; aggregate outcomes
+over ten trials are reported in Table~\ref{tab:single_run_validation}.}
 \label{fig:map2_speed_trajectories}
-\end{figure}
+\end{figure*}
 
 Table~\ref{tab:single_run_validation} reports the latest ten-trial batch for
 each method on the current scene.
@@ -691,7 +697,7 @@ Method & Success (\%) & Collision (\%) & Timeout (\%) & $L_{\rm succ}$ (m) & $L_
 YOPO-Simple     & 0   & 100 & 0  & \blank & $129.79\pm0.58$ & \blank & \blank & \blank \\
 EGO-Planner     & 0   & 100 & 0  & \blank & $73.24\pm0.69$ & \blank & \blank & \blank \\
 SUPER           & 0   & 100 & 0  & \blank & $47.07\pm28.27$ & \blank & \blank & \blank \\
-ScaleNav (YOPO) & 100 & 0   & 0  & $196.85\pm6.84$ & \blank & $47.68\pm2.57$ & $4.13\pm0.14$ & $5.48\pm0.12$ \\
+ScaleNav (YOPO) & 100 & 0   & 0  & $196.30\pm13.36$ & \blank & $37.48\pm2.50$ & $5.24\pm0.09$ & $6.42\pm0.05$ \\
 ScaleNav+EGO    & 0   & 90  & 10 & \blank & $26.57\pm17.61$ & \blank & \blank & \blank \\
 ScaleNav+SUPER  & 50  & 40  & 10 & $205.16\pm14.52$ & $50.08\pm37.17$ & $41.42\pm3.40$ & $4.96\pm0.13$ & $5.96\pm0.02$ \\
 \bottomrule
@@ -751,7 +757,7 @@ witness corridor.}
 \cmidrule(lr){2-5} \cmidrule(lr){6-12}
 Variant & SE & FF & RM & WC & Succ. (\%)$\uparrow$ & Coll. (\%)$\downarrow$ & T/O (\%)$\downarrow$ & Path (m) & Time (s) & $\bar v$ (m/s) & $v_{\max}$ (m/s) \\
 \midrule
-\textbf{Full ScaleNav} & \checkmark & \checkmark & \checkmark & \checkmark & 100 & 0 & 0 & 196.850$\pm$6.843 & 47.679$\pm$2.573 & 4.134$\pm$0.141 & 5.476$\pm$0.117 \\
+\textbf{Full ScaleNav} & \checkmark & \checkmark & \checkmark & \checkmark & 100 & 0 & 0 & 196.297$\pm$13.363 & 37.480$\pm$2.500 & 5.238$\pm$0.091 & 6.420$\pm$0.046 \\
 \midrule
 w/o semantic front end  & $\times$   & $\times$   & \checkmark & \checkmark & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
 No task-relevant semantics & \checkmark & \checkmark & \checkmark & \checkmark & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
@@ -766,9 +772,10 @@ w/o witness corridor    & \checkmark & \checkmark & \checkmark & $\times$   & \b
 The current-scene ablations remain pending; no causal semantic claim is made
 from earlier-scene batches.
 
-Table~\ref{tab:online_profile} profiles a separate ten-trial batch.  Rates are
+Table~\ref{tab:online_profile} profiles the latest ten-trial batch.  Rates are
 per-trial mean $\pm$ standard deviation; event latencies pool trials.  A* is a
-subset of the planning tick, not an additional serial stage.
+subset of the planning tick, not an additional serial stage, and its rate is
+the frequency of fresh searches rather than the planner tick rate.
 
 \begin{table}[t]
 \caption{ScaleNav Online Resource Profile over Ten Map2 Trials}
@@ -780,20 +787,43 @@ subset of the planning tick, not an additional serial stage.
 \toprule
 Stage & Samples & Rate (Hz) & Mean (ms) & P95 (ms) \\
 \midrule
-Point-cloud update & 2,892 & $7.99\pm0.13$ & 3.06 & 5.43 \\
-Incremental graph construction & 1,634 & $4.98\pm0.05$ & 60.60 & 94.94 \\
-Topological planning tick & 3,259 & $9.95\pm0.06$ & 25.69 & 61.27 \\
-Rolling A* portion & 3,259 & $9.95\pm0.06$ & 11.28 & 21.94 \\
-PEARL inference & 652 & $1.994\pm0.008$ & 60.08 & 80.00 \\
+Point-cloud update & 4,729 & $12.64\pm0.79$ & 41.99 & 56.29 \\
+Incremental graph construction & 1,468 & $3.92\pm0.19$ & 142.95 & 300.36 \\
+Topological planning tick & 2,966 & $7.91\pm0.38$ & 99.03 & 233.81 \\
+Active rolling A* & 466 & $1.24\pm0.36$ & 25.05 & 65.41 \\
+PEARL heatmap output & 724 & $1.932\pm0.020$ & \blank & \blank \\
 \bottomrule
 \end{tabular}
 }
 \end{table}
 
-The final graph has $522.0\pm19.0$ nodes, $1965.6\pm98.7$ edges, and
-$81.5\pm17.4$ semantic nodes ($22.0\pm4.0$ verified).  PEARL publishes 652
-heatmaps and coalesces 75.7\% of input frames under its 2-Hz latest-frame queue.
-RSS, peak GPU memory, and YOPO latency were not logged.
+The final diagnostic sample has $582.8\pm35.9$ verified-backbone nodes,
+$2032.3\pm116.5$ edges, and $274.7\pm21.8$ semantic nodes
+($232.7\pm15.0$ verified).  PEARL publishes 724 heatmaps and coalesces 3,663 of
+4,387 RGB frames under its 2-Hz latest-frame queue (83.5\%).  PEARL inference
+latency, process RSS, peak GPU memory, and YOPO latency were not logged in this
+batch.
+
+Figure~\ref{fig:resource_scaling} summarizes online work over the latest
+ten-trial ScaleNav batch.  The search admits only nodes in the 40-m local
+window: its node-count median and P95 are 192 and 222.  Among 466 ticks that
+execute a fresh search, the median and P95 expanded-node counts are 161 and
+191, and the corresponding edge-evaluation counts are 1,024 and 1,276.  The
+A* latency median and P95 are 14.54 and 65.41~ms.  These node counts are
+working-set proxies rather than process memory; RSS and peak GPU memory were
+not recorded.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.98\textwidth]{pics/experiments/map2_0_140_1p6/graph_resource_scaling.pdf}
+\caption{Online resource summary over the latest ten Map2 flights.
+(a)~Median and P95 node counts for the 40-m local window (178 diagnostic
+samples) and active A* expansion (466 searches).  (b)~Mean and P95 wall time
+for point-cloud processing, asynchronous graph update, the complete planning
+tick, and active A*.  Route-hold ticks are excluded from the active-A* bars.
+The persistent global graph is not used as an online-workload axis.}
+\label{fig:resource_scaling}
+\end{figure*}
 
 \subsection{Offline Local-Policy Evaluation}
 \textit{Protocol.} The final corridor-conditioned checkpoint is trained on

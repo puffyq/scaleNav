@@ -108,3 +108,4 @@ train_scalav_tmp.json
 scalenav_ws/scalenav_flight_statistics.csv
 powerline_pearl_real.png
 powerline_semantic_demo/
+scalenav_ws/data/

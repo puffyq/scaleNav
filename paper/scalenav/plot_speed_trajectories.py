@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -349,11 +350,19 @@ def main():
     )
     parser.add_argument("--scalenav", required=True, type=Path)
     parser.add_argument("--scalenav-label", default="ScaleNav (ours)")
+    parser.add_argument(
+        "--layout-order", action="append", default=[], metavar="LABEL",
+        help="place runs in this label order after loading them",
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--goal", nargs=3, type=float, default=(0.0, 140.0, 1.6))
     parser.add_argument("--goal-radius", type=float, default=0.5)
     parser.add_argument("--stop-speed", type=float, default=0.3)
     parser.add_argument("--speed-max", type=float, default=6.0)
+    parser.add_argument(
+        "--columns", type=int, default=1,
+        help="number of subplot columns (default: 1)",
+    )
     parser.add_argument(
         "--pointcloud-session", "--density-session", dest="pointcloud_session",
         type=Path,
@@ -384,6 +393,8 @@ def main():
         parser.error("--voxel-size must be positive")
     if args.voxel_dilation_cells < 0:
         parser.error("--voxel-dilation-cells must be nonnegative")
+    if args.columns < 1:
+        parser.error("--columns must be positive")
 
     goal = np.asarray(args.goal, dtype=float)
     baselines = []
@@ -413,13 +424,26 @@ def main():
         "font.family": "DejaVu Sans",
     })
     runs = baselines + [(args.scalenav_label, *ours)]
+    if args.layout_order:
+        requested = {label: index for index, label in enumerate(args.layout_order)}
+        labels = {run[0] for run in runs}
+        unknown = set(args.layout_order) - labels
+        if unknown:
+            parser.error(
+                "--layout-order contains unknown labels: "
+                + ", ".join(sorted(unknown))
+            )
+        runs.sort(key=lambda run: requested.get(run[0], len(requested)))
     row_count = len(runs)
+    column_count = min(args.columns, row_count)
+    grid_rows = math.ceil(row_count / column_count)
     figure, axes = plt.subplots(
-        row_count, 1, figsize=(4.5, 2.30 * row_count + 1.20), sharex=True,
-        sharey=True,
+        grid_rows, column_count,
+        figsize=(4.5 * column_count, 2.30 * grid_rows + 1.20),
+        sharex=True, sharey=True,
         squeeze=False,
     )
-    axes = axes[:, 0]
+    axes = axes.ravel()
     norm = Normalize(0.0, args.speed_max)
 
     if args.pointcloud_session:
@@ -458,9 +482,16 @@ def main():
             axis, positions, speeds, label, norm, completed=completed,
             collision_position=collision_position,
         )
-    axes[-1].set_xlabel("Longitudinal $y$ (m)")
-    # Keep the original mission-corridor framing so the lateral detours remain
-    # legible.  The backdrop still comes from the complete UE truth map.
+    for index, axis in enumerate(axes):
+        if index >= row_count:
+            axis.set_visible(False)
+            continue
+        if index % column_count:
+            axis.set_ylabel("")
+        if index // column_count == grid_rows - 1:
+            axis.set_xlabel("Longitudinal $y$ (m)")
+    # Keep the original mission-corridor framing so lateral detours remain
+    # legible while every panel shares the selected backdrop.
     for ax in axes:
         ax.set_xlim(-5, 145)
         ax.set_ylim(-45, 45)
@@ -472,9 +503,14 @@ def main():
     # The x-axis label is the only content below the last panel.  Keep a
     # compact bottom margin so the exported figure does not carry a large
     # empty strip underneath the map.
-    figure.subplots_adjust(left=0.11, right=0.86, top=0.98, bottom=0.045,
-                           hspace=0.12)
-    speed_colorbar_axis = figure.add_axes((0.89, 0.22, 0.025, 0.56))
+    if column_count == 1:
+        margins = dict(left=0.11, right=0.86, bottom=0.045)
+        colorbar_bounds = (0.89, 0.22, 0.025, 0.56)
+    else:
+        margins = dict(left=0.07, right=0.92, bottom=0.065)
+        colorbar_bounds = (0.94, 0.22, 0.012, 0.56)
+    figure.subplots_adjust(top=0.98, hspace=0.12, wspace=0.10, **margins)
+    speed_colorbar_axis = figure.add_axes(colorbar_bounds)
     colorbar = figure.colorbar(collection, cax=speed_colorbar_axis,
                                orientation="vertical")
     colorbar.set_label("Speed (m/s)", labelpad=6)

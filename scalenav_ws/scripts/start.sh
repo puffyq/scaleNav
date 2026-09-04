@@ -161,7 +161,7 @@ start_planner() {
     --mission-goal-topic /goal_pose --world-frame world_enu --odom-twist-frame body \
     --model-image-width 160 --model-image-height 96 --model-vertical-num 3 \
     --trajectory-speed-color-max-mps "$MAXIMUM_TRAJECTORY_SPEED_MPS" \
-    --fixed-altitude --disable-event-log "$@"
+    --fixed-altitude --plan-from-reference --disable-event-log "$@"
 }
 
 if ((SAVE_DEPTH)); then
@@ -170,5 +170,5 @@ else
   start_planner
 fi
 
-echo "started; goal=/goal_pose semantic=$SEMANTIC prompt=$PROMPT semantic_cost_weight=$SEMANTIC_COST_WEIGHT semantic_route_influence_m=$SEMANTIC_ROUTE_INFLUENCE_M semantic_point_influence_m=$SEMANTIC_POINT_INFLUENCE_M graph_fixed_layer=$GRAPH_FIXED_LAYER maximum_trajectory_speed_mps=$MAXIMUM_TRAJECTORY_SPEED_MPS ignore_collision=$IGNORE_COLLISION airsim_reset=$AIRSIM_RESET_ON_START recorded_logs=$LOG_ROOT"
+echo "started; goal=/goal_pose semantic=$SEMANTIC prompt=$PROMPT semantic_cost_weight=$SEMANTIC_COST_WEIGHT semantic_route_influence_m=$SEMANTIC_ROUTE_INFLUENCE_M semantic_point_influence_m=$SEMANTIC_POINT_INFLUENCE_M graph_fixed_layer=$GRAPH_FIXED_LAYER maximum_trajectory_speed_mps=$MAXIMUM_TRAJECTORY_SPEED_MPS plan_from_reference=true ignore_collision=$IGNORE_COLLISION airsim_reset=$AIRSIM_RESET_ON_START recorded_logs=$LOG_ROOT"
 wait -n $PIDS

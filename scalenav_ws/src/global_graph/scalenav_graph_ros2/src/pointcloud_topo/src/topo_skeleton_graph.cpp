@@ -159,6 +159,13 @@ void TopoGraph::init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, Parallel
            semantic_point_influence_m_, 5.0);
   nh.param("bubble_topo/semantic_edge_candidate_limit",
            semantic_edge_candidate_limit_, 8);
+  nh.param("bubble_topo/semantic_risk_memory_ms",
+           semantic_risk_memory_ms_, 5000.0);
+  semantic_risk_memory_ms_ = std::max(0.0, semantic_risk_memory_ms_);
+  nh.param("bubble_topo/semantic_risk_accumulation_alpha",
+           semantic_risk_accumulation_alpha_, 0.25);
+  semantic_risk_accumulation_alpha_ = std::clamp(
+    semantic_risk_accumulation_alpha_, 0.0, 1.0);
   nh.param("bubble_topo/clearance_cost_weight", clearance_cost_weight_, 2.0);
   nh.param("bubble_topo/clearance_target_m", clearance_target_m_, 1.2);
   update_idx_vec_.reserve(100);
@@ -219,6 +226,8 @@ void TopoGraph::copyPersistentNodesFrom(const TopoGraph &source) {
         clone->bubble_radius_ = node->bubble_radius_;
         clone->semantic_score_ = node->semantic_score_;
         clone->semantic_confidence_ = node->semantic_confidence_;
+        clone->semantic_risk_ = node->semantic_risk_;
+        clone->semantic_risk_stamp_ns_ = node->semantic_risk_stamp_ns_;
         clone->semantic_observations_ = node->semantic_observations_;
         clone->semantic_stamp_ns_ = node->semantic_stamp_ns_;
         clone->is_virtual_semantic_ = node->is_virtual_semantic_;
@@ -363,6 +372,36 @@ std::vector<TopoNode::Ptr> TopoGraph::semanticNodes(
       if (bounded && (node->center_ - *origin).squaredNorm() > maximum_distance_sq)
         continue;
       if (!semanticNodeActiveForPlanning(*node, active_virtual_stamp_ns)) {
+        if (inactive_virtual_nodes_skipped) ++*inactive_virtual_nodes_skipped;
+        continue;
+      }
+      nodes.emplace_back(node);
+    }
+  }
+  return nodes;
+}
+
+std::vector<TopoNode::Ptr> TopoGraph::semanticRiskNodes(
+    const Eigen::Vector3f *origin, float maximum_distance_m,
+    std::int64_t reference_stamp_ns,
+    size_t *inactive_virtual_nodes_skipped) const {
+  std::vector<TopoNode::Ptr> nodes;
+  if (inactive_virtual_nodes_skipped) *inactive_virtual_nodes_skipped = 0;
+  const bool bounded = origin != nullptr && origin->allFinite() &&
+    std::isfinite(maximum_distance_m) && maximum_distance_m >= 0.0F;
+  const float maximum_distance_sq = bounded ?
+    maximum_distance_m * maximum_distance_m :
+    std::numeric_limits<float>::infinity();
+  const std::int64_t risk_memory_ns = static_cast<std::int64_t>(
+    std::llround(semantic_risk_memory_ms_ * 1.0e6));
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second) continue;
+    for (const auto &node : entry.second->topo_nodes_) {
+      if (!node || node->is_viewpoint_ || node->role_ == TopoNodeRole::Odom ||
+          node->semantic_observations_ == 0) continue;
+      if (bounded && (node->center_ - *origin).squaredNorm() > maximum_distance_sq)
+        continue;
+      if (!semanticNodeActiveForRisk(*node, reference_stamp_ns, risk_memory_ns)) {
         if (inactive_virtual_nodes_skipped) ++*inactive_virtual_nodes_skipped;
         continue;
       }
@@ -532,6 +571,8 @@ void TopoGraph::updateNodeSemantic(const TopoNode::Ptr &node, float observation,
   const float alpha = std::clamp(ema_alpha, 0.0F, 1.0F);
   const float score = std::clamp(observation, 0.0F, 1.0F);
   const float confidence = std::clamp(observation_confidence, 0.0F, 1.0F);
+  const std::int64_t previous_risk_stamp_ns = node->semantic_risk_stamp_ns_;
+  const float previous_risk = std::clamp(node->semantic_risk_, 0.0F, 1.0F);
   if (node->semantic_stamp_ns_ != stamp_ns) {
     node->semantic_edges_attempted_stamp_ns_ = 0;
   }
@@ -546,6 +587,30 @@ void TopoGraph::updateNodeSemantic(const TopoNode::Ptr &node, float observation,
     node->semantic_confidence_ = (1.0F - alpha) * node->semantic_confidence_ +
       alpha * confidence;
   }
+  // Keep the latest patch score above for frame-relative frontier ranking,
+  // while maintaining a separate bounded risk memory for route costs. Older
+  // evidence decays over the configured memory horizon; each new observation
+  // then contributes through a probabilistic union rather than an unbounded
+  // sum. Confidence is retained separately for edge-field compatibility and
+  // does not rescale the patch risk used for frontier ranking.
+  float decayed_risk = previous_risk;
+  if (previous_risk_stamp_ns > 0 && stamp_ns > previous_risk_stamp_ns &&
+      semantic_risk_memory_ms_ > 0.0) {
+    const double age_ms = static_cast<double>(stamp_ns - previous_risk_stamp_ns) / 1.0e6;
+    // Normal heatmap frames arrive within roughly one second. Do not erase
+    // accumulated evidence merely because the next frame arrived; decay only
+    // after an observation gap, using the configured risk-memory horizon.
+    const double decay_age_ms = std::max(0.0, age_ms - 1000.0);
+    decayed_risk *= static_cast<float>(std::exp(-decay_age_ms / semantic_risk_memory_ms_));
+  }
+  const float evidence = std::clamp(
+    static_cast<float>(semantic_risk_accumulation_alpha_) * score,
+    0.0F, 1.0F);
+  node->semantic_risk_ = (node->semantic_observations_ == 0 ||
+      previous_risk_stamp_ns <= 0) ?
+    score :
+    std::clamp(1.0F - (1.0F - decayed_risk) * (1.0F - evidence), 0.0F, 1.0F);
+  node->semantic_risk_stamp_ns_ = stamp_ns;
   ++node->semantic_observations_;
   node->semantic_stamp_ns_ = stamp_ns;
   const Eigen::Vector3i region_idx = semanticWorldRegion(
@@ -553,6 +618,7 @@ void TopoGraph::updateNodeSemantic(const TopoNode::Ptr &node, float observation,
   semantic_memory_[node->persistent_id_] = TopoSemanticRecord{
     node->persistent_id_, node->center_, region_idx, node->semantic_score_,
     node->semantic_confidence_, node->semantic_observations_, stamp_ns,
+    node->semantic_risk_, node->semantic_risk_stamp_ns_,
     node->is_virtual_semantic_, node->semantic_frame_stamp_ns_,
     node->semantic_column_};
 }
@@ -745,6 +811,10 @@ size_t TopoGraph::restoreNodeSemanticMemory(
       node->persistent_id_ = nearest->node_id;
       node->semantic_score_ = nearest->score;
       node->semantic_confidence_ = nearest->confidence;
+      node->semantic_risk_ = nearest->risk > 0.0F ? nearest->risk :
+        nearest->score;
+      node->semantic_risk_stamp_ns_ = nearest->risk_stamp_ns > 0 ?
+        nearest->risk_stamp_ns : nearest->stamp_ns;
       node->semantic_observations_ = nearest->observations;
       node->semantic_stamp_ns_ = nearest->stamp_ns;
       // A freshly measured Bubble is ordinary geometry even when it inherits
@@ -887,7 +957,7 @@ bool TopoGraph::graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr
     max_search_radius_m + static_cast<float>(std::max(0.0, semantic_point_influence_m_)) :
     std::numeric_limits<float>::infinity();
   const std::vector<TopoNode::Ptr> semantic_nodes = semantic_cost_weight > 0.0F ?
-    semanticNodes(
+    semanticRiskNodes(
       &start_node->center_, semantic_query_radius,
       active_virtual_semantic_stamp_ns,
       search_stats ? &search_stats->semantic_inactive_virtual_nodes_skipped : nullptr) :
@@ -1068,10 +1138,17 @@ bool TopoGraph::goalDirectedSearch(
   // Frontier scoring always needs the active five-direction observations.
   // semantic_cost_weight only controls risk integrated along graph edges; it
   // must not disable semantic endpoint ranking or its per-frame reference.
-  const std::vector<TopoNode::Ptr> semantic_nodes = semanticNodes(
+  const std::vector<TopoNode::Ptr> frontier_semantic_nodes = semanticNodes(
     &start_node->center_, semantic_query_radius,
     active_virtual_semantic_stamp_ns,
     search_stats ? &search_stats->semantic_inactive_virtual_nodes_skipped : nullptr);
+  // A semantic endpoint is a short-lived frontier, but its world-space risk
+  // must survive until the next progress-triggered A* refresh. Keeping these
+  // windows separate prevents an old point from becoming a goal while still
+  // allowing the route to remember why it started a wide detour.
+  const std::vector<TopoNode::Ptr> semantic_nodes = semanticRiskNodes(
+    &start_node->center_, semantic_query_radius,
+    active_virtual_semantic_stamp_ns, nullptr);
   const SemanticSpatialIndex semantic_index(
     semantic_nodes, static_cast<float>(std::max(0.5, semantic_point_influence_m_)));
   if (search_stats) search_stats->semantic_query_nodes = semantic_nodes.size();
@@ -1117,9 +1194,17 @@ bool TopoGraph::goalDirectedSearch(
   (void)view_direction;
   (void)horizontal_fov_deg;
   (void)progress_penalty_weight;
-  (void)direction_penalty_weight;
   (void)fov_penalty_weight;
   (void)smoothness_penalty_weight;
+
+  Eigen::Vector3f continuity_direction = Eigen::Vector3f::Zero();
+  if (view_direction && view_direction->allFinite()) {
+    continuity_direction = *view_direction;
+    continuity_direction.z() = 0.0F;
+    const float norm = continuity_direction.norm();
+    if (norm > 1e-3F) continuity_direction /= norm;
+    else continuity_direction.setZero();
+  }
 
   constexpr float kGoalNodeToleranceM = 1.5F;
 
@@ -1145,6 +1230,14 @@ bool TopoGraph::goalDirectedSearch(
       (node->geometry_state_ == TopoGeometryState::Verified ||
        isActiveSemanticFrontier(node));
   };
+  const auto accumulatedSemanticRisk = [](const TopoNode::Ptr &node) {
+    if (!node) return 0.0F;
+    // Keep compatibility with nodes restored from older logs that do not have
+    // a populated temporal accumulator yet.
+    return node->semantic_risk_ > 0.0F ?
+      std::clamp(node->semantic_risk_, 0.0F, 1.0F) :
+      std::clamp(node->semantic_score_, 0.0F, 1.0F);
+  };
 
   std::unordered_map<TopoNode::Ptr, float> g_score;
   std::unordered_map<TopoNode::Ptr, float> route_distance;
@@ -1166,6 +1259,44 @@ bool TopoGraph::goalDirectedSearch(
     }
     std::reverse(path.begin(), path.end());
     return path.size() >= 2 && path.front() == start_node;
+  };
+  const auto initialRouteDirection = [&](const TopoNode::Ptr &end) -> Eigen::Vector3f {
+    std::vector<TopoNode::Ptr> reverse_chain;
+    for (auto current = end; current && current != start_node;) {
+      reverse_chain.push_back(current);
+      const auto parent_it = parent_map.find(current);
+      if (parent_it == parent_map.end()) return Eigen::Vector3f::Zero();
+      current = parent_it->second;
+    }
+    if (reverse_chain.empty()) return Eigen::Vector3f::Zero();
+    std::reverse(reverse_chain.begin(), reverse_chain.end());
+    Eigen::Vector3f direction = Eigen::Vector3f::Zero();
+    // Ignore a tiny rolling-odom connector. Use the first point at least two
+    // metres along the A* path, or the furthest available point for a short
+    // route, so the term represents an actual branch choice.
+    for (const auto &node : reverse_chain) {
+      if (!node) continue;
+      direction = node->center_ - start_node->center_;
+      direction.z() = 0.0F;
+      if (direction.norm() >= 2.0F) break;
+    }
+    const float norm = direction.norm();
+    if (norm > 1e-3F) return Eigen::Vector3f(direction / norm);
+    return Eigen::Vector3f::Zero();
+  };
+  const auto backtrackMetrics = [&](const TopoNode::Ptr &end) {
+    const Eigen::Vector3f initial_direction = initialRouteDirection(end);
+    if (continuity_direction.isZero(1e-3F) || initial_direction.isZero(1e-3F))
+      return std::make_pair(1.0F, 0.0F);
+    const float cosine = std::clamp(
+      continuity_direction.dot(initial_direction), -1.0F, 1.0F);
+    // direction_penalty_weight is dimensionless. Convert angular change to
+    // equivalent metres before the common objective normalization. A reverse
+    // branch pays the full cost and a lateral switch pays half; a straight
+    // continuation pays nothing.
+    const float cost_m = direction_penalty_weight * objective_scale *
+      0.5F * (1.0F - cosine);
+    return std::make_pair(cosine, cost_m);
   };
   const float start_h = heuristic(start_node);
   g_score[start_node] = 0.0F;
@@ -1212,7 +1343,7 @@ bool TopoGraph::goalDirectedSearch(
       const float h = goalDistance(entry.node);
       const bool semantic_frontier = isActiveSemanticFrontier(entry.node);
       const float raw_semantic_risk = semantic_frontier ?
-        std::clamp(entry.node->semantic_score_, 0.0F, 1.0F) : 0.0F;
+        accumulatedSemanticRisk(entry.node) : 0.0F;
       if (semantic_frontier) {
         TopoFrontierCandidateStats candidate;
         candidate.node_id = entry.node->persistent_id_;
@@ -1222,11 +1353,19 @@ bool TopoGraph::goalDirectedSearch(
         candidate.astar_cost = entry.g;
         candidate.route_distance = route_dist;
         candidate.mission_distance = h;
+        const auto [direction_cosine, backtrack_cost_m] =
+          backtrackMetrics(entry.node);
+        candidate.direction_cosine = direction_cosine;
+        candidate.backtrack_cost_m = backtrack_cost_m;
         reachable_semantic_frontiers.push_back({entry.node, candidate});
         if (search_stats) ++search_stats->semantic_frontier_candidates;
       } else {
+        const auto [direction_cosine, backtrack_cost_m] =
+          backtrackMetrics(entry.node);
+        (void)direction_cosine;
         const float frontier_objective =
-          (entry.g + frontier_goal_distance_weight * h) / objective_scale;
+          (entry.g + frontier_goal_distance_weight * h + backtrack_cost_m) /
+          objective_scale;
         if (search_stats) {
           ++search_stats->ordinary_frontier_candidates;
           if (frontier_objective < search_stats->best_ordinary_frontier_objective) {
@@ -1324,10 +1463,10 @@ bool TopoGraph::goalDirectedSearch(
   // directions whose provisional edge is currently unreachable. Reachability
   // decides which endpoint may be selected; it must not change the semantic
   // scale of the remaining directions from one graph update to the next.
-  for (const auto &node : semantic_nodes) {
+  for (const auto &node : frontier_semantic_nodes) {
     if (!isVirtualSemanticEndpoint(node) || node->semantic_frame_stamp_ns_ <= 0)
       continue;
-    const float risk = std::clamp(node->semantic_score_, 0.0F, 1.0F);
+    const float risk = accumulatedSemanticRisk(node);
     auto [it, inserted] = frame_risk_bounds.emplace(
       node->semantic_frame_stamp_ns_, std::make_pair(risk, risk));
     if (!inserted) {
@@ -1351,7 +1490,8 @@ bool TopoGraph::goalDirectedSearch(
     candidate.stats.objective =
       (candidate.stats.astar_cost +
        frontier_goal_distance_weight * candidate.stats.mission_distance +
-       candidate.stats.semantic_cost_m) / objective_scale;
+       candidate.stats.semantic_cost_m + candidate.stats.backtrack_cost_m) /
+      objective_scale;
 
     const bool objective_tie = std::abs(candidate.stats.objective -
       best_semantic_frontier_objective) <= 1e-5F;
@@ -1389,8 +1529,12 @@ bool TopoGraph::goalDirectedSearch(
       const float h = goalDistance(entry.first);
       const auto g_it = g_score.find(entry.first);
       const float route_cost = g_it != g_score.end() ? g_it->second : 0.0F;
-      const float frontier_objective = route_cost / objective_scale +
-        frontier_goal_distance_weight * h / objective_scale;
+      const auto [direction_cosine, backtrack_cost_m] =
+        backtrackMetrics(entry.first);
+      (void)direction_cosine;
+      const float frontier_objective =
+        (route_cost + frontier_goal_distance_weight * h + backtrack_cost_m) /
+        objective_scale;
       if (best_frontier == nullptr || frontier_objective < best_frontier_objective - 1e-5F ||
           (std::abs(frontier_objective - best_frontier_objective) <= 1e-5F &&
            entry.second > best_frontier_route_distance + 1e-3F)) {
@@ -2708,6 +2852,8 @@ void TopoGraph::updateSkeleton() {
     const auto persistent_id = match->persistent_id_;
     const auto semantic_score = match->semantic_score_;
     const auto semantic_confidence = match->semantic_confidence_;
+    const auto semantic_risk = match->semantic_risk_;
+    const auto semantic_risk_stamp = match->semantic_risk_stamp_ns_;
     const auto semantic_observations = match->semantic_observations_;
     const auto semantic_stamp = match->semantic_stamp_ns_;
     const auto semantic_frame_stamp = match->semantic_frame_stamp_ns_;
@@ -2725,6 +2871,8 @@ void TopoGraph::updateSkeleton() {
     match->persistent_id_ = persistent_id;
     match->semantic_score_ = semantic_score;
     match->semantic_confidence_ = semantic_confidence;
+    match->semantic_risk_ = semantic_risk;
+    match->semantic_risk_stamp_ns_ = semantic_risk_stamp;
     match->semantic_observations_ = semantic_observations;
     match->semantic_stamp_ns_ = semantic_stamp;
     match->is_virtual_semantic_ = false;
@@ -3013,11 +3161,15 @@ size_t TopoGraph::deduplicateNearbyNodes(float tolerance_m) {
            duplicate->semantic_score_ > canonical->semantic_score_)) {
         canonical->semantic_score_ = duplicate->semantic_score_;
         canonical->semantic_confidence_ = duplicate->semantic_confidence_;
+        canonical->semantic_risk_ = duplicate->semantic_risk_;
+        canonical->semantic_risk_stamp_ns_ = duplicate->semantic_risk_stamp_ns_;
         canonical->semantic_stamp_ns_ = duplicate->semantic_stamp_ns_;
         canonical->semantic_frame_stamp_ns_ = duplicate->semantic_frame_stamp_ns_;
         canonical->semantic_column_ = duplicate->semantic_column_;
         canonical->is_virtual_semantic_ = duplicate->is_virtual_semantic_;
       }
+      canonical->semantic_risk_ = std::max(
+        canonical->semantic_risk_, duplicate->semantic_risk_);
       canonical->semantic_observations_ = std::max(
         canonical->semantic_observations_, duplicate->semantic_observations_);
       if (canonical->geometry_state_ == TopoGeometryState::Verified) {
