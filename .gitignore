@@ -75,6 +75,9 @@ paper/scalenav/tmp/
 paper/scalenav/pics/experiments/**/history/
 paper/scalenav/pics/teaser_*.png
 paper/scalenav/pics/system_architecture_topology_v2.tex
+paper/scalenav/pics/system_architecture_simplified.*
+paper/scalenav/pics/0903_graph_semantic_frontier_building*.*
+paper/scalenav/pics/0903_graph_semantic_frontier_forest*.*
 
 # Workspace migration backups and generated ROS/colcon outputs.
 bc/

@@ -143,7 +143,7 @@ class GcnFrontierPolicy(Node):
         nodes = base.tolist()
         frontier = []
         for column in range(5):
-            angle = yaw + (2 - column) * math.radians(20.0)
+            angle = yaw + (column - 2) * math.radians(20.0)
             point = position[:2] + self.args.candidate_distance * np.array(
                 [math.cos(angle), math.sin(angle)], dtype=np.float32)
             frontier.append(len(nodes))
@@ -219,7 +219,7 @@ class GcnFrontierPolicy(Node):
         yaw = yaw_from_quaternion(odom.pose.pose.orientation)
         candidates = []
         for column in range(5):
-            angle = yaw + (2 - column) * math.radians(20.0)
+            angle = yaw + (column - 2) * math.radians(20.0)
             candidates.append(position + self.args.candidate_distance *
                              np.array([math.cos(angle), math.sin(angle)], dtype=np.float32))
         # Reachability and collision safety remain the downstream A*'s job.
@@ -250,8 +250,8 @@ class GcnFrontierPolicy(Node):
         marker.scale.y = 0.15; marker.scale.z = 0.15
         marker.color.r = 0.73; marker.color.b = 1.0; marker.color.a = 1.0
         marker.pose.position.x = float(position[0]); marker.pose.position.y = float(position[1]); marker.pose.position.z = float(odom.pose.pose.position.z)
-        marker.pose.orientation.z = math.sin(0.5 * (yaw + (2 - selected) * math.radians(20.0)))
-        marker.pose.orientation.w = math.cos(0.5 * (yaw + (2 - selected) * math.radians(20.0)))
+        marker.pose.orientation.z = math.sin(0.5 * (yaw + (selected - 2) * math.radians(20.0)))
+        marker.pose.orientation.w = math.cos(0.5 * (yaw + (selected - 2) * math.radians(20.0)))
         self.marker_pub.publish(marker)
 
 

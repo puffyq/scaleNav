@@ -192,6 +192,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--world-frame", default="world_enu")
     parser.add_argument("--goal", type=float, nargs=3)
     parser.add_argument("--goal-from-final-odom", action="store_true")
+    parser.add_argument(
+        "--goal-from-scene-endpoint", action="store_true",
+        help="derive the goal from a scene endpoint in the recorded odometry",
+    )
+    parser.add_argument(
+        "--scene-endpoint", choices=("forest", "building"), default="building",
+        help="scene whose endpoint supplies the goal (forest exit or building end)",
+    )
     parser.add_argument("--odom-csv", type=Path)
     parser.add_argument("--preview-dir", type=Path)
     args = parser.parse_args()
@@ -257,8 +265,19 @@ def main() -> None:
             for connection, timestamp, raw in reader.messages(connections=[odom_connection]):
                 source = typestore.deserialize_ros1(raw, connection.msgtype)
                 odom_sources[int(timestamp)] = source
-                if args.goal_from_final_odom:
+                if args.goal_from_final_odom or args.goal_from_scene_endpoint:
                     p = source.pose.pose.position
+                    final_raw = np.array([p.x, p.y, p.z], dtype=np.float64)
+            if args.goal_from_scene_endpoint and args.scene_endpoint == "forest":
+                # The recorded flight leaves the tree area at about 72 s;
+                # select the nearest odometry sample rather than the later
+                # building sequence. This is kept in raw-bag time so replay
+                # start offsets do not change the scene goal.
+                forest_exit_ns = reader.start_time + int(72.0 * 1e9)
+                if odom_sources:
+                    forest_stamp = min(odom_sources, key=lambda stamp: abs(stamp - forest_exit_ns))
+                    forest_source = odom_sources[forest_stamp]
+                    p = forest_source.pose.pose.position
                     final_raw = np.array([p.x, p.y, p.z], dtype=np.float64)
             first_odom_raw = None
             start_ns = reader.start_time + int(args.start * 1e9)

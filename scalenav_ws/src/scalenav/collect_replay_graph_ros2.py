@@ -9,12 +9,14 @@ from pathlib import Path
 import signal
 import math
 
+import cv2
 import numpy as np
 import rclpy
 from nav_msgs.msg import Odometry, Path as PathMessage
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import Image, PointCloud2
+from std_msgs.msg import Int32
 from visualization_msgs.msg import MarkerArray
 
 
@@ -44,6 +46,12 @@ class ReplayCollector(Node):
         self.output = output
         self.odom: list[list[float]] = []
         self.pointcloud: list[list[float]] = []
+        self.last_rgb: np.ndarray | None = None
+        self.last_rgb_stamp_ns = 0
+        self.last_pearl: np.ndarray | None = None
+        self.last_pearl_stamp_ns = 0
+        self.gcn_column: int | None = None
+        self.gcn_column_stamp_ns = 0
         self.poses: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
         self.paths: dict[str, list[list[float]]] = {}
         self.graph = {"nodes": [], "edges": []}
@@ -55,6 +63,9 @@ class ReplayCollector(Node):
         self.create_subscription(
             PointCloud2, "/depth/points", self.on_cloud, qos_profile_sensor_data
         )
+        self.create_subscription(Image, "/camera/color/image", self.on_rgb, qos_profile_sensor_data)
+        self.create_subscription(Image, "/scalenav/text_heatmap", self.on_pearl, qos_profile_sensor_data)
+        self.create_subscription(Int32, "/scalenav/gcn_frontier_column", self.on_gcn_column, 10)
         self.create_subscription(MarkerArray, "/scalenav/graph", self.on_graph, 10)
         for topic, key in (
             ("/scalenav/path", "astar"),
@@ -82,6 +93,54 @@ class ReplayCollector(Node):
         if len(self.poses) > 2048:
             del self.poses[next(iter(self.poses))]
         self.counts["odom"] += 1
+
+    @staticmethod
+    def _image_array(message: Image) -> np.ndarray | None:
+        channels = 1 if message.encoding in ("mono8", "32FC1", "64FC1") else 3
+        dtype = np.float32 if message.encoding == "32FC1" else (
+            np.float64 if message.encoding == "64FC1" else np.uint8
+        )
+        itemsize = np.dtype(dtype).itemsize
+        width_bytes = int(message.width) * channels * itemsize
+        if message.height <= 0 or message.width <= 0 or message.step < width_bytes:
+            return None
+        try:
+            raw = np.frombuffer(message.data, dtype=dtype)
+            row_items = int(message.step) // itemsize
+            array = raw.reshape(int(message.height), row_items)[:, : int(message.width) * channels]
+            if channels == 1:
+                return array.reshape(int(message.height), int(message.width)).copy()
+            return array.reshape(int(message.height), int(message.width), channels).copy()
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _stamp_ns(message: Image) -> int:
+        return int(message.header.stamp.sec) * 1_000_000_000 + int(message.header.stamp.nanosec)
+
+    def on_rgb(self, message: Image) -> None:
+        image = self._image_array(message)
+        if image is None:
+            return
+        if message.encoding == "rgb8":
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        self.last_rgb = image
+        self.last_rgb_stamp_ns = self._stamp_ns(message)
+
+    def on_pearl(self, message: Image) -> None:
+        image = self._image_array(message)
+        if image is None:
+            return
+        if image.ndim == 3 and message.encoding == "rgb8":
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        self.last_pearl = image
+        self.last_pearl_stamp_ns = self._stamp_ns(message)
+
+    def on_gcn_column(self, message: Int32) -> None:
+        column = int(message.data)
+        if 0 <= column < 5:
+            self.gcn_column = column
+            self.gcn_column_stamp_ns = self.get_clock().now().nanoseconds
 
     def on_cloud(self, message: PointCloud2) -> None:
         stamp = message.header.stamp
@@ -131,6 +190,7 @@ class ReplayCollector(Node):
         local_goal = None
         mission_goal = None
         vehicle = None
+        vehicle_orientation = None
         stamp_ns = 0
         for marker in message.markers:
             namespace = marker.ns
@@ -180,6 +240,12 @@ class ReplayCollector(Node):
                 mission_goal = xyz(marker.pose.position)
             elif namespace == "scalenav_vehicle_pose":
                 vehicle = xyz(marker.pose.position)
+                vehicle_orientation = [
+                    float(marker.pose.orientation.x),
+                    float(marker.pose.orientation.y),
+                    float(marker.pose.orientation.z),
+                    float(marker.pose.orientation.w),
+                ]
         for value_name, value in (
             ("frontier_goal", frontier_goal), ("local_goal", local_goal),
             ("mission_goal", mission_goal), ("vehicle", vehicle),
@@ -203,6 +269,7 @@ class ReplayCollector(Node):
             "local_goal": local_goal,
             "mission_goal": mission_goal,
             "vehicle": vehicle,
+            "vehicle_orientation": vehicle_orientation,
         }
         candidate_complete = bool(semantic_points) and frontier_goal is not None
         current_complete = bool(self.planning_snapshot.get("semantic_points")) and \
@@ -221,12 +288,47 @@ class ReplayCollector(Node):
         if self.saved:
             return
         self.output.parent.mkdir(parents=True, exist_ok=True)
+        media = {
+            "rgb_capture": self.last_rgb is not None,
+            "rgb_stamp_ns": self.last_rgb_stamp_ns,
+            "pearl_heatmap": self.last_pearl is not None,
+            "pearl_stamp_ns": self.last_pearl_stamp_ns,
+            "gcn_column": self.gcn_column,
+            "gcn_column_stamp_ns": self.gcn_column_stamp_ns,
+        }
+        if self.last_rgb is not None:
+            cv2.imwrite(str(self.output.parent / "rgb_capture.jpg"), self.last_rgb)
+        if self.last_pearl is not None:
+            pearl_path = self.output.parent / "pearl_heatmap.png"
+            pearl_color = None
+            if self.last_pearl.dtype.kind == "f":
+                np.save(self.output.parent / "pearl_heatmap_raw.npy", self.last_pearl)
+                values = np.nan_to_num(self.last_pearl, nan=0.0, posinf=1.0, neginf=0.0)
+                low, high = float(values.min()), float(values.max())
+                normalized = (values - low) / max(high - low, 1e-6)
+                pearl_color = cv2.applyColorMap(
+                    np.uint8(np.clip(normalized, 0.0, 1.0) * 255.0), cv2.COLORMAP_TURBO
+                )
+                cv2.imwrite(str(pearl_path), pearl_color)
+            else:
+                pearl_color = self.last_pearl
+                cv2.imwrite(str(pearl_path), pearl_color)
+            if self.last_rgb is not None and pearl_color is not None:
+                rgb = self.last_rgb
+                if rgb.ndim == 2:
+                    rgb = cv2.cvtColor(rgb, cv2.COLOR_GRAY2BGR)
+                if rgb.shape[:2] != pearl_color.shape[:2]:
+                    pearl_color = cv2.resize(pearl_color, (rgb.shape[1], rgb.shape[0]))
+                cv2.imwrite(
+                    str(self.output.parent / "pearl_overlay.jpg"),
+                    cv2.addWeighted(rgb, 0.52, pearl_color, 0.48, 0.0),
+                )
         temporary = self.output.with_suffix(self.output.suffix + ".tmp")
         temporary.write_text(
             json.dumps(
                 {"odom": self.odom, "pointcloud": self.pointcloud, "paths": self.paths,
                  "graph": self.graph, "planning_snapshot": self.planning_snapshot,
-                 "counts": self.counts},
+                 "counts": self.counts, "media": media},
                 ensure_ascii=True,
             ),
             encoding="utf-8",

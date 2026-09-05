@@ -551,6 +551,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       std::numeric_limits<float>::quiet_NaN();
     float frontier_goal_progress_m = 0.0F;
     float frontier_goal_progress_t = 0.0F;
+    int unsafe_prediction_frames = 0;
     std::vector<TopoNode::Ptr> topology_path;
     std::vector<TopoNode::Ptr> execution_path;
     std::vector<Eigen::Vector3f> witness_path;
@@ -564,6 +565,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       frontier_goal_initial_route_length_m = std::numeric_limits<float>::quiet_NaN();
       frontier_goal_progress_m = 0.0F;
       frontier_goal_progress_t = 0.0F;
+      unsafe_prediction_frames = 0;
       topology_path.clear();
       execution_path.clear();
       witness_path.clear();
@@ -1434,16 +1436,14 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     if (!changed) return;
     ++gcn_frontier_changed_count_;
 
-    // A changed GCN decision replaces only frontier selection. Clearing the
-    // accepted segment makes the next planner tick run the normal odom-rooted
-    // topology A* immediately; every downstream stage remains untouched.
-    accepted_route_.clear();
-    frontier_command_.clear();
-    polynomial_guide_path_.clear();
-    polynomial_curve_ = scalenav_graph::WitnessParametricCurve();
-    polynomial_curve_valid_ = false;
-    have_previous_local_goal_ = false;
-    RCLCPP_INFO(get_logger(), "[ScaleNav GCN] frontier column=%d", gcn_frontier_column_);
+    // GCN is a ranking hint for the next frontier search, not a route-release
+    // command. Keep the accepted segment until its progress boundary or until
+    // the independent geometry/reachability checks invalidate it. Clearing
+    // here made frame-to-frame GCN changes look like a missing incumbent and
+    // produced repeated INITIAL_ACCEPT replacements.
+    RCLCPP_INFO(get_logger(),
+      "[ScaleNav GCN] frontier column=%d accepted_route=%s action=UPDATE_HINT",
+      gcn_frontier_column_, accepted_route_.valid ? "HELD" : "NONE");
   }
 
   void onCloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &message)
@@ -1963,6 +1963,39 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     if (route_continuity_direction.norm() <= 1e-3F) {
       route_continuity_direction = orientation_ * Eigen::Vector3f::UnitX();
       route_continuity_direction.z() = 0.0F;
+    }
+    if (accepted_route_.valid && accepted_route_.witness_path.size() >= 2 &&
+        active_topo->parallel_bubble_astar_) {
+      auto forward_witness = scalenav_graph::forwardRouteFromT(
+        accepted_route_.witness_path, accepted_route_.frontier_goal_progress_t);
+      ParallelBubbleAstar::CollisionCheckInfo prediction_info;
+      const bool prediction_available = forward_witness.size() >= 2;
+      const bool prediction_safe = !prediction_available ||
+        active_topo->parallel_bubble_astar_->collisionCheck_shortenPath(
+          forward_witness, &prediction_info);
+      const bool prediction_replan =
+        scalenav_graph::consecutiveUnsafeRouteRequiresReplan(
+          prediction_available, prediction_safe, 2,
+          accepted_route_.unsafe_prediction_frames);
+      if (prediction_available && !prediction_safe) {
+        RCLCPP_WARN(
+          get_logger(),
+          "[ScaleNav route prediction] unsafe frame=%d/2 frontier=%llu "
+          "clearance=%.3f safe_distance=%.3f action=%s",
+          accepted_route_.unsafe_prediction_frames,
+          static_cast<unsigned long long>(accepted_route_.frontier_goal_id),
+          prediction_info.minimum_clearance,
+          active_topo->parallel_bubble_astar_->safe_distance_,
+          prediction_replan ? "REPLAN" : "WAIT_SECOND_FRAME");
+      }
+      if (prediction_replan) {
+        accepted_route_.clear();
+        accepted_route_forced_replan = true;
+        accepted_route_forced_reason = "ACCEPTED_WITNESS_BLOCKED";
+        map_changed_.store(true);
+      }
+    } else {
+      accepted_route_.unsafe_prediction_frames = 0;
     }
     // A route is executable only while every topology edge it references is
     // still present.  revalidateSemanticEdges() can detach an edge before the
@@ -2524,7 +2557,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       if (forward_norm > 1e-3F) {
         forward /= forward_norm;
         const Eigen::Vector3f left(-forward.y(), forward.x(), 0.0F);
-        const float offset = static_cast<float>(2 - gcn_frontier_column_) *
+        const float offset = static_cast<float>(gcn_frontier_column_ - 2) *
           20.0F * static_cast<float>(M_PI / 180.0);
         gcn_frontier_direction = std::cos(offset) * forward + std::sin(offset) * left;
         gcn_frontier_direction_ptr = &gcn_frontier_direction;
@@ -2541,7 +2574,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       if (forward_norm > 1e-3F) {
         forward /= forward_norm;
         const Eigen::Vector3f left(-forward.y(), forward.x(), 0.0F);
-        const float offset = static_cast<float>(2 - gcn_frontier_column_) *
+        const float offset = static_cast<float>(gcn_frontier_column_ - 2) *
           20.0F * static_cast<float>(M_PI / 180.0);
         gcn_frontier_direction = std::cos(offset) * forward + std::sin(offset) * left;
         gcn_frontier_direction_ptr = &gcn_frontier_direction;
@@ -2971,12 +3004,88 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       pending_semantic_opportunity_frames_ = 0;
     }
     const std::size_t route_memory_points = accepted_route_.witness_path.size();
+    const auto incumbentTopologyStillExecutable = [&]() {
+      if (!accepted_route_.valid || accepted_route_.topology_path.size() < 2) return false;
+      for (std::size_t i = 1; i < accepted_route_.topology_path.size(); ++i) {
+        const auto &from = accepted_route_.topology_path[i - 1];
+        const auto &to = accepted_route_.topology_path[i];
+        if (i == 1 && from && from->role_ == TopoNodeRole::Odom) continue;
+        if (!from || !to || !hasExecutableTopologyEdge(from, to)) return false;
+      }
+      return true;
+    };
+    bool candidate_witness_rejected = false;
+    const bool candidate_selected_before_publish = candidate_accepted && found &&
+      !using_accepted_route;
+    if (candidate_selected_before_publish &&
+        !candidateExecutionPathPreflight(active_topo, path_nodes)) {
+      candidate_witness_rejected = true;
+      const bool incumbent_topology_executable = incumbentTopologyStillExecutable();
+      const bool hold_incumbent =
+        scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+          true, false, accepted_route_.valid && accepted_witness_usable,
+          accepted_route_reachable, incumbent_topology_executable,
+          accepted_route_forced_replan);
+      if (hold_incumbent) {
+        path_nodes = accepted_route_.execution_path;
+        using_accepted_route = true;
+        found = true;
+        route_switch_reason = "CANDIDATE_WITNESS_FAILED_HOLD";
+      } else {
+        path_nodes.clear();
+        found = false;
+        route_switch_reason = "CANDIDATE_WITNESS_REJECTED";
+        if (accepted_route_.valid && !incumbent_topology_executable) {
+          accepted_route_.clear();
+          accepted_route_forced_replan = true;
+          accepted_route_forced_reason = "ROUTE_TOPOLOGY_CHANGED";
+        }
+      }
+      candidate_accepted = false;
+      RCLCPP_WARN(get_logger(),
+        "[ScaleNav route] candidate witness preflight rejected; action=%s frontier=%llu",
+        hold_incumbent ? "HOLD_INCUMBENT" : "REJECT_CANDIDATE",
+        static_cast<unsigned long long>(accepted_route_.frontier_goal_id));
+    }
+
     const auto publish_start = std::chrono::steady_clock::now();
+    const bool publishing_candidate = candidate_accepted && found && !using_accepted_route;
     const float publish_progress_t = using_accepted_route ?
       accepted_route_.frontier_goal_progress_t : 0.0F;
-    const auto stats = publish(
+    auto stats = publish(
       active_topo, path_nodes, found,
       effective_lookahead_m, publish_progress_t, candidate_accepted);
+    const bool published_witness_valid = stats.witness_collision_free &&
+      stats.witness_path.size() >= 2;
+    const bool candidate_publish_rejected = publishing_candidate &&
+      !published_witness_valid;
+    candidate_witness_rejected = candidate_witness_rejected || candidate_publish_rejected;
+    if (scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+          candidate_publish_rejected, published_witness_valid,
+          accepted_route_.valid && accepted_witness_usable, accepted_route_reachable,
+          incumbentTopologyStillExecutable(), accepted_route_forced_replan)) {
+      // The candidate was provisional. Re-publish the independently checked
+      // incumbent in the same tick so YOPO never receives a stop point or a
+      // new frontier merely because an alternative route failed validation.
+      path_nodes = accepted_route_.execution_path;
+      using_accepted_route = true;
+      candidate_accepted = false;
+      route_switch_reason = "CANDIDATE_WITNESS_FAILED_HOLD";
+      stats = publish(
+        active_topo, path_nodes, true, effective_lookahead_m,
+        accepted_route_.frontier_goal_progress_t, false);
+      found = stats.witness_collision_free && stats.witness_path.size() >= 2;
+      if (!found) {
+        accepted_route_.clear();
+        accepted_route_forced_replan = true;
+        accepted_route_forced_reason = "ACCEPTED_WITNESS_BLOCKED";
+      }
+      RCLCPP_WARN(get_logger(),
+        "[ScaleNav route] candidate witness rejected; incumbent action=%s "
+        "frontier=%llu",
+        found ? "HOLD" : "INVALIDATE",
+        static_cast<unsigned long long>(accepted_route_.frontier_goal_id));
+    }
     publish_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - publish_start).count();
     if (found && !stats.witness_collision_free) {
@@ -3010,6 +3119,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       accepted_route_.execution_path = path_nodes;
       accepted_route_.witness_path = stats.witness_path;
       accepted_route_.shortcut_chords = candidate_shortcut_chords;
+      accepted_route_.unsafe_prediction_frames = 0;
       const bool frontier_goal_changed = !accepted_route_.valid ||
         proposed_frontier_goal_id != accepted_route_.frontier_goal_id ||
         (proposed_frontier_goal - accepted_route_.frontier_goal).norm() > 1e-3F;
@@ -3065,11 +3175,13 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     const std::size_t astar_semantic_checks = candidate_search_stats.semantic_candidate_checks;
     const bool astar_timed_out = candidate_search_stats.timed_out;
     const bool waiting_for_frontier_extension = false;
-    const char *route_decision = candidate_accepted && found && stats.witness_collision_free ?
-      "CANDIDATE_COMMITTED" :
+    const char *route_decision = candidate_witness_rejected && using_accepted_route &&
+      found && stats.witness_collision_free ? "CANDIDATE_WITNESS_FAILED_HOLD" :
+      (candidate_witness_rejected ? "CANDIDATE_WITNESS_REJECTED" :
+      (candidate_accepted && found && stats.witness_collision_free ? "CANDIDATE_COMMITTED" :
       (using_accepted_route && found && stats.witness_collision_free ? "ROUTE_HELD" :
       (candidate_found && !stats.witness_collision_free ? "CANDIDATE_WITNESS_REJECTED" :
-      (candidate_found ? "CANDIDATE_REJECTED" : "NO_CANDIDATE")));
+      (candidate_found ? "CANDIDATE_REJECTED" : "NO_CANDIDATE")))));
     std::ostringstream timing_json;
     timing_json << std::fixed << std::setprecision(6)
       << "{\"module\":\"planner\",\"stamp_ns\":" << now().nanoseconds()
@@ -3088,7 +3200,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       << ",\"gcn_frontier_column\":" <<
         (have_gcn_frontier_column_ ? gcn_frontier_column_ : -1)
       << ",\"gcn_frontier_direction_deg\":" <<
-        (have_gcn_frontier_column_ ? static_cast<double>(2 - gcn_frontier_column_) * 20.0 : 0.0)
+        (have_gcn_frontier_column_ ? static_cast<double>(gcn_frontier_column_ - 2) * 20.0 : 0.0)
       << ",\"gcn_frontier_received_count\":" << gcn_frontier_received_count_.load()
       << ",\"gcn_frontier_changed_count\":" << gcn_frontier_changed_count_.load()
       << ",\"gcn_frontier_hint_used_count\":" << gcn_frontier_hint_used_count_.load()
@@ -4062,6 +4174,69 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     return color;
   }
 
+  bool candidateExecutionPathPreflight(
+      const TopoGraph::Ptr &topo,
+      const std::vector<TopoNode::Ptr> &path_nodes)
+  {
+    if (!topo || !topo->parallel_bubble_astar_ || path_nodes.size() < 2) return false;
+
+    std::vector<Eigen::Vector3f> execution_path;
+    execution_path.reserve(path_nodes.size());
+    for (const auto &node : path_nodes) {
+      if (!node || !node->center_.allFinite()) return false;
+      Eigen::Vector3f point = node->center_;
+      if (graph_fixed_layer_) point.z() = static_cast<float>(graph_layer_z_);
+      if (execution_path.empty() || (execution_path.back() - point).norm() > 1e-3F) {
+        execution_path.push_back(point);
+      }
+    }
+    if (execution_path.size() < 2) return false;
+
+    // Semantic links are provisional direct chords. Remove a failed chord now
+    // so the next A* cannot repeatedly select the same invalid candidate.
+    for (std::size_t i = 1; i < path_nodes.size(); ++i) {
+      const auto &from = path_nodes[i - 1];
+      const auto &to = path_nodes[i];
+      if (!from || !to || !isOrdinarySemanticLink(from, to)) continue;
+      std::vector<Eigen::Vector3f> direct{from->center_, to->center_};
+      if (graph_fixed_layer_) {
+        direct[0].z() = static_cast<float>(graph_layer_z_);
+        direct[1].z() = static_cast<float>(graph_layer_z_);
+      }
+      ParallelBubbleAstar::CollisionCheckInfo edge_info;
+      if (topo->parallel_bubble_astar_->collisionCheck_shortenPath(direct, &edge_info)) {
+        continue;
+      }
+      const bool removed = topo->removeEdge(from, to);
+      map_changed_.store(true);
+      RCLCPP_WARN(
+        get_logger(),
+        "[ScaleNav route candidate preflight] semantic edge unsafe %llu->%llu "
+        "removed=%d clearance=%.3f safe_distance=%.3f",
+        static_cast<unsigned long long>(from->persistent_id_),
+        static_cast<unsigned long long>(to->persistent_id_),
+        static_cast<int>(removed), edge_info.minimum_clearance,
+        topo->parallel_bubble_astar_->safe_distance_);
+      return false;
+    }
+
+    ParallelBubbleAstar::CollisionCheckInfo execution_info;
+    if (topo->parallel_bubble_astar_->collisionCheck_shortenPath(
+          execution_path, &execution_info)) {
+      return true;
+    }
+    RCLCPP_WARN(
+      get_logger(),
+      "[ScaleNav route candidate preflight] execution path unsafe points=%zu "
+      "failed_index=%zu failed_point=(%.2f,%.2f,%.2f) clearance=%.3f "
+      "safe_distance=%.3f",
+      execution_path.size(), execution_info.failed_index,
+      execution_info.failed_point.x(), execution_info.failed_point.y(),
+      execution_info.failed_point.z(), execution_info.minimum_clearance,
+      topo->parallel_bubble_astar_->safe_distance_);
+    return false;
+  }
+
   struct PublishStats {
     std::size_t bubbles = 0;
     std::size_t skeleton_nodes = 0;
@@ -4463,13 +4638,9 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         stats.witness_points = 0;
         witness_rejected = true;
         found = false;
-        // The previously accepted route is no longer executable.  Do not
-        // fall back to it when this tick's replacement search fails.
-        accepted_route_.valid = false;
-        accepted_route_.topology_path.clear();
-        accepted_route_.execution_path.clear();
-        accepted_route_.witness_path.clear();
-        accepted_route_.frontier_goal_id = 0;
+        // update() decides whether this path is a provisional candidate or
+        // the incumbent. A failed candidate edge must not invalidate an
+        // independently checked accepted route that does not use this edge.
         break;
       }
     }

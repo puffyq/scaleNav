@@ -16,11 +16,13 @@ RVIZ=0
 RUN_YOPO=1
 RUN_MPC=1
 SEMANTIC=0
-PROMPT="tree, blocks, wall"
+PROMPT="building"
 SEMANTIC_RATE="2.0"
 SEMANTIC_COST_WEIGHT="2.0"
 SEMANTIC_DEVICE="cuda"
 GRAPH_SAFE_DISTANCE="0.61"
+RUN_GCN=1
+GCN_MODEL="$ROOT/train_gcn/frontier_gcn_map2_35m.pt"
 MODEL_MAX_DEPTH_M="20.0"
 SENSOR_MAX_DISTANCE_M="50.0"
 CLOUD_STRIDE="1"
@@ -30,6 +32,7 @@ VERTICAL_FOV="73.7398"
 GRAPH_LAYER_Z="1.6"
 GRAPH_FIXED_LAYER="false"
 PRESERVE_ODOM_Z=1
+SCENE_ENDPOINT=""
 MODEL="$WS/src/models/original_yopo_simple/model.pt"
 OUTPUT_ROOT="$WS/tmp/0903_replay"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-42}"
@@ -54,7 +57,8 @@ Options:
   --no-yopo                  Graph-only replay
   --no-mpc                   Run YOPO without ordered-bubble MPC
   --semantic                 Enable PEARL semantic heatmaps
-  --prompt TEXT              PEARL text prompt (default: tree, blocks, wall)
+  --prompt TEXT              PEARL text prompt (default: building)
+  --scene-endpoint forest|building  Goal endpoint for the selected scene
   --semantic-rate HZ         PEARL update rate (default: 2)
   --semantic-device DEVICE   PEARL device (default: cuda; falls back to CPU)
   --semantic-cost-weight W   Graph semantic edge cost weight (default: 2)
@@ -81,6 +85,7 @@ while (($#)); do
     --no-mpc) RUN_MPC=0; shift ;;
     --semantic) SEMANTIC=1; shift ;;
     --prompt) PROMPT="$2"; shift 2 ;;
+    --scene-endpoint) SCENE_ENDPOINT="$2"; shift 2 ;;
     --semantic-rate) SEMANTIC_RATE="$2"; shift 2 ;;
     --semantic-device) SEMANTIC_DEVICE="$2"; shift 2 ;;
     --semantic-cost-weight) SEMANTIC_COST_WEIGHT="$2"; shift 2 ;;
@@ -103,7 +108,7 @@ export ROS_DOMAIN_ID
 SYSTEM_PYTHON=/usr/bin/python3
 YOPO_PYTHON="$ROOT/../YOPO-Rally/.venv/bin/python"
 ROSBAGS_SITE="$ROOT/../YOPO-Rally/.venv/lib/python3.10/site-packages"
-export PYTHONPATH="$SRC/scalenav:$SRC:$ROSBAGS_SITE:/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:$ROOT/train_scalenav:${PYTHONPATH:-}"
+export PYTHONPATH="$SRC/scalenav:$SRC:$ROSBAGS_SITE:/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:$ROOT/train_scalenav:$ROOT/train_gcn:${PYTHONPATH:-}"
 export ACADOS_SOURCE_DIR="${ACADOS_SOURCE_DIR:-$ROOT/../leap-c/external/acados}"
 export LD_LIBRARY_PATH="$ACADOS_SOURCE_DIR/lib:${LD_LIBRARY_PATH:-}"
 export PYTHONPATH="$ROOT/../leap-c:$ACADOS_SOURCE_DIR/interfaces/acados_template:$PYTHONPATH"
@@ -150,7 +155,17 @@ run ros2 launch scalenav_graph_ros2 scalenav_graph.launch.py \
   semantic_heatmap_topic:=/scalenav/text_heatmap_raw \
   wait_for_initial_semantic:="$([[ "$SEMANTIC" == 1 ]] && echo true || echo false)" \
   semantic_cost_weight:="$([[ "$SEMANTIC" == 1 ]] && echo "$SEMANTIC_COST_WEIGHT" || echo 0.0)" \
+  gcn_frontier_column_topic:=/scalenav/gcn_frontier_column \
+  gcn_frontier_required:="$([[ "$RUN_GCN" == 1 ]] && echo true || echo false)" \
   flight_statistics_file:="$FLIGHT_CSV" graph_log_file:="$GRAPH_LOG"
+
+if ((RUN_GCN)); then
+  run "$SYSTEM_PYTHON" "$SRC/scalenav/gcn_frontier_policy_ros2.py" \
+    --model "$GCN_MODEL" --device cuda \
+    --odom-topic /sim/odom --graph-topic /scalenav/graph \
+    --timing-topic /scalenav/timing --mission-goal-topic /goal_pose \
+    --output-topic /scalenav/gcn_frontier_column --marker-topic /scalenav/gcn_selected
+fi
 
 if ((RUN_YOPO)); then
   mpc_args=()
@@ -176,6 +191,13 @@ echo "replay run=$RUN_DIR"
 echo "DS RGB=1728x1728 calibrated; depth=512x512 calibrated; output FOV=${HORIZONTAL_FOV}x${VERTICAL_FOV} deg"
 echo "depth: d=1/(q/255*0.07812003+0.0166666667)-10; q=0 is ${SENSOR_MAX_DISTANCE_M}m far-plane"
 echo "graph: safe_distance=${GRAPH_SAFE_DISTANCE}m semantic=$SEMANTIC prompt='$PROMPT'"
+if [[ -z "$SCENE_ENDPOINT" ]]; then
+  case "${PROMPT,,}" in
+    tree|trees|forest|woods) SCENE_ENDPOINT="forest" ;;
+    building|buildings) SCENE_ENDPOINT="building" ;;
+  esac
+fi
+echo "scene endpoint: ${SCENE_ENDPOINT:-global final odometry}"
 if ((PRESERVE_ODOM_Z)); then
   echo "odometry: preserve recorded Z; normalize horizontal origin only"
 else
@@ -185,13 +207,17 @@ fi
 set +e
 altitude_args=(--preserve-odom-z)
 if ((!PRESERVE_ODOM_Z)); then altitude_args=(--fixed-altitude "$GRAPH_LAYER_Z"); fi
+goal_args=(--goal-from-final-odom)
+if [[ -n "$SCENE_ENDPOINT" ]]; then
+  goal_args=(--goal-from-scene-endpoint --scene-endpoint "$SCENE_ENDPOINT")
+fi
 "$SYSTEM_PYTHON" "$SRC/scalenav/replay_ros1_ds_bag_ros2.py" "$BAG" \
   --rate "$RATE" --start "$START" --duration "$DURATION" \
   --horizontal-fov "$HORIZONTAL_FOV" --vertical-fov "$VERTICAL_FOV" \
   --model-max-depth-m "$MODEL_MAX_DEPTH_M" \
   --sensor-max-distance-m "$SENSOR_MAX_DISTANCE_M" \
   --cloud-stride "$CLOUD_STRIDE" --free-ray-stride "$FREE_RAY_STRIDE" \
-  "${altitude_args[@]}" --goal-from-final-odom --odom-csv "$ODOM_CSV" \
+  "${altitude_args[@]}" "${goal_args[@]}" --odom-csv "$ODOM_CSV" \
   --preview-dir "$RUN_DIR"
 REPLAY_STATUS=$?
 set -e
@@ -207,7 +233,8 @@ if [[ -f "$COLLECTION" ]]; then
     --runtime-log "$LOG" \
     --playback-rate "$RATE" \
     --graph-safe-distance "$GRAPH_SAFE_DISTANCE" \
-    --title "0903 real DS replay: graph, semantics and frontier snapshot" \
+    --title "0903 real DS replay: RGB, PEARL and planning pipeline" \
+    --prompt "$PROMPT" \
     --depth-note "recorded inverse depth d=1/(q/255*0.07812003+0.0166666667)-10 m; q=0 is ${SENSOR_MAX_DISTANCE_M} m far-plane"
   ln -sfn "run_$RUN_ID" "$OUTPUT_ROOT/latest"
   echo "planning snapshot: $RUN_DIR/planning_snapshot.png"

@@ -842,4 +842,29 @@ inline bool semanticRouteResetRequested(bool enabled, float before, float after,
   return enabled && semanticRiskChangeRequiresReplan(before, after, minimum_delta);
 }
 
+// A newly searched route is provisional until its exact execution witness has
+// passed validation. Failure of that provisional route is not evidence that a
+// separately validated incumbent became unsafe.
+inline bool shouldHoldIncumbentAfterCandidateFailure(
+    bool candidate_selected, bool candidate_witness_valid,
+    bool incumbent_available, bool incumbent_reachable,
+    bool incumbent_topology_executable, bool incumbent_forced_replan)
+{
+  return candidate_selected && !candidate_witness_valid &&
+         incumbent_available && incumbent_reachable &&
+         incumbent_topology_executable && !incumbent_forced_replan;
+}
+
+inline bool consecutiveUnsafeRouteRequiresReplan(
+    bool route_available, bool witness_safe, int required_frames,
+    int &unsafe_frames)
+{
+  if (!route_available || witness_safe) {
+    unsafe_frames = 0;
+    return false;
+  }
+  unsafe_frames = std::min(unsafe_frames + 1, std::max(1, required_frames));
+  return unsafe_frames >= std::max(1, required_frames);
+}
+
 }  // namespace scalenav_graph

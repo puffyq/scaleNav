@@ -94,12 +94,11 @@ world coordinates across asynchronous graph replacement.  A five-way GCN is
 placed directly on the online skeleton topology graph to predict the frontier
 direction; downstream A* search, collision checking, path processing, and
 local-goal publication remain unchanged.  The released YOPO policy is used
-without modification or retraining.  Across 60 valid GCN trials, success is
-$83.3\%$, collision is $15.0\%$, and timeout is $1.7\%$; successful flights
-are shorter and faster than the original planner, but not safer.  These
-results make the central design boundary explicit: graph learning proposes a
-route direction, while geometric topology and collision checks retain
-authority over execution.
+without modification or retraining.  In the latest ten-trial GCN run, all
+trials reached the goal with no collision or timeout; successful flights
+averaged $171.59$~m at $5.11$~m/s.  These results make the central design
+boundary explicit: graph learning proposes a route direction, while
+geometric topology and collision checks retain authority over execution.
 \end{abstract}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -279,14 +278,14 @@ routes as world-frame witness goals rather than as appearance subgoals, and
 
 \begin{figure*}[!t]
 \centering
-\safefig[width=0.98\textwidth]{pics/system_architecture_topology.pdf}
+\safefig[width=0.98\textwidth]{pics/system_architecture_topology_v3.pdf}
 \vspace{-2pt}
-\caption{Topology-first ScaleNav architecture.  Depth and odometry build the
-persistent graph of verified bubbles and witness edges.  RGB and a text query
-produce provisional semantic frontiers and witness-level risk.  The topology
-graph is also the input to the five-way GCN, whose frontier-column proposal is
-filtered by A* and collision checks before the unchanged local executor receives
-a local goal.  Semantics suggests a route; geometry retains safety authority.}
+\caption{Topology-first ScaleNav architecture.  Depth and odometry maintain the
+persistent graph of verified bubbles and witness edges, while RGB and a text
+query provide semantic route preference.  The same graph feeds a five-way GCN
+proposal; reachable search and collision checks accept the witness route before
+the unchanged local executor receives a goal.  Semantics suggests a route;
+geometry retains safety authority.}
 \label{fig:system_architecture}
 \end{figure*}
 
@@ -553,8 +552,8 @@ The primary comparison is the original topology planner against the
 GCN-augmented topology planner.  Both retain the same skeleton graph, A*
 search, collision checks, path processing, local-goal publication, and
 unmodified YOPO executor; only the frontier-direction proposal differs.  The
-original batch contains 27 valid trials and the GCN batch contains 60 valid
-trials.  Startup failures and one manually interrupted trial are excluded
+original batch contains 27 valid trials and the latest GCN batch contains
+10 valid trials.  Startup failures and one manually interrupted trial are excluded
 from navigation statistics.  EGO-Planner \cite{egoplanner} and SUPER
 \cite{super} remain secondary executor references, not replacements for the
 topology-graph method.  Table~\ref{tab:params} lists the shared configuration.
@@ -598,7 +597,7 @@ additionally include the unseen query ``avoid power lines.''
 Figure~\ref{fig:map2_speed_trajectories} is a qualitative visualization from
 the earlier executor-substitution batch: it contrasts frontier-only runs with
 the corresponding graph-guided ScaleNav runs for YOPO, EGO-Planner, and SUPER.
-It is not a trajectory plot of the 60-trial GCN batch; the quantitative GCN
+It is not a trajectory plot of the ten-trial GCN batch; the quantitative GCN
 comparison is Table~\ref{tab:single_run_validation}.
 
 \begin{figure*}[!ht]
@@ -609,7 +608,7 @@ comparison is Table~\ref{tab:single_run_validation}.
 batch, with and without the topology graph.  Rows compare YOPO-Simple,
 EGO-Planner, and SUPER; the left column uses the frontier-only executor and
 the right column uses the corresponding ScaleNav-graph route layer.  This
-figure is not the 60-trial GCN batch reported in
+figure is not the ten-trial GCN batch reported in
 Table~\ref{tab:single_run_validation}.  Color denotes executed speed; circles,
 stars, and crosses mark starts, completed goals, and incomplete collision
 endpoints.}
@@ -618,7 +617,7 @@ endpoints.}
 
 \begin{table}[t]
 \caption{Map2 Closed-Loop Topology-Graph Comparison.  The two batches have
-different sample counts ($n=27$ and $n=60$); continuous entries are means over
+different sample counts ($n=27$ and $n=10$); continuous entries are means over
 successful trials and are not paired estimates.}
 \label{tab:single_run_validation}
 \centering
@@ -629,32 +628,60 @@ successful trials and are not paired estimates.}
 Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
 \midrule
 Original ScaleNav ($n=27$) & 88.9 & 11.1 & 0 & 199.14 & 38.54 & 5.17 & 6.41 \\
-GCN-ScaleNav ($n=60$) & 83.3 & 15.0 & 1.7 & 165.82 & 30.52 & 5.43 & 6.18 \\
-EGO-Planner (reference) & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
-SUPER (reference) & \blank & \blank & \blank & \blank & \blank & \blank & \blank \\
+GCN-ScaleNav ($n=10$) & 100.0 & 0.0 & 0.0 & 171.59 & 33.61 & 5.11 & 6.25 \\
 \bottomrule
 \end{tabular}
 }
 \end{table}
 
-Table~\ref{tab:single_run_validation} shows the measured trade-off rather than
-a claim of GCN superiority.  GCN successes are shorter and faster on average,
-but success falls by $5.6$ percentage points and collision rises by $3.9$
-points relative to the original planner.  The batches are not seed-matched,
-so these differences are descriptive only.
+Table~\ref{tab:single_run_validation} reports the latest ten-trial GCN batch
+alongside the earlier original-planner batch.  The GCN batch completed all
+trials, but its mean path and flight time are lower than the original batch's
+despite the different sample counts and seeds.  These differences are
+descriptive only and do not establish a causal improvement.
 
-\paragraph{Failure diagnosis.}
-Nine GCN collisions occur early, between $y=8$ and $18$~m, while the vehicle
-travels at roughly $5$--$6$~m/s.  Logs report clearances below the configured
-$0.610$~m safety threshold, followed by ``shortcut execution suffix blocked'',
-``stale backbone witness unsafe'', and ``forcing fresh A*''.  Several then
-enter \texttt{start\_fail} while the vehicle is still moving, leaving too
-little braking time.  Right-turn GCN outputs are present before some events,
-but the executed route is still selected by A* and local-goal processing; the
-evidence therefore supports an interaction between graph-direction bias,
-route switching, and map-update latency, not a claim that GCN alone caused
-the collisions.  The sole timeout reaches $4.27$~m from the mission goal with
-speed about $2.97$~m/s and fails the final convergence tolerance.
+The latest GCN run produced no collision or timeout events: all ten trials
+reached the goal and satisfied the final position and settling-speed
+tolerances.  Failure-mechanism analysis from the earlier 60-trial run is not
+used to characterize this updated batch.
+
+To expose the effect of adding the graph route layer across executors, we
+report the complete conventional flight metrics for same-scene ten-trial Map2
+batches.  The graph-enabled EGO batch uses the 600-s mission timeout with a
+60-s no-progress termination; the latest graph-enabled SUPER batch uses the
+90-s mission timeout with no separate no-progress termination.
+
+\begin{table*}[t]
+\caption{Ten-Trial Map2 Closed-Loop Comparison Using Conventional Flight
+Metrics.  The first row of each executor pair is the baseline without the
+ScaleNav graph; the second row uses the graph route layer.}
+\label{tab:graph_collision_comparison}
+\centering
+\small
+\resizebox{0.98\textwidth}{!}{%
+\begin{tabular}{lccccccc}
+\toprule
+Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
+\midrule
+YOPO-Simple (no graph) & 0 & 100 & 0 & $129.79\pm0.58$ & $61.46\pm0.36$ & $2.11\pm0.01$ & $6.46\pm0.02$ \\
+ScaleNav (YOPO) & 100 & 0 & 0 & $196.30\pm13.36$ & $37.48\pm2.50$ & $5.24\pm0.09$ & $6.42\pm0.05$ \\
+EGO-Planner (no graph) & 0 & 100 & 0 & $73.24\pm0.69$ & $54.32\pm1.05$ & $1.35\pm0.02$ & $2.43\pm0.25$ \\
+ScaleNav+EGO & 0 & 50 & 50 & $54.50\pm32.30$ & $72.22\pm37.68$ & $0.85\pm0.40$ & $2.18\pm0.27$ \\
+SUPER (no graph) & 0 & 100 & 0 & $47.07\pm28.27$ & $10.25\pm4.99$ & $4.30\pm0.68$ & $5.60\pm0.23$ \\
+ScaleNav+SUPER & 80 & 10 & 10 & $180.36\pm16.09$ & $42.60\pm4.09$ & $4.24\pm0.22$ & $5.15\pm0.06$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+Outcome rates use all ten valid trials.  For a condition with at least one
+success, path, time, and speed are mean $\pm$ sample standard deviation over
+successful flights; when no trial succeeds, they are the corresponding
+statistics observed before collision or timeout and are not completion
+metrics.  The latest ScaleNav+SUPER batch completes 8/10 trials, so its
+continuous entries use the eight successful flights.  The graph-enabled conditions use the semantic route
+layer with the same ``blocks, wall'' query and the corresponding local
+executor.
 
 \subsection{Offline GCN Evaluation}
 The privileged Map2 dataset contains 5,337 training samples and 707 held-out
@@ -686,15 +713,12 @@ events to the graph--planner--executor interface rather than to an offline GCN
 classification score alone.
 
 \subsection{Statistical Scope and Limitations}
-The GCN summary contains 79 recorded trials: 60 valid navigation trials, 18
-startup failures, and one manually interrupted trial.  The original
-ScaleNav summary contains 27 valid trials and one interruption.  A startup
-failure is not counted as a navigation failure.  Since the valid counts are
-different and the trials are not seed-matched, the closed-loop comparison is
-descriptive rather than a causal significance test.  The current data support
-shorter and faster successful GCN flights, but not improved success or safety.
-A matched rerun with process cleanup and equal valid sample counts is required
-for a definitive comparison.
+The latest GCN summary contains ten recorded, valid navigation trials; all
+ten succeeded.  The original ScaleNav summary contains 27 valid trials and
+one interruption.  A startup failure is not counted as a navigation failure.
+Since the valid counts are different and the trials are not seed-matched, the
+closed-loop comparison is descriptive rather than a causal significance test.
+Equal-sized, seed-matched trials remain necessary for a definitive comparison.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{DISCUSSION AND LIMITATIONS}
 \label{sec:discussion}
@@ -705,12 +729,12 @@ risk preference; GCN ranks five frontier directions; A* and collision checks
 remain authoritative.  The released YOPO executor is unchanged and can be
 replaced by another goal-conditioned local planner.
 
-The offline GCN accuracy does not translate directly to online safety.  The
-60-trial batch is faster when successful but has lower success and higher
-collision rates than the 27-trial original batch.  Early failures occur when
-low-clearance witnesses are invalidated while the vehicle is still moving;
-future graph policies should expose reachable clearance, braking margin, and
-A* cost, and unsafe columns should be masked before learned ranking.
+The offline GCN accuracy does not by itself establish online safety.  The
+latest ten-trial batch completed without collision, but it is not seed-matched
+to the 27-trial original batch and is too small to support a significance
+claim.  Future graph policies should still expose reachable clearance,
+braking margin, and A* cost, and unsafe columns should be masked before
+learned ranking.
 
 The current evaluation is in one simulated Map2 environment, uses a
 fixed-height planning layer, and compares unmatched batches.  Semantic
@@ -728,10 +752,10 @@ backbone with semantic frontiers, continuous witness risk, and world-frame
 route memory.  A five-way GCN can propose a frontier direction from the graph,
 but A*, collision checks, and the unchanged local executor retain authority.
 The offline classifier result does not substitute for online safety: the
-current 60-trial evaluation is faster but less safe than the original
-planner.  Future work must add reachable-clearance and braking-aware features,
-mask unsafe columns before learned ranking, and rerun the two conditions with
-matched valid trial counts after fixing process-cleanup races.
+latest ten-trial evaluation is collision-free, but the unmatched sample size
+does not support a general safety claim.  Future work must add
+reachable-clearance and braking-aware features, mask unsafe columns before
+learned ranking, and rerun the two conditions with matched valid trial counts.
 
 {\scriptsize
 \begin{thebibliography}{99}

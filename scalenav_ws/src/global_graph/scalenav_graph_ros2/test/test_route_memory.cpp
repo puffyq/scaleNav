@@ -520,4 +520,50 @@ TEST(SemanticOpportunity, AlternatingDirectionsAndSmallBenefitsDoNotTrigger)
   EXPECT_EQ(frames, 0);
 }
 
+TEST(RouteMemory, FailedCandidateHoldsAnIndependentlySafeIncumbent)
+{
+  EXPECT_TRUE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+    true, false, true, true, true, false));
+}
+
+TEST(RouteMemory, ValidCandidateDoesNotFallBackToTheIncumbent)
+{
+  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+    true, true, true, true, true, false));
+  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+    false, false, true, true, true, false));
+}
+
+TEST(RouteMemory, BlockedOrDisconnectedIncumbentCannotMaskCandidateFailure)
+{
+  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+    true, false, true, true, false, false));
+  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+    true, false, true, false, true, false));
+  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+    true, false, true, true, true, true));
+}
+
+TEST(RouteMemory, AcceptedRouteNeedsTwoConsecutiveUnsafeChecks)
+{
+  int unsafe_frames = 0;
+  EXPECT_FALSE(scalenav_graph::consecutiveUnsafeRouteRequiresReplan(
+    true, false, 2, unsafe_frames));
+  EXPECT_EQ(unsafe_frames, 1);
+  EXPECT_TRUE(scalenav_graph::consecutiveUnsafeRouteRequiresReplan(
+    true, false, 2, unsafe_frames));
+  EXPECT_EQ(unsafe_frames, 2);
+}
+
+TEST(RouteMemory, SafeCheckClearsAcceptedRouteUnsafeEvidence)
+{
+  int unsafe_frames = 1;
+  EXPECT_FALSE(scalenav_graph::consecutiveUnsafeRouteRequiresReplan(
+    true, true, 2, unsafe_frames));
+  EXPECT_EQ(unsafe_frames, 0);
+  EXPECT_FALSE(scalenav_graph::consecutiveUnsafeRouteRequiresReplan(
+    false, false, 2, unsafe_frames));
+  EXPECT_EQ(unsafe_frames, 0);
+}
+
 }  // namespace
