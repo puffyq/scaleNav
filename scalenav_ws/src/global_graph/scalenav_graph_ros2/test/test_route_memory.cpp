@@ -113,6 +113,20 @@ TEST(RouteMemoryM5Contract, TcM5020FrontierRefreshUsesConfiguredProgressFraction
   EXPECT_FALSE(scalenav_graph::routeProgressReachedFraction(8.0F, 0.0F, 0.40F));
 }
 
+TEST(RouteMemoryM5Contract, TcM5022ExternalFrontierCommandHasIndependentReleaseGate)
+{
+  EXPECT_TRUE(scalenav_graph::frontierCommandReleaseAllowed(
+    false, 0.0F, 20.0F, 0.40F, false, false));
+  EXPECT_FALSE(scalenav_graph::frontierCommandReleaseAllowed(
+    true, 7.99F, 20.0F, 0.40F, false, false));
+  EXPECT_TRUE(scalenav_graph::frontierCommandReleaseAllowed(
+    true, 8.0F, 20.0F, 0.40F, false, false));
+  EXPECT_TRUE(scalenav_graph::frontierCommandReleaseAllowed(
+    true, 0.0F, 20.0F, 0.40F, true, false));
+  EXPECT_TRUE(scalenav_graph::frontierCommandReleaseAllowed(
+    true, 0.0F, 20.0F, 0.40F, false, true));
+}
+
 TEST(RouteMemoryM5Contract, TcM5021MissionGoalUsesTheLargerDirectHorizon)
 {
   EXPECT_TRUE(scalenav_graph::missionGoalWithinDirectHorizon(15.0F, 6.0F, 15.0F));

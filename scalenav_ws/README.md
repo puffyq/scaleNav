@@ -70,6 +70,26 @@ horizontal and 60° vertical FOV. Use `--no-rviz` for headless runs and
 `--loop` for repeated playback. The goal is not part of the sensor-only bag;
 omit `--goal` only when publishing `/goal_pose` from another node.
 
+The 0903 real-flight files are ROS1 bags recorded with calibrated Double Sphere
+RGB and depth cameras. Replay the complete 2 m/s bag through calibrated depth
+conversion, ScaleNav graph, original YOPO, and
+ordered-bubble MPC with:
+
+```bash
+bash scalenav_ws/scripts/replay_0903_ds_graph.sh --rate 1.0 --rviz
+```
+
+The command writes an HTML report and a graph/trajectory PNG under
+`scalenav_ws/tmp/0903_replay/latest/`. The recorded `/omni_record/depth_visual`
+is the uint8 inverse-depth network output `q`, decoded as
+`d = 1/(q/255*0.07812003 + 0.0166666667) - 10` metres. Replay directly
+unprojects the calibrated 512x512 Double Sphere rays for Graph point-cloud
+input, and separately reprojects the depth into YOPO's perspective planar-depth
+image. Since this bag has no separate invalid-mask topic, `q=0` is treated as
+the 50 m far plane and published as free-ray evidence. Recorded odometry Z is
+preserved by default so the world cloud follows `P_out = R_odom*P_cam+t_odom`;
+`--flatten-altitude 1.6` is available only as an explicit comparison mode.
+
 The goal script accepts `x y z` in the `world_enu` frame. AirSim/UE must be
 running before `start.sh`; run `build.sh` after source changes.
 

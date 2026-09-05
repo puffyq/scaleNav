@@ -278,6 +278,14 @@ inline bool routeProgressReachedFraction(
   return progress_m >= std::clamp(fraction, 0.0F, 1.0F) * initial_length_m;
 }
 
+inline bool frontierCommandReleaseAllowed(
+  bool have_active_command, float progress_m, float initial_length_m,
+  float progress_fraction, bool semantic_edge_invalid, bool mission_goal_direct)
+{
+  return !have_active_command || semantic_edge_invalid || mission_goal_direct ||
+    routeProgressReachedFraction(progress_m, initial_length_m, progress_fraction);
+}
+
 inline bool missionGoalWithinDirectHorizon(
   float vehicle_to_goal_m, float goal_connect_distance_m, float lookahead_m)
 {

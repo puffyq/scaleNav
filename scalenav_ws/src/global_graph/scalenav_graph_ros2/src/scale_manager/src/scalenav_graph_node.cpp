@@ -37,6 +37,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/color_rgba.hpp>
+#include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
@@ -163,6 +164,14 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     next_goal_topic_ = declare_parameter<std::string>("next_goal_topic", "/scalenav/local_goal");
     frontier_goal_topic_ = declare_parameter<std::string>(
       "frontier_goal_topic", "/scalenav/frontier_goal");
+    gcn_frontier_column_topic_ = declare_parameter<std::string>(
+      "gcn_frontier_column_topic", "");
+    gcn_frontier_required_ = declare_parameter<bool>(
+      "gcn_frontier_required", false);
+    gcn_frontier_timeout_ms_ = std::max(0.0, declare_parameter<double>(
+      "gcn_frontier_timeout_ms", 1000.0));
+    gcn_frontier_direction_weight_ = std::max(0.0, declare_parameter<double>(
+      "gcn_frontier_direction_weight", 20.0));
     clearance_topic_ = declare_parameter<std::string>("clearance_topic", "/scalenav/clearance");
     timing_topic_ = declare_parameter<std::string>("timing_topic", "/scalenav/timing");
     next_goal_frame_ = declare_parameter<std::string>("next_goal_frame", "world_enu");
@@ -201,6 +210,9 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     route_plan_period_ms_ = declare_parameter<int>("route_plan_period_ms", 100);
     local_goal_reserve_m_ = declare_parameter<double>("local_goal_reserve_m", 0.0);
     local_graph_radius_m_ = declare_parameter<double>("local_graph_radius_m", 45.0);
+    local_sliding_graph_ = declare_parameter<bool>("local_sliding_graph", false);
+    local_sliding_graph_radius_m_ = std::max(1.0, declare_parameter<double>(
+      "local_sliding_graph_radius_m", 40.0));
     frontier_goal_margin_m_ = declare_parameter<double>("frontier_goal_margin_m", 3.5);
     frontier_progress_loss_weight_ = declare_parameter<double>(
       "frontier_progress_loss_weight", 0.5);
@@ -449,6 +461,17 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       goal_topic_, 10,
       [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr message) { onGoal(message); },
       state_options);
+    if (!gcn_frontier_column_topic_.empty()) {
+      gcn_frontier_column_sub_ = create_subscription<std_msgs::msg::Int32>(
+        gcn_frontier_column_topic_, 10,
+        [this](std_msgs::msg::Int32::ConstSharedPtr message) {
+          onGcnFrontierColumn(message);
+        }, state_options);
+      RCLCPP_INFO(get_logger(),
+        "ScaleNav GCN frontier override: topic=%s required=%d timeout=%.0f ms weight=%.1f",
+        gcn_frontier_column_topic_.c_str(), static_cast<int>(gcn_frontier_required_),
+        gcn_frontier_timeout_ms_, gcn_frontier_direction_weight_);
+    }
     timer_ = create_wall_timer(
       std::chrono::milliseconds(std::max(1, update_period_ms_)),
       [this]() { update(); }, planner_callback_group_);
@@ -545,6 +568,33 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       execution_path.clear();
       witness_path.clear();
       shortcut_chords.clear();
+    }
+  };
+
+  // SUPER/EGO consume only the frontier endpoint, so their command lifetime
+  // must not inherit churn from internal A* route reconstruction. Keep the
+  // route that justified the command solely for the 40% release gate.
+  struct FrontierCommandState
+  {
+    bool valid = false;
+    Eigen::Vector3f goal = Eigen::Vector3f::Zero();
+    std::uint64_t goal_id = 0;
+    std::vector<TopoNode::Ptr> topology_path;
+    std::vector<Eigen::Vector3f> reference_path;
+    float initial_route_length_m = 0.0F;
+    float progress_m = 0.0F;
+    float progress_t = 0.0F;
+
+    void clear()
+    {
+      valid = false;
+      goal.setZero();
+      goal_id = 0;
+      topology_path.clear();
+      reference_path.clear();
+      initial_route_length_m = 0.0F;
+      progress_m = 0.0F;
+      progress_t = 0.0F;
     }
   };
 
@@ -1323,6 +1373,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       // A new mission goal starts a fresh route search. The measured graph may
       // still be retained, but no previous route is reused for planning.
       accepted_route_.clear();
+      frontier_command_.clear();
       blocked_shortcuts_.clear();
       mission_direct_goal_latched_ = false;
       polynomial_guide_path_.clear();
@@ -1364,6 +1415,35 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       goal_.x(), goal_.y(), goal_.z(), goal_graph_mode.c_str(),
       static_cast<int>(reuse_graph_on_goal_), static_cast<int>(bounds_expanded),
       semantic_memory.size());
+  }
+
+  void onGcnFrontierColumn(const std_msgs::msg::Int32::ConstSharedPtr &message)
+  {
+    if (!message || message->data < 0 || message->data > 4) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+        "Ignoring invalid GCN frontier column (expected 0..4)");
+      return;
+    }
+    std::lock_guard<std::mutex> topology_lock(topology_operation_mutex_);
+    const bool changed = !have_gcn_frontier_column_ ||
+      gcn_frontier_column_ != message->data;
+    gcn_frontier_column_ = message->data;
+    have_gcn_frontier_column_ = true;
+    last_gcn_frontier_time_ = std::chrono::steady_clock::now();
+    ++gcn_frontier_received_count_;
+    if (!changed) return;
+    ++gcn_frontier_changed_count_;
+
+    // A changed GCN decision replaces only frontier selection. Clearing the
+    // accepted segment makes the next planner tick run the normal odom-rooted
+    // topology A* immediately; every downstream stage remains untouched.
+    accepted_route_.clear();
+    frontier_command_.clear();
+    polynomial_guide_path_.clear();
+    polynomial_curve_ = scalenav_graph::WitnessParametricCurve();
+    polynomial_curve_valid_ = false;
+    have_previous_local_goal_ = false;
+    RCLCPP_INFO(get_logger(), "[ScaleNav GCN] frontier column=%d", gcn_frontier_column_);
   }
 
   void onCloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &message)
@@ -1510,6 +1590,15 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     return delta_ms <= cloud_pose_tolerance_ms_;
   }
 
+  std::int64_t sensorReferenceTimeNs()
+  {
+    std::lock_guard<std::mutex> lock(odom_mutex_);
+    if (!odom_history_.empty() && odom_history_.back().stamp_ns > 0) {
+      return odom_history_.back().stamp_ns;
+    }
+    return get_clock()->now().nanoseconds();
+  }
+
   static void configureMapBounds(const fast_planner::LIOInterface::Ptr &map,
                                  const Eigen::Vector3f &position,
                                  const Eigen::Vector3f &goal,
@@ -1651,6 +1740,21 @@ class ScaleNavGraphNode final : public rclcpp::Node {
               std::chrono::steady_clock::now() - regions_start).count();
             const auto skeleton_start = std::chrono::steady_clock::now();
             next_topo->updateSkeleton();
+            if (local_sliding_graph_) {
+              const auto prune = next_topo->pruneOutsideRadius(
+                position, static_cast<float>(local_sliding_graph_radius_m_));
+              eraseSemanticMemory(prune.removed_semantic_ids);
+              if (prune.topology_nodes != 0 || prune.history_odom_nodes != 0 ||
+                  prune.semantic_memory_records != 0 || prune.bubble_snapshots != 0) {
+                RCLCPP_INFO(
+                  get_logger(),
+                  "[ScaleNav local graph prune] radius=%.1f topology=%zu "
+                  "history_odom=%zu semantic_memory=%zu bubbles=%zu",
+                  local_sliding_graph_radius_m_, prune.topology_nodes,
+                  prune.history_odom_nodes, prune.semantic_memory_records,
+                  prune.bubble_snapshots);
+              }
+            }
             skeleton_ms = std::chrono::duration<double, std::milli>(
               std::chrono::steady_clock::now() - skeleton_start).count();
 
@@ -1816,6 +1920,32 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     const char *accepted_route_forced_reason = "NONE";
     bool accepted_route_stale_but_safe = false;
     bool accepted_route_shortcut_feedback = false;
+    bool frontier_command_semantic_edge_release = false;
+    if (frontier_command_.valid && frontier_command_.topology_path.size() >= 2) {
+      for (std::size_t i = 1; i < frontier_command_.topology_path.size(); ++i) {
+        const auto &from = frontier_command_.topology_path[i - 1];
+        const auto &to = frontier_command_.topology_path[i];
+        if (!from || !to || !isOrdinarySemanticLink(from, to)) continue;
+        bool edge_safe = hasExecutableTopologyEdge(from, to);
+        ParallelBubbleAstar::CollisionCheckInfo live_info;
+        if (edge_safe && active_topo->parallel_bubble_astar_) {
+          std::vector<Eigen::Vector3f> direct{from->center_, to->center_};
+          edge_safe = active_topo->parallel_bubble_astar_
+            ->collisionCheck_shortenPath(direct, &live_info);
+        }
+        if (edge_safe) continue;
+        frontier_command_semantic_edge_release = true;
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "[ScaleNav frontier command release] active_id=%llu edge=%llu->%llu "
+          "reason=SEMANTIC_EDGE_INVALID clearance=%.3f",
+          static_cast<unsigned long long>(frontier_command_.goal_id),
+          static_cast<unsigned long long>(from->persistent_id_),
+          static_cast<unsigned long long>(to->persistent_id_),
+          live_info.minimum_clearance);
+        break;
+      }
+    }
     // Capture continuity before any safety check can invalidate route state.
     // Velocity is the best description of the motion that a replacement
     // route would have to reverse; at low speed use the accepted route ahead.
@@ -2111,6 +2241,9 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         }
       }
       if (accepted_route_edge_missing) {
+        frontier_command_semantic_edge_release =
+          frontier_command_semantic_edge_release ||
+          accepted_route_ordinary_semantic_failure;
         RCLCPP_WARN(get_logger(),
           "[ScaleNav route] accepted route invalidated by detached/blocked edge "
           "%llu->%llu; forcing fresh A*",
@@ -2149,11 +2282,12 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     // can be disabled for geometry-only runs.
     if (wait_for_initial_semantic_ && !initial_semantic_wait_complete_ && have_goal_) {
       bool semantic_ready = false;
+      const std::int64_t reference_stamp_ns = sensorReferenceTimeNs();
       {
         std::lock_guard<std::mutex> semantic_lock(semantic_mutex_);
         if (semantic_frame_) {
           const double age_ms = static_cast<double>(std::llabs(
-            get_clock()->now().nanoseconds() - semantic_frame_->stamp_ns)) / 1.0e6;
+            reference_stamp_ns - semantic_frame_->stamp_ns)) / 1.0e6;
           semantic_ready = age_ms <= semantic_max_age_ms_;
         }
       }
@@ -2229,9 +2363,12 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     if (accepted_route_.valid && !accepted_route_reachable) {
       // A rolling odom rebuild can temporarily lose the graph prefix to the
       // old Verified anchor while the already accepted geometric suffix is
-      // still safe. Validate that suffix before throwing away the route.
+      // still safe. That suffix is reusable only when the current odom can
+      // still reach the accepted Verified prefix; otherwise holding it would
+      // publish a route whose frontier is safe but unreachable from odom.
       bool accepted_suffix_safe = false;
-      if (accepted_connectivity.accepted_stable_edges_usable &&
+      if (accepted_connectivity.verified_prefix_reachable &&
+          accepted_connectivity.accepted_stable_edges_usable &&
           (!accepted_connectivity.has_terminal_unknown ||
            accepted_connectivity.terminal_unknown_edge_usable) &&
           active_topo->parallel_bubble_astar_ &&
@@ -2368,6 +2505,50 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         static_cast<double>(vehicle_to_goal));
     }
     const bool mission_goal_direct = have_goal_ && mission_direct_goal_latched_;
+    Eigen::Vector3f gcn_frontier_direction = Eigen::Vector3f::Zero();
+    const Eigen::Vector3f *gcn_frontier_direction_ptr = nullptr;
+    const bool gcn_frontier_fresh = have_gcn_frontier_column_ &&
+      std::chrono::duration<double, std::milli>(
+        now_steady - last_gcn_frontier_time_).count() <= gcn_frontier_timeout_ms_;
+    const bool gcn_frontier_enabled = !gcn_frontier_column_topic_.empty();
+    if (gcn_frontier_enabled && gcn_frontier_required_ && !have_gcn_frontier_column_) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "ScaleNav waiting for the first required GCN frontier column; "
+        "publishing the graph for GCN bootstrap");
+    }
+    if (!mission_goal_direct && gcn_frontier_fresh) {
+      Eigen::Vector3f forward = orientation_ * Eigen::Vector3f::UnitX();
+      forward.z() = 0.0F;
+      const float forward_norm = forward.norm();
+      if (forward_norm > 1e-3F) {
+        forward /= forward_norm;
+        const Eigen::Vector3f left(-forward.y(), forward.x(), 0.0F);
+        const float offset = static_cast<float>(2 - gcn_frontier_column_) *
+          20.0F * static_cast<float>(M_PI / 180.0);
+        gcn_frontier_direction = std::cos(offset) * forward + std::sin(offset) * left;
+        gcn_frontier_direction_ptr = &gcn_frontier_direction;
+      }
+    }
+    // Once required GCN mode has received a decision, keep using its latest
+    // direction until a newer decision arrives.  This prevents a transient
+    // inference delay from silently falling back to the non-GCN ranking.
+    if (!mission_goal_direct && gcn_frontier_enabled && gcn_frontier_required_ &&
+        have_gcn_frontier_column_ && gcn_frontier_direction_ptr == nullptr) {
+      Eigen::Vector3f forward = orientation_ * Eigen::Vector3f::UnitX();
+      forward.z() = 0.0F;
+      const float forward_norm = forward.norm();
+      if (forward_norm > 1e-3F) {
+        forward /= forward_norm;
+        const Eigen::Vector3f left(-forward.y(), forward.x(), 0.0F);
+        const float offset = static_cast<float>(2 - gcn_frontier_column_) *
+          20.0F * static_cast<float>(M_PI / 180.0);
+        gcn_frontier_direction = std::cos(offset) * forward + std::sin(offset) * left;
+        gcn_frontier_direction_ptr = &gcn_frontier_direction;
+      }
+    }
+    const bool gcn_frontier_hint_used = gcn_frontier_direction_ptr != nullptr;
+    if (gcn_frontier_hint_used) ++gcn_frontier_hint_used_count_;
     scalenav_graph::SemanticOpportunity semantic_opportunity;
     bool semantic_opportunity_observed = false;
     bool semantic_opportunity_persistent = false;
@@ -2470,7 +2651,9 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         static_cast<float>(frontier_goal_distance_weight_),
         static_cast<float>(frontier_semantic_detour_budget_m_),
         static_cast<float>(frontier_semantic_frame_budget_m_),
-        static_cast<float>(frontier_semantic_noise_floor_));
+        static_cast<float>(frontier_semantic_noise_floor_),
+        gcn_frontier_direction_ptr,
+        static_cast<float>(gcn_frontier_direction_weight_));
       candidate_nodes.swap(path_nodes);
       if (candidate_found && candidate_nodes.size() < 2) {
         candidate_found = false;
@@ -2855,7 +3038,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         incumbent_objective_log, candidate_objective_log,
         static_cast<double>(scalenav_graph::routeLength(stats.witness_path)),
         static_cast<double>(scalenav_graph::routeLength(stats.witness_path)));
-      publishAcceptedFrontierGoal();
+      publishAcceptedFrontierGoal(
+        frontier_command_semantic_edge_release, mission_goal_direct);
     }
     if (!found) {
       RCLCPP_WARN_THROTTLE(
@@ -2897,6 +3081,18 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       << ",\"found\":" << (found ? "true" : "false")
       << ",\"candidate_found\":" << (candidate_found ? "true" : "false")
       << ",\"candidate_accepted\":" << (candidate_accepted ? "true" : "false")
+      << ",\"gcn_frontier_enabled\":" << (gcn_frontier_enabled ? "true" : "false")
+      << ",\"gcn_frontier_required\":" << (gcn_frontier_required_ ? "true" : "false")
+      << ",\"gcn_frontier_fresh\":" << (gcn_frontier_fresh ? "true" : "false")
+      << ",\"gcn_frontier_hint_used\":" << (gcn_frontier_hint_used ? "true" : "false")
+      << ",\"gcn_frontier_column\":" <<
+        (have_gcn_frontier_column_ ? gcn_frontier_column_ : -1)
+      << ",\"gcn_frontier_direction_deg\":" <<
+        (have_gcn_frontier_column_ ? static_cast<double>(2 - gcn_frontier_column_) * 20.0 : 0.0)
+      << ",\"gcn_frontier_received_count\":" << gcn_frontier_received_count_.load()
+      << ",\"gcn_frontier_changed_count\":" << gcn_frontier_changed_count_.load()
+      << ",\"gcn_frontier_hint_used_count\":" << gcn_frontier_hint_used_count_.load()
+      << ",\"gcn_frontier_timeout_ms\":" << gcn_frontier_timeout_ms_
       << ",\"astar_timed_out\":" << (astar_timed_out ? "true" : "false")
       << ",\"switch_reason\":\"" << route_switch_reason << '"'
       << ",\"route_decision\":\"" << route_decision << '"'
@@ -3629,7 +3825,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   std::int64_t activeVirtualSemanticStampNs()
   {
     if (last_semantic_applied_stamp_ns_ <= 0) return -1;
-    const std::int64_t now_ns = get_clock()->now().nanoseconds();
+    const std::int64_t now_ns = sensorReferenceTimeNs();
     const double age_ms = static_cast<double>(std::llabs(
       now_ns - last_semantic_applied_stamp_ns_)) / 1.0e6;
     // Return a current-time reference while either semantic window is alive.
@@ -3665,6 +3861,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   {
     if (!topo) return false;
     std::optional<SemanticFrame> frame;
+    const std::int64_t reference_stamp_ns = sensorReferenceTimeNs();
     {
       std::lock_guard<std::mutex> lock(semantic_mutex_);
       if (!semantic_frame_ ||
@@ -3673,7 +3870,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         return false;
       }
       const double age_ms = static_cast<double>(std::llabs(
-        get_clock()->now().nanoseconds() - semantic_frame_->stamp_ns)) / 1.0e6;
+        reference_stamp_ns - semantic_frame_->stamp_ns)) / 1.0e6;
       if (age_ms > semantic_max_age_ms_) return false;
       frame = semantic_frame_;
     }
@@ -3996,6 +4193,14 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     semantic_nodes_marker.scale.y = 0.55;
     semantic_nodes_marker.scale.z = 0.55;
     setColor(semantic_nodes_marker.color, kCandidate);
+    visualization_msgs::msg::Marker current_semantic_nodes_marker = semantic_nodes_marker;
+    current_semantic_nodes_marker.ns = "scalenav_current_semantic_points";
+    current_semantic_nodes_marker.id = 14;
+    current_semantic_nodes_marker.scale.x = 0.68;
+    current_semantic_nodes_marker.scale.y = 0.68;
+    current_semantic_nodes_marker.scale.z = 0.68;
+    current_semantic_nodes_marker.points.clear();
+    current_semantic_nodes_marker.colors.clear();
     visualization_msgs::msg::MarkerArray semantic_labels;
 
     std::vector<float> semantic_scores;
@@ -4041,6 +4246,11 @@ class ScaleNavGraphNode final : public rclcpp::Node {
           std_msgs::msg::ColorRGBA marker_color;
           setColor(marker_color, marker_rgb);
           semantic_nodes_marker.colors.push_back(marker_color);
+          if (semanticNodeActiveForPlanning(*node, active_semantic_stamp_ns) &&
+              node->semantic_frame_stamp_ns_ == latest_semantic_frame_stamp_ns) {
+            current_semantic_nodes_marker.points.push_back(toPoint(node->center_));
+            current_semantic_nodes_marker.colors.push_back(marker_color);
+          }
           // Match frontier ranking: confidence determines whether an
           // observation is usable, but does not rescale its patch mean.
           const float semantic_risk = std::clamp(node->semantic_score_, 0.0F, 1.0F);
@@ -4134,6 +4344,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     }
     graph.markers.push_back(skeleton_nodes);
     graph.markers.push_back(semantic_nodes_marker);
+    graph.markers.push_back(current_semantic_nodes_marker);
     for (auto &label : semantic_labels.markers) graph.markers.push_back(std::move(label));
     graph.markers.push_back(edges_marker);
     graph.markers.push_back(semantic_links);
@@ -4260,6 +4471,36 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         accepted_route_.witness_path.clear();
         accepted_route_.frontier_goal_id = 0;
         break;
+      }
+    }
+    // A shortcut changes the execution geometry even when every underlying
+    // topology edge is still present.  Validate the exact node-center path
+    // before committing a fresh candidate so an obstacle revealed in the
+    // current map cannot be published first and rejected on the next tick.
+    if (found && replan_polynomial && !witness_rejected &&
+        selected_node_path.size() >= 2 && topo->parallel_bubble_astar_) {
+      ParallelBubbleAstar::CollisionCheckInfo execution_info;
+      if (!topo->parallel_bubble_astar_->collisionCheck_shortenPath(
+            selected_node_path, &execution_info)) {
+        const char *reason = execution_info.reason ==
+            ParallelBubbleAstar::CollisionCheckInfo::CLEARANCE ? "CLEARANCE" :
+          execution_info.reason ==
+            ParallelBubbleAstar::CollisionCheckInfo::BUBBLE_OVERLAP ?
+            "BUBBLE_OVERLAP" : "INVALID_PATH";
+        RCLCPP_WARN(
+          get_logger(),
+          "[ScaleNav route candidate rejected] final execution path unsafe "
+          "before commit reason=%s points=%zu failed_index=%zu "
+          "failed_point=(%.2f,%.2f,%.2f) clearance=%.3f safe_distance=%.3f",
+          reason, selected_node_path.size(), execution_info.failed_index,
+          execution_info.failed_point.x(), execution_info.failed_point.y(),
+          execution_info.failed_point.z(), execution_info.minimum_clearance,
+          topo->parallel_bubble_astar_->safe_distance_);
+        selected_node_path.clear();
+        stats.witness_points = 0;
+        stats.witness_collision_free = false;
+        witness_rejected = true;
+        found = false;
       }
     }
     // Add the topology path only after witness validation so a rejected route
@@ -4632,24 +4873,86 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     }
   }
 
-  void publishAcceptedFrontierGoal() {
+  void publishAcceptedFrontierGoal(
+    bool semantic_edge_release, bool mission_goal_direct) {
     if (!accepted_route_.valid || !accepted_route_.frontier_goal.allFinite()) return;
+
+    if (frontier_command_.valid && frontier_command_.reference_path.size() >= 2 &&
+        frontier_command_.initial_route_length_m > 1e-3F) {
+      const float progress = scalenav_graph::routeProgressAlongPath(
+        frontier_command_.reference_path, position_);
+      if (std::isfinite(progress)) {
+        frontier_command_.progress_m = std::max(
+          frontier_command_.progress_m,
+          std::clamp(progress, 0.0F, frontier_command_.initial_route_length_m));
+        frontier_command_.progress_t = std::clamp(
+          frontier_command_.progress_m / frontier_command_.initial_route_length_m,
+          0.0F, 1.0F);
+      }
+    }
+
+    const bool command_changed = !frontier_command_.valid ||
+      accepted_route_.frontier_goal_id != frontier_command_.goal_id ||
+      (accepted_route_.frontier_goal - frontier_command_.goal).norm() > 1e-3F;
+    if (!command_changed) return;
+
+    const bool initial_command = !frontier_command_.valid;
+    const bool release_allowed = scalenav_graph::frontierCommandReleaseAllowed(
+      frontier_command_.valid, frontier_command_.progress_m,
+      frontier_command_.initial_route_length_m,
+      static_cast<float>(frontier_replan_progress_ratio_), semantic_edge_release,
+      mission_goal_direct);
+    if (!release_allowed) {
+      RCLCPP_INFO(
+        get_logger(),
+        "[ScaleNav frontier command hold] active_id=%llu candidate_id=%llu "
+        "progress=%.3f threshold=%.3f reason=INTERNAL_ROUTE_CHURN",
+        static_cast<unsigned long long>(frontier_command_.goal_id),
+        static_cast<unsigned long long>(accepted_route_.frontier_goal_id),
+        static_cast<double>(frontier_command_.progress_t),
+        frontier_replan_progress_ratio_);
+      return;
+    }
+
     geometry_msgs::msg::PoseStamped message;
     message.header.stamp = now();
     message.header.frame_id = next_goal_frame_;
     message.pose.position = toPoint(accepted_route_.frontier_goal);
     message.pose.orientation.w = 1.0;
     frontier_goal_pub_->publish(message);
+
+    frontier_command_.valid = true;
+    frontier_command_.goal = accepted_route_.frontier_goal;
+    frontier_command_.goal_id = accepted_route_.frontier_goal_id;
+    frontier_command_.topology_path = accepted_route_.topology_path;
+    frontier_command_.reference_path = accepted_route_.witness_path;
+    frontier_command_.initial_route_length_m =
+      scalenav_graph::routeLength(frontier_command_.reference_path);
+    frontier_command_.progress_m = 0.0F;
+    frontier_command_.progress_t = 0.0F;
+    const char *release_reason = initial_command ? "INITIAL" :
+      (mission_goal_direct ? "MISSION_DIRECT" :
+       (semantic_edge_release ? "SEMANTIC_EDGE_INVALID" : "PROGRESS"));
     RCLCPP_INFO(
       get_logger(),
-      "[ScaleNav frontier command] id=%llu goal=(%.2f,%.2f,%.2f)",
+      "[ScaleNav frontier command] id=%llu goal=(%.2f,%.2f,%.2f) reason=%s",
       static_cast<unsigned long long>(accepted_route_.frontier_goal_id),
       accepted_route_.frontier_goal.x(), accepted_route_.frontier_goal.y(),
-      accepted_route_.frontier_goal.z());
+      accepted_route_.frontier_goal.z(), release_reason);
   }
 
   std::string cloud_topic_, free_ray_topic_, odom_topic_, goal_topic_, next_goal_topic_,
     frontier_goal_topic_, next_goal_frame_, clearance_topic_, timing_topic_;
+  std::string gcn_frontier_column_topic_;
+  bool gcn_frontier_required_ = false;
+  double gcn_frontier_timeout_ms_ = 1000.0;
+  double gcn_frontier_direction_weight_ = 20.0;
+  int gcn_frontier_column_ = 2;
+  bool have_gcn_frontier_column_ = false;
+  std::atomic<std::uint64_t> gcn_frontier_received_count_{0};
+  std::atomic<std::uint64_t> gcn_frontier_changed_count_{0};
+  std::atomic<std::uint64_t> gcn_frontier_hint_used_count_{0};
+  std::chrono::steady_clock::time_point last_gcn_frontier_time_{};
   std::string visualization_frame_;
   std::string odom_twist_frame_ = "world";
   std::string flight_statistics_file_ = "scalenav_flight_statistics.csv";
@@ -4673,6 +4976,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   int route_plan_period_ms_ = 100;  // launch compatibility; see update()
   double local_goal_reserve_m_ = 0.0;  // launch compatibility; see update()
   double local_graph_radius_m_ = 45.0;
+  bool local_sliding_graph_ = false;
+  double local_sliding_graph_radius_m_ = 40.0;
   double frontier_goal_margin_m_ = 3.5;
   double frontier_progress_loss_weight_ = 0.5;
   double frontier_direction_loss_weight_ = 0.35;
@@ -4740,6 +5045,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   TopoGraph::Ptr topo_;
   TopoGraph::Ptr graph_odom_topo_;
   AcceptedRouteState accepted_route_;
+  FrontierCommandState frontier_command_;
   std::vector<BlockedShortcut> blocked_shortcuts_;
   std::vector<Eigen::Vector3f> polynomial_guide_path_;
   scalenav_graph::WitnessParametricCurve polynomial_curve_;
@@ -4754,6 +5060,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr semantic_depth_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr gcn_frontier_column_sub_;
   rclcpp::CallbackGroup::SharedPtr cloud_callback_group_;
   rclcpp::CallbackGroup::SharedPtr semantic_callback_group_;
   rclcpp::CallbackGroup::SharedPtr state_callback_group_;

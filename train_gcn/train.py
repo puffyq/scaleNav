@@ -200,7 +200,14 @@ def accuracy_metrics(predictions, targets):
     return accuracy, sum(per_class) / max(1, len(per_class))
 
 
-def run_epoch(model, samples, device, optimizer=None, class_weights=None, grad_accum=1):
+def direction_metrics(predictions, targets):
+    count = max(1, len(targets))
+    return (sum(abs(a - b) <= 1 for a, b in zip(predictions, targets)) / count,
+            sum(abs(a - b) for a, b in zip(predictions, targets)) / count)
+
+
+def run_epoch(model, samples, device, optimizer=None, class_weights=None, grad_accum=1,
+              return_predictions=False):
     training = optimizer is not None
     model.train(training)
     predictions = []
@@ -235,7 +242,8 @@ def run_epoch(model, samples, device, optimizer=None, class_weights=None, grad_a
     if training and pending_gradients:
         optimizer.step()
         optimizer.zero_grad()
-    return accuracy_metrics(predictions, targets)
+    metrics = accuracy_metrics(predictions, targets)
+    return (*metrics, predictions, targets) if return_predictions else metrics
 
 
 def baseline_report(samples):
@@ -347,7 +355,9 @@ def main():
             print(f"epoch={epoch:03d} train_acc={train_acc:.3f} train_macro={train_macro:.3f} "
                   f"val_acc={val_acc:.3f} val_macro={val_macro:.3f}")
     model.load_state_dict(best_state)
-    test_acc, test_macro = run_epoch(model, test, device)
+    test_acc, test_macro, test_predictions, test_targets = run_epoch(
+        model, test, device, return_predictions=True)
+    test_within_one, test_column_mae = direction_metrics(test_predictions, test_targets)
     gcn_switch_rate = prediction_switch_rate(model, test, device)
     print(f"best_epoch={best_epoch} validation_macro_accuracy={best_macro:.3f}")
     print(f"comparison test_map_accuracy={test_acc:.3f} test_macro_accuracy={test_macro:.3f} "
@@ -355,6 +365,8 @@ def main():
           f"delta_accuracy={test_acc - planner_acc:+.3f} "
           f"delta_macro_accuracy={test_macro - planner_macro:+.3f} "
           f"delta_switch_rate={gcn_switch_rate - planner_switch_rate:+.3f}")
+    print(f"direction test_within_one_column={test_within_one:.3f} "
+          f"test_column_mae={test_column_mae:.3f}")
     torch.save({"model": model.state_dict(), "input_dim": input_dim,
                 "architecture": args.architecture,
                 "best_epoch": best_epoch,

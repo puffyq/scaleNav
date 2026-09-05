@@ -22,6 +22,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 WS = SCRIPT_DIR.parent.parent
 PROJECT_ROOT = WS.parent
 START_SCRIPT = WS / "scripts" / "start.sh"
+GCN_SCRIPT = WS / "scripts" / "start_gcn_online.sh"
 ROUTE_YOPO_SCRIPT = WS / "scripts" / "start_route_yopo.sh"
 YOPO_SIMPLE_SCRIPT = WS / "scripts" / "start_yopo_simple_control.sh"
 SCALENAV_EGO_SCRIPT = WS / "scripts" / "start_scalenav_ego.sh"
@@ -86,7 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stack",
         choices=(
-            "scalenav", "yopo_simple", "route_yopo", "ego", "super",
+            "scalenav", "gcn", "yopo_simple", "route_yopo", "ego", "super",
             "scalenav_ego", "scalenav_super",
         ),
         default="scalenav",
@@ -266,6 +267,7 @@ def conflicting_processes() -> list[tuple[int, str]]:
         "scalenav_log_node",
         "text_heatmap_ros2.py",
         "online_planner_ros2.py",
+        "gcn_frontier_policy_ros2.py",
         "scalenav_graph_node",
         "ego_planner_node",
         "traj_server",
@@ -289,6 +291,8 @@ def conflicting_processes() -> list[tuple[int, str]]:
 def validate_environment(args: argparse.Namespace) -> None:
     if args.stack == "scalenav":
         launcher = START_SCRIPT
+    elif args.stack == "gcn":
+        launcher = GCN_SCRIPT
     elif args.stack == "yopo_simple":
         launcher = YOPO_SIMPLE_SCRIPT
     elif args.stack == "route_yopo":
@@ -384,9 +388,10 @@ def newest_new_session(log_root: Path, previous: set[Path]) -> str:
 def start_stack(
     args: argparse.Namespace, console_path: Path
 ) -> tuple[subprocess.Popen[str], Any]:
-    if args.stack in {"scalenav", "yopo_simple", "route_yopo"}:
+    if args.stack in {"scalenav", "gcn", "yopo_simple", "route_yopo"}:
         launcher = {
             "scalenav": START_SCRIPT,
+            "gcn": GCN_SCRIPT,
             "yopo_simple": YOPO_SIMPLE_SCRIPT,
             "route_yopo": ROUTE_YOPO_SCRIPT,
         }[args.stack]
@@ -403,7 +408,16 @@ def start_stack(
         ]
     environment = os.environ.copy()
     environment["SCALENAV_LOG_DIR"] = str(args.log_root.resolve())
-    if args.stack in {"scalenav_ego", "scalenav_super"}:
+    if args.stack == "gcn":
+        # The GCN launcher owns the optional PEARL process as well as the
+        # frontier selector, so pass the same semantic settings used by the
+        # regular ScaleNav launcher into it.
+        environment["PROMPT"] = args.prompt
+        environment["SEMANTIC_COST_WEIGHT"] = str(args.semantic_cost_weight)
+        environment["SEMANTIC_ROUTE_INFLUENCE_M"] = str(args.semantic_route_influence_m)
+        environment["SEMANTIC_POINT_INFLUENCE_M"] = str(args.semantic_point_influence_m)
+        environment["GCN_SEMANTIC"] = "0" if args.no_semantic else "1"
+    elif args.stack in {"scalenav_ego", "scalenav_super"}:
         environment["PROMPT"] = args.prompt
         environment["SEMANTIC_COST_WEIGHT"] = str(args.semantic_cost_weight)
         environment["SEMANTIC_ROUTE_INFLUENCE_M"] = str(args.semantic_route_influence_m)
@@ -448,6 +462,23 @@ def stop_stack(process: subprocess.Popen[str] | None) -> None:
         print(f"warning: stack process {process.pid} did not exit", file=sys.stderr)
 
 
+def stop_conflicting_processes() -> None:
+    """Clean ROS launch children that outlive their launch parent."""
+    processes = conflicting_processes()
+    for pid, _ in processes:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+    if processes:
+        time.sleep(0.5)
+    for pid, _ in processes:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 class MissionMonitor:
     def __init__(self, args: argparse.Namespace, stack: subprocess.Popen[str]):
         import rclpy
@@ -469,7 +500,7 @@ class MissionMonitor:
         self.collision: bool | None = None
         self.collision_received_at = 0.0
         self.goal_topic = "/goal_pose" if args.stack in {
-            "scalenav", "yopo_simple", "route_yopo",
+            "scalenav", "gcn", "yopo_simple", "route_yopo",
             "scalenav_ego", "scalenav_super",
         } else "/move_base_simple/goal"
         # Every benchmark launch has one planner and one structured logger on
@@ -836,6 +867,7 @@ def run_trial(
         if monitor is not None:
             monitor.close()
         stop_stack(stack)
+        stop_conflicting_processes()
         if console is not None:
             console.close()
 
@@ -884,7 +916,7 @@ def configuration(args: argparse.Namespace) -> dict[str, Any]:
         "position_tolerance_m": args.position_tolerance,
         "speed_tolerance_mps": args.speed_tolerance,
         "airsim": f"{args.airsim_host}:{args.airsim_port}",
-        "semantic": args.stack in COMBINED_SCRIPTS or not args.no_semantic,
+        "semantic": args.stack in COMBINED_SCRIPTS or args.stack == "gcn" or not args.no_semantic,
         "prompt": args.prompt,
         "semantic_cost_weight": args.semantic_cost_weight,
         "semantic_route_influence_m": args.semantic_route_influence_m,

@@ -575,6 +575,14 @@ struct VirtualSemanticPruneResult {
   vector<std::uint64_t> removed_ids;
 };
 
+struct LocalGraphPruneResult {
+  size_t topology_nodes = 0;
+  size_t history_odom_nodes = 0;
+  size_t semantic_memory_records = 0;
+  size_t bubble_snapshots = 0;
+  vector<std::uint64_t> removed_semantic_ids;
+};
+
 struct TopoFrontierCandidateStats {
   std::uint64_t node_id = 0;
   std::int64_t frame_stamp_ns = 0;
@@ -721,7 +729,9 @@ public:
       float frontier_goal_distance_weight = 1.0F,
       float frontier_semantic_detour_budget_m = 45.0F,
       float frontier_semantic_frame_budget_m = 12.0F,
-      float frontier_semantic_noise_floor = 0.08F);
+      float frontier_semantic_noise_floor = 0.08F,
+      const Eigen::Vector3f *frontier_direction_hint = nullptr,
+      float frontier_direction_hint_weight = 20.0F);
   float semanticRiskForEdge(
       const TopoNode::Ptr &from, const TopoNode::Ptr &to,
       const std::vector<TopoNode::Ptr> *semantic_nodes = nullptr) const;
@@ -800,6 +810,11 @@ public:
   size_t nodeCountWithinRadius(
       const Eigen::Vector3f &origin,
       float maximum_distance_m = std::numeric_limits<float>::infinity()) const;
+  // Keep the persistent topology consistent with a rolling local map. Nodes,
+  // incident edges, semantic memory, and Bubble snapshots outside the window
+  // are removed together so old global structure cannot affect later A* runs.
+  LocalGraphPruneResult pruneOutsideRadius(
+      const Eigen::Vector3f &origin, float maximum_distance_m);
   float estimateRoughDistance(const Eigen::Vector3f &goal, const int his_idx);
   vector<TopoNode::Ptr> history_odom_nodes_;
   vector<float> his_odom_dis_vec_;

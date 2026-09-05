@@ -73,6 +73,8 @@ paper/**/*.synctex.gz
 paper/**/page-*.png
 paper/scalenav/tmp/
 paper/scalenav/pics/experiments/**/history/
+paper/scalenav/pics/teaser_*.png
+paper/scalenav/pics/system_architecture_topology_v2.tex
 
 # Workspace migration backups and generated ROS/colcon outputs.
 bc/
@@ -93,6 +95,7 @@ scalenav_ws/src/aut_test/results/
 log_ego/
 log_scalenav_train/
 log_scalenav_yopo_simple/
+log_scalenav_gcn/
 scalenav_ws/log_test/
 scalenav_ws/tmp/
 train_scalenav/log_train/

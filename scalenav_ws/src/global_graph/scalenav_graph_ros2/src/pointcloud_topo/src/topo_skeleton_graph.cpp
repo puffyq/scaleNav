@@ -435,6 +435,111 @@ size_t TopoGraph::nodeCountWithinRadius(
   return nodes.size();
 }
 
+LocalGraphPruneResult TopoGraph::pruneOutsideRadius(
+    const Eigen::Vector3f &origin, float maximum_distance_m) {
+  LocalGraphPruneResult result;
+  if (!origin.allFinite() || !std::isfinite(maximum_distance_m) ||
+      maximum_distance_m <= 0.0F) {
+    return result;
+  }
+  const float maximum_distance_sq = maximum_distance_m * maximum_distance_m;
+
+  vector<TopoNode::Ptr> nodes_to_remove;
+  unordered_set<TopoNode::Ptr> seen;
+  unordered_set<std::uint64_t> removed_semantic_ids;
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second) continue;
+    for (const auto &node : entry.second->topo_nodes_) {
+      if (!node || node == odom_node_ || !seen.insert(node).second) continue;
+      if (!node->center_.allFinite() ||
+          (node->center_ - origin).squaredNorm() > maximum_distance_sq) {
+        nodes_to_remove.push_back(node);
+        if (node->persistent_id_ != 0) {
+          removed_semantic_ids.insert(node->persistent_id_);
+        }
+      }
+    }
+  }
+  result.topology_nodes = nodes_to_remove.size();
+  removeNodes(nodes_to_remove);
+
+  vector<TopoNode::Ptr> retained_history;
+  vector<float> retained_distances;
+  retained_history.reserve(history_odom_nodes_.size());
+  retained_distances.reserve(history_odom_nodes_.size());
+  for (size_t index = 0; index < history_odom_nodes_.size(); ++index) {
+    auto &node = history_odom_nodes_[index];
+    if (!node || !node->center_.allFinite() ||
+        (node->center_ - origin).squaredNorm() > maximum_distance_sq) {
+      removeNode(node);
+      ++result.history_odom_nodes;
+      continue;
+    }
+    retained_history.push_back(node);
+    retained_distances.push_back(index < his_odom_dis_vec_.size() ?
+      his_odom_dis_vec_[index] : 0.0F);
+  }
+  history_odom_nodes_.swap(retained_history);
+  his_odom_dis_vec_.swap(retained_distances);
+  if (!his_odom_dis_vec_.empty()) {
+    const float distance_origin = his_odom_dis_vec_.front();
+    for (auto &distance : his_odom_dis_vec_) distance -= distance_origin;
+  }
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (entry.second) entry.second->his_odom_id_ = -1;
+  }
+  for (size_t index = 0; index < history_odom_nodes_.size(); ++index) {
+    Eigen::Vector3i center_index;
+    getIndex(history_odom_nodes_[index]->center_, center_index);
+    for (int x = -1; x <= 1; ++x) {
+      for (int y = -1; y <= 1; ++y) {
+        for (int z = -1; z <= 1; ++z) {
+          auto region = getRegionNode(center_index + Eigen::Vector3i(x, y, z));
+          if (region && region->his_odom_id_ < 0) {
+            region->his_odom_id_ = static_cast<int>(index);
+          }
+        }
+      }
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(semantic_memory_mutex_);
+    for (auto it = semantic_memory_.begin(); it != semantic_memory_.end();) {
+      if (removed_semantic_ids.count(it->first) != 0 ||
+          !it->second.center.allFinite() ||
+          (it->second.center - origin).squaredNorm() > maximum_distance_sq) {
+        result.removed_semantic_ids.push_back(it->first);
+        it = semantic_memory_.erase(it);
+        ++result.semantic_memory_records;
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(bubble_snapshot_mutex_);
+    for (auto it = bubble_snapshots_by_region_.begin();
+         it != bubble_snapshots_by_region_.end();) {
+      auto &bubbles = it->second;
+      const auto old_size = bubbles.size();
+      bubbles.erase(std::remove_if(bubbles.begin(), bubbles.end(),
+        [&](const BubbleNode::Ptr &bubble) {
+          return !bubble || !bubble->center_.allFinite() ||
+            (bubble->center_ - origin).squaredNorm() > maximum_distance_sq;
+        }), bubbles.end());
+      result.bubble_snapshots += old_size - bubbles.size();
+      if (bubbles.empty()) {
+        it = bubble_snapshots_by_region_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  return result;
+}
+
 float TopoGraph::edgeSemanticRisk(
     const TopoNode::Ptr &from, const TopoNode::Ptr &to,
     const std::vector<TopoNode::Ptr> *semantic_nodes,
@@ -1087,7 +1192,9 @@ bool TopoGraph::goalDirectedSearch(
     float frontier_goal_distance_weight,
     float frontier_semantic_detour_budget_m,
     float frontier_semantic_frame_budget_m,
-    float frontier_semantic_noise_floor) {
+    float frontier_semantic_noise_floor,
+    const Eigen::Vector3f *frontier_direction_hint,
+    float frontier_direction_hint_weight) {
   path.clear();
   if (search_stats) *search_stats = {};
   if (start_node == nullptr || !start_node->center_.allFinite() || !goal.allFinite())
@@ -1111,6 +1218,7 @@ bool TopoGraph::goalDirectedSearch(
   frontier_semantic_frame_budget_m = std::max(0.0F, frontier_semantic_frame_budget_m);
   frontier_semantic_noise_floor = std::clamp(
     frontier_semantic_noise_floor, 1e-3F, 1.0F);
+  frontier_direction_hint_weight = std::max(0.0F, frontier_direction_hint_weight);
   const bool radial_preference_enabled = std::isfinite(preferred_frontier_goal_radial_m) &&
     preferred_frontier_goal_radial_m >= 0.0F;
   if (radial_preference_enabled) {
@@ -1132,6 +1240,29 @@ bool TopoGraph::goalDirectedSearch(
   const float objective_scale = std::max(1.0F, mission_span);
   Eigen::Vector3f mission_dir = Eigen::Vector3f::Zero();
   if (mission_span > 1e-3F) mission_dir = mission_vector / mission_span;
+  Eigen::Vector3f preferred_frontier_dir = Eigen::Vector3f::Zero();
+  if (frontier_direction_hint != nullptr && frontier_direction_hint->allFinite()) {
+    preferred_frontier_dir = *frontier_direction_hint;
+    preferred_frontier_dir.z() = 0.0F;
+    const float norm = preferred_frontier_dir.norm();
+    if (norm > 1e-3F) preferred_frontier_dir /= norm;
+    else preferred_frontier_dir.setZero();
+  }
+  const auto frontierDirectionHintCost = [&](const TopoNode::Ptr &node) {
+    if (!node || preferred_frontier_dir.isZero(1e-3F)) return 0.0F;
+    Eigen::Vector3f direction = node->center_ - progress_ref;
+    direction.z() = 0.0F;
+    const float norm = direction.norm();
+    if (norm <= 1e-3F) return 0.0F;
+    direction /= norm;
+    const float angle = std::acos(std::clamp(
+      preferred_frontier_dir.dot(direction), -1.0F, 1.0F));
+    // The GCN column is the primary frontier decision. A* still chooses the
+    // reachable node closest to that direction and retains all geometry,
+    // clearance and mission-distance costs as tie-breakers.
+    return frontier_direction_hint_weight * objective_scale *
+      angle / static_cast<float>(M_PI);
+  };
   const float semantic_query_radius = bounded_search ?
     max_search_radius_m + static_cast<float>(std::max(0.0, semantic_point_influence_m_)) :
     std::numeric_limits<float>::infinity();
@@ -1368,7 +1499,8 @@ bool TopoGraph::goalDirectedSearch(
           backtrackMetrics(entry.node);
         (void)direction_cosine;
         const float frontier_objective =
-          (entry.g + frontier_goal_distance_weight * h + backtrack_cost_m) /
+          (entry.g + frontier_goal_distance_weight * h + backtrack_cost_m +
+           frontierDirectionHintCost(entry.node)) /
           objective_scale;
         if (search_stats) {
           ++search_stats->ordinary_frontier_candidates;
@@ -1494,7 +1626,8 @@ bool TopoGraph::goalDirectedSearch(
     candidate.stats.objective =
       (candidate.stats.astar_cost +
        frontier_goal_distance_weight * candidate.stats.mission_distance +
-       candidate.stats.semantic_cost_m + candidate.stats.backtrack_cost_m) /
+       candidate.stats.semantic_cost_m + candidate.stats.backtrack_cost_m +
+       frontierDirectionHintCost(candidate.node)) /
       objective_scale;
 
     const bool objective_tie = std::abs(candidate.stats.objective -
@@ -1537,7 +1670,8 @@ bool TopoGraph::goalDirectedSearch(
         backtrackMetrics(entry.first);
       (void)direction_cosine;
       const float frontier_objective =
-        (route_cost + frontier_goal_distance_weight * h + backtrack_cost_m) /
+        (route_cost + frontier_goal_distance_weight * h + backtrack_cost_m +
+         frontierDirectionHintCost(entry.first)) /
         objective_scale;
       if (best_frontier == nullptr || frontier_objective < best_frontier_objective - 1e-5F ||
           (std::abs(frontier_objective - best_frontier_objective) <= 1e-5F &&

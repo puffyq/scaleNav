@@ -37,6 +37,16 @@ bash scalenav_ws/src/aut_test/run_0_140.sh --count 10 --timeout 90
 bash scalenav_ws/src/aut_test/run_0_140.sh --count 10 --no-semantic
 ```
 
+Run continuously until stopped with `Ctrl-C` (each valid flight is reset and
+recorded in the continuously updated batch summary):
+
+```bash
+bash scalenav_ws/src/aut_test/run_0_140_continuous.sh
+```
+
+Pass the same runner options as the finite test, for example
+`--timeout 90 --cooldown 3` or `--prompt 'blocks, wall'`.
+
 Validate dependencies and configuration without resetting AirSim or launching
 ROS nodes:
 

@@ -17,6 +17,11 @@ SEMANTIC_OPPORTUNITY_COOLDOWN_S="${SEMANTIC_OPPORTUNITY_COOLDOWN_S:-0.8}"
 SEMANTIC_OPPORTUNITY_DIRECTION_TOLERANCE_DEG="${SEMANTIC_OPPORTUNITY_DIRECTION_TOLERANCE_DEG:-30.0}"
 WAIT_FOR_INITIAL_SEMANTIC="${WAIT_FOR_INITIAL_SEMANTIC:-true}"
 GRAPH_FIXED_LAYER="${GRAPH_FIXED_LAYER:-true}"  # graph topology: true=single layer, false=3D
+LOCAL_SLIDING_GRAPH="${LOCAL_SLIDING_GRAPH:-false}"
+LOCAL_SLIDING_GRAPH_RADIUS_M="${LOCAL_SLIDING_GRAPH_RADIUS_M:-40.0}"
+LOCAL_GRAPH_RADIUS_M="${LOCAL_GRAPH_RADIUS_M:-45.0}"
+MAP_HISTORY_RADIUS_M="${MAP_HISTORY_RADIUS_M:-40.0}"
+REUSE_GRAPH_ON_GOAL="${REUSE_GRAPH_ON_GOAL:-true}"
 DEVICE="cuda"
 RATE="2"                      # heatmap Hz
 SAVE_DEPTH=0
@@ -128,6 +133,11 @@ run ros2 launch airsim_renderer controller_airsim.launch.py \
 run ros2 launch depth2points_ros2 depth_planar_to_pointcloud.launch.py
 run ros2 launch scalenav_graph_ros2 scalenav_graph.launch.py \
   graph_fixed_layer:="$GRAPH_FIXED_LAYER" \
+  local_sliding_graph:="$LOCAL_SLIDING_GRAPH" \
+  local_sliding_graph_radius_m:="$LOCAL_SLIDING_GRAPH_RADIUS_M" \
+  local_graph_radius_m:="$LOCAL_GRAPH_RADIUS_M" \
+  map_history_radius_m:="$MAP_HISTORY_RADIUS_M" \
+  reuse_graph_on_goal:="$REUSE_GRAPH_ON_GOAL" \
   goal_topic:=/goal_pose next_goal_topic:=/scalenav/local_goal \
   next_goal_frame:=world_enu visualization_frame:=world_enu \
   odom_twist_frame:=body semantic_heatmap_topic:=/scalenav/text_heatmap_raw \
@@ -170,5 +180,5 @@ else
   start_planner
 fi
 
-echo "started; goal=/goal_pose semantic=$SEMANTIC prompt=$PROMPT semantic_cost_weight=$SEMANTIC_COST_WEIGHT semantic_route_influence_m=$SEMANTIC_ROUTE_INFLUENCE_M semantic_point_influence_m=$SEMANTIC_POINT_INFLUENCE_M graph_fixed_layer=$GRAPH_FIXED_LAYER maximum_trajectory_speed_mps=$MAXIMUM_TRAJECTORY_SPEED_MPS plan_from_reference=true ignore_collision=$IGNORE_COLLISION airsim_reset=$AIRSIM_RESET_ON_START recorded_logs=$LOG_ROOT"
+echo "started; goal=/goal_pose semantic=$SEMANTIC prompt=$PROMPT semantic_cost_weight=$SEMANTIC_COST_WEIGHT semantic_route_influence_m=$SEMANTIC_ROUTE_INFLUENCE_M semantic_point_influence_m=$SEMANTIC_POINT_INFLUENCE_M graph_fixed_layer=$GRAPH_FIXED_LAYER local_sliding_graph=$LOCAL_SLIDING_GRAPH local_sliding_graph_radius_m=$LOCAL_SLIDING_GRAPH_RADIUS_M map_history_radius_m=$MAP_HISTORY_RADIUS_M reuse_graph_on_goal=$REUSE_GRAPH_ON_GOAL maximum_trajectory_speed_mps=$MAXIMUM_TRAJECTORY_SPEED_MPS plan_from_reference=true ignore_collision=$IGNORE_COLLISION airsim_reset=$AIRSIM_RESET_ON_START recorded_logs=$LOG_ROOT"
 wait -n $PIDS

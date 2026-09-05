@@ -25,6 +25,11 @@ def generate_launch_description():
             default_value="500",
             description="Minimum interval between full graph snapshots",
         ),
+        DeclareLaunchArgument(
+            "gcn_frontier_column_topic",
+            default_value="",
+            description="Optional GCN frontier column topic to record",
+        ),
         Node(
             package="scalenav_log",
             executable="scalenav_log_node",
@@ -34,6 +39,8 @@ def generate_launch_description():
                 "output_dir": LaunchConfiguration("output_dir"),
                 "graph_snapshot_period_ms": LaunchConfiguration(
                     "graph_snapshot_period_ms"),
+                "gcn_frontier_column_topic": LaunchConfiguration(
+                    "gcn_frontier_column_topic"),
             }],
         ),
     ])

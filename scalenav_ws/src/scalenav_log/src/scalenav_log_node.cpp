@@ -24,6 +24,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <trajectory_msgs/msg/multi_dof_joint_trajectory_point.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -193,6 +194,8 @@ public:
     clearance_topic_ = declare_parameter<std::string>("clearance_topic", "/scalenav/clearance");
     collision_topic_ = declare_parameter<std::string>("collision_topic", "/sim/collision");
     timing_topic_ = declare_parameter<std::string>("timing_topic", "/scalenav/timing");
+    gcn_frontier_column_topic_ = declare_parameter<std::string>(
+      "gcn_frontier_column_topic", "");
     route_yopo_status_topic_ = declare_parameter<std::string>(
       "route_yopo_status_topic", "/scalenav/route_yopo/status");
     mission_position_tolerance_m_ = declare_parameter<double>(
@@ -216,6 +219,7 @@ public:
       << ",\"clearance\":" << jsonQuote(clearance_topic_)
       << ",\"collision\":" << jsonQuote(collision_topic_)
       << ",\"timing\":" << jsonQuote(timing_topic_)
+      << ",\"gcn_frontier_column\":" << jsonQuote(gcn_frontier_column_topic_)
       << ",\"route_yopo_status\":" << jsonQuote(route_yopo_status_topic_)
       << "},\"pointcloud_max_points\":" << pointcloud_max_points_
       << ",\"pointcloud_stride\":" << pointcloud_stride_
@@ -241,7 +245,9 @@ public:
       });
     bubble_sub_ = create_subscription<visualization_msgs::msg::MarkerArray>(bubble_topic_, qos_depth,
       [this](visualization_msgs::msg::MarkerArray::ConstSharedPtr message) { captureMarkers(*message, "bubbles"); });
-    path_sub_ = create_subscription<nav_msgs::msg::Path>(path_topic_, qos_depth,
+    // SUPER publishes /fsm/path with best-effort QoS; SensorDataQoS remains
+    // compatible with both best-effort and reliable path publishers.
+    path_sub_ = create_subscription<nav_msgs::msg::Path>(path_topic_, sensor_qos,
       [this](nav_msgs::msg::Path::ConstSharedPtr message) { capturePath(*message, "path"); });
     route_yopo_planned_path_sub_ = create_subscription<nav_msgs::msg::Path>(
       route_yopo_planned_path_topic_, qos_depth,
@@ -269,6 +275,13 @@ public:
     timing_sub_ = create_subscription<std_msgs::msg::String>(
       timing_topic_, rclcpp::QoS(rclcpp::KeepLast(100)).reliable(),
       [this](std_msgs::msg::String::ConstSharedPtr message) { captureTiming(*message); });
+    if (!gcn_frontier_column_topic_.empty()) {
+      gcn_frontier_column_sub_ = create_subscription<std_msgs::msg::Int32>(
+        gcn_frontier_column_topic_, qos_depth,
+        [this](std_msgs::msg::Int32::ConstSharedPtr message) {
+          captureGcnFrontierColumn(*message);
+        });
+    }
     route_yopo_status_sub_ = create_subscription<std_msgs::msg::String>(
       route_yopo_status_topic_, rclcpp::QoS(rclcpp::KeepLast(100)).reliable(),
       [this](std_msgs::msg::String::ConstSharedPtr message) {
@@ -596,6 +609,15 @@ private:
     store_->record("timing", receptionStampNs(), "", extra.size(), extra);
   }
 
+  void captureGcnFrontierColumn(const std_msgs::msg::Int32 &message)
+  {
+    if (message.data < 0 || message.data > 4) return;
+    const auto extra = std::string("{\"column\":") + std::to_string(message.data) +
+      ",\"direction_deg\":" +
+      jsonNumber(static_cast<double>(2 - message.data) * 20.0) + "}";
+    store_->record("gcn_frontier_column", receptionStampNs(), "", extra.size(), extra);
+  }
+
   void captureJsonString(const std_msgs::msg::String &message, const std::string &kind)
   {
     const bool json_object = message.data.size() >= 2 && message.data.front() == '{' &&
@@ -620,6 +642,7 @@ private:
   std::string depth_topic_, rgb_topic_, pointcloud_topic_, free_ray_topic_, graph_topic_,
     bubble_topic_, path_topic_, route_yopo_planned_path_topic_, odom_topic_, control_topic_, semantic_topic_, goal_topic_,
     local_goal_topic_, clearance_topic_, collision_topic_, timing_topic_,
+    gcn_frontier_column_topic_,
     route_yopo_status_topic_;
   double mission_position_tolerance_m_ = 0.5;
   double mission_speed_tolerance_mps_ = 0.3;
@@ -645,6 +668,7 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr clearance_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr collision_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr timing_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr gcn_frontier_column_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr route_yopo_status_sub_;
 };
 

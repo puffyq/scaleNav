@@ -867,6 +867,51 @@ TEST(TopoGraphSemanticPrune, AstarNeverUsesUnknownAsTransitTopology)
   EXPECT_EQ(path.back(), goal);
 }
 
+TEST(TopoGraphLocalSlidingWindow, RemovesTopologyEdgesAndSemanticMemoryTogether)
+{
+  TopoGraph graph;
+  auto region = graph.getRegionNode(Eigen::Vector3i::Zero());
+  auto inside = std::make_shared<TopoNode>();
+  auto outside = std::make_shared<TopoNode>();
+  inside->center_ = Eigen::Vector3f(5.0F, 0.0F, 1.6F);
+  outside->center_ = Eigen::Vector3f(-41.0F, 0.0F, 1.6F);
+  graph.updateNodeSemantic(inside, 0.2F, 1.0F, 1'000'000'000LL, 1.0F);
+  graph.updateNodeSemantic(outside, 0.8F, 1.0F, 1'000'000'000LL, 1.0F);
+  region->topo_nodes_.insert(inside);
+  region->topo_nodes_.insert(outside);
+  inside->neighbors_.insert(outside);
+  outside->neighbors_.insert(inside);
+  inside->paths_[outside] = {inside->center_, outside->center_};
+  outside->paths_[inside] = {outside->center_, inside->center_};
+  inside->weight_[outside] = outside->weight_[inside] = 46.0F;
+
+  auto history_inside = std::make_shared<TopoNode>();
+  history_inside->center_ = Eigen::Vector3f(2.0F, 0.0F, 1.6F);
+  history_inside->is_history_odom_node_ = true;
+  auto history_outside = std::make_shared<TopoNode>();
+  history_outside->center_ = Eigen::Vector3f(-45.0F, 0.0F, 1.6F);
+  history_outside->is_history_odom_node_ = true;
+  graph.history_odom_nodes_ = {history_outside, history_inside};
+  graph.his_odom_dis_vec_ = {10.0F, 20.0F};
+
+  const auto result = graph.pruneOutsideRadius(
+    Eigen::Vector3f(0.0F, 0.0F, 1.6F), 40.0F);
+
+  EXPECT_EQ(result.topology_nodes, 1U);
+  EXPECT_EQ(result.history_odom_nodes, 1U);
+  EXPECT_EQ(result.semantic_memory_records, 1U);
+  EXPECT_EQ(region->topo_nodes_.count(inside), 1U);
+  EXPECT_EQ(region->topo_nodes_.count(outside), 0U);
+  EXPECT_TRUE(inside->neighbors_.empty());
+  EXPECT_TRUE(inside->paths_.empty());
+  EXPECT_TRUE(inside->weight_.empty());
+  ASSERT_EQ(graph.history_odom_nodes_.size(), 1U);
+  EXPECT_EQ(graph.history_odom_nodes_.front(), history_inside);
+  ASSERT_EQ(graph.his_odom_dis_vec_.size(), 1U);
+  EXPECT_FLOAT_EQ(graph.his_odom_dis_vec_.front(), 0.0F);
+  EXPECT_EQ(graph.semanticMemorySize(), 1U);
+}
+
 TEST(TopoGraphSemanticFrontier, CurrentGenerationExtendsNormalFrontierSearch)
 {
   TopoGraph graph;
@@ -1824,6 +1869,46 @@ TEST(TopoSemanticCost, OriginalModeKeepsGeometryRouteWhenSemanticScoresChange)
   ASSERT_EQ(second_path.size(), 3U);
   EXPECT_EQ(second_path[1], lower);
   EXPECT_EQ(second_path.back(), goal);
+}
+
+TEST(TopoSearchRadius, GcnDirectionChangesOnlyTheReachableFrontierChoice)
+{
+  TopoGraph graph;
+  auto start = std::make_shared<TopoNode>();
+  auto toward_mission = std::make_shared<TopoNode>();
+  auto toward_gcn = std::make_shared<TopoNode>();
+  start->center_ = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  toward_mission->center_ = Eigen::Vector3f(20.0F, 0.0F, 1.6F);
+  toward_gcn->center_ = Eigen::Vector3f(0.0F, 20.0F, 1.6F);
+  for (const auto &node : {start, toward_mission, toward_gcn}) {
+    node->geometry_state_ = TopoGeometryState::Verified;
+  }
+  auto connect = [](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
+    const float distance = (left->center_ - right->center_).norm();
+    left->neighbors_.insert(right); right->neighbors_.insert(left);
+    left->paths_[right] = {left->center_, right->center_};
+    right->paths_[left] = {right->center_, left->center_};
+    left->weight_[right] = distance; right->weight_[left] = distance;
+  };
+  connect(start, toward_mission);
+  connect(start, toward_gcn);
+
+  const Eigen::Vector3f mission(100.0F, 0.0F, 1.6F);
+  std::vector<TopoNode::Ptr> path;
+  ASSERT_TRUE(graph.goalDirectedSearch(start, mission, path, 0.2));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), toward_mission);
+
+  const Eigen::Vector3f gcn_direction = Eigen::Vector3f::UnitY();
+  path.clear();
+  ASSERT_TRUE(graph.goalDirectedSearch(
+    start, mission, path, 0.2, 1.0F, 1.0F, {}, 0.0F,
+    std::numeric_limits<float>::infinity(), &start->center_, 0.0F, false,
+    std::numeric_limits<float>::infinity(), 0.0F, nullptr, 90.0F,
+    0.0F, 0.0F, 0.0F, 0.0F, nullptr, 0,
+    1.0F, 45.0F, 12.0F, 0.08F, &gcn_direction, 20.0F));
+  ASSERT_EQ(path.size(), 2U);
+  EXPECT_EQ(path.back(), toward_gcn);
 }
 
 TEST(TopoSearchRadius, GoalDirectedSearchStopsAtLocalForwardNode)

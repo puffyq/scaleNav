@@ -41,6 +41,42 @@ def read_pcd(path, stride=20):
     return out
 
 
+def read_ascii_ply(path, stride=1):
+    """Read XYZ vertices from an ASCII PLY obstacle map."""
+    out = []
+    if not path or not os.path.isfile(path):
+        return out
+    data = False
+    with open(path, encoding="ascii", errors="ignore") as stream:
+        for index, line in enumerate(stream):
+            if line.startswith("end_header"):
+                data = True
+                continue
+            if not data or index % max(1, stride) != 0:
+                continue
+            fields = line.split()
+            if len(fields) >= 3:
+                try:
+                    out.append((float(fields[0]), float(fields[1]), float(fields[2])))
+                except ValueError:
+                    pass
+    return out
+
+
+def build_static_occupancy(path, resolution=0.5, inflate=1.2, stride=1):
+    """Voxelize a privileged static world map without clearing trajectories."""
+    occupied = set()
+    for x, y, z in read_ascii_ply(path, stride):
+        if 0.1 <= z <= 3.2:
+            occupied.add((math.floor(x / resolution), math.floor(y / resolution)))
+    radius = max(1, math.ceil(inflate / resolution))
+    return {(x + dx, y + dy)
+            for x, y in occupied
+            for dx in range(-radius, radius + 1)
+            for dy in range(-radius, radius + 1)
+            if dx * dx + dy * dy <= radius * radius}
+
+
 def parse_entries(session):
     entries = []
     with open(os.path.join(session, "index.jsonl"), encoding="utf-8") as stream:
@@ -71,16 +107,6 @@ def build_occupancy(session, entries, resolution=0.5, inflate=1.2, stride=20):
         for dx in range(-radius, radius + 1):
             for dy in range(-radius, radius + 1):
                 if dx * dx + dy * dy <= radius * radius: inflated.add((x + dx, y + dy))
-    # Logged returns contain the vehicle body and ground returns.  Treat the
-    # measured vehicle trajectory as free space so the start cell is not
-    # occupied by the aircraft's own point cloud.
-    clear_radius = max(1, math.ceil(1.5 / resolution))
-    for pose in odom:
-        p = pose.get("data", {}).get("position", [0, 0, 0])
-        cx, cy = math.floor(p[0] / resolution), math.floor(p[1] / resolution)
-        for dx in range(-clear_radius, clear_radius + 1):
-            for dy in range(-clear_radius, clear_radius + 1):
-                if dx * dx + dy * dy <= clear_radius * clear_radius: inflated.discard((cx + dx, cy + dy))
     return inflated
 
 
@@ -130,7 +156,10 @@ def label_path(path, start_xy, yaw, resolution, lookahead=35.0):
             break
     if selected is None:
         return None
-    dx = (selected[0] - path[0][0]); dy = (selected[1] - path[0][1])
+    selected_world = ((selected[0] + 0.5) * resolution,
+                      (selected[1] + 0.5) * resolution)
+    dx = selected_world[0] - start_xy[0]
+    dy = selected_world[1] - start_xy[1]
     angle = math.atan2(-math.sin(yaw) * dx + math.cos(yaw) * dy,
                        math.cos(yaw) * dx + math.sin(yaw) * dy)
     limit = math.radians(50.0)
@@ -140,12 +169,20 @@ def label_path(path, start_xy, yaw, resolution, lookahead=35.0):
 
 
 def main():
-    p = argparse.ArgumentParser(); p.add_argument("--output", default="train_gcn/dataset_privileged.pt"); p.add_argument("--resolution", type=float, default=0.5); p.add_argument("--inflate", type=float, default=1.2); p.add_argument("--stride", type=int, default=20); p.add_argument("--lookahead", type=float, default=35.0); p.add_argument("--map-scope", choices=("global", "session"), default="global"); p.add_argument("--occupancy-cache", default="train_gcn/global_occupancy.pt"); p.add_argument("--logs", nargs="*", default=None)
+    p = argparse.ArgumentParser(); p.add_argument("--output", default="train_gcn/dataset_privileged.pt"); p.add_argument("--resolution", type=float, default=0.5); p.add_argument("--inflate", type=float, default=1.2); p.add_argument("--stride", type=int, default=20); p.add_argument("--lookahead", type=float, default=35.0); p.add_argument("--map-scope", choices=("global", "session"), default="global"); p.add_argument("--occupancy-cache", default="train_gcn/global_occupancy.pt"); p.add_argument("--map-ply", default="", help="privileged static ASCII PLY world map"); p.add_argument("--logs", nargs="*", default=None)
     a = p.parse_args(); samples = []; skipped = 0
     sessions = a.logs or sorted(glob.glob("log_scalenav/session_*"))
     global_blocked = None
     if a.map_scope == "global":
-        if a.occupancy_cache and os.path.isfile(a.occupancy_cache):
+        if a.map_ply:
+            global_blocked = build_static_occupancy(a.map_ply, a.resolution, a.inflate, a.stride)
+            print(f"loaded_static_map={a.map_ply} global_occupied_cells={len(global_blocked)}")
+            if a.occupancy_cache:
+                os.makedirs(os.path.dirname(os.path.abspath(a.occupancy_cache)), exist_ok=True)
+                torch.save({"blocked": sorted(global_blocked), "resolution": a.resolution,
+                            "inflate": a.inflate, "stride": a.stride,
+                            "source": os.path.abspath(a.map_ply)}, a.occupancy_cache)
+        elif a.occupancy_cache and os.path.isfile(a.occupancy_cache):
             cached = torch.load(a.occupancy_cache, weights_only=False)
             global_blocked = set(map(tuple, cached["blocked"]))
             print(f"loaded_global_occupied_cells={len(global_blocked)}")
@@ -158,8 +195,11 @@ def main():
                 global_blocked.update(build_occupancy(session, entries, a.resolution, a.inflate, a.stride))
                 trajectories.extend(e.get("data", {}).get("position", [0, 0, 0])
                                     for e in entries if e.get("kind") == "odom")
-            clear_trajectories(global_blocked, trajectories, a.resolution)
-            print(f"global_occupied_cells={len(global_blocked)} trajectories={len(trajectories)}")
+            # A trajectory is not evidence that nearby cells are obstacle-free:
+            # another run may have observed a wall at the same world location.
+            # Never erase occupied cells from the unified map based on odometry.
+            print(f"global_occupied_cells={len(global_blocked)} trajectories={len(trajectories)} "
+                  "trajectory_clear=disabled")
             if a.occupancy_cache:
                 os.makedirs(os.path.dirname(os.path.abspath(a.occupancy_cache)), exist_ok=True)
                 torch.save({"blocked": sorted(global_blocked), "resolution": a.resolution,
@@ -177,9 +217,12 @@ def main():
         for timing, snapshot, position, orientation, frame_goal in frames:
             start = (int(math.floor(position[0]/a.resolution)), int(math.floor(position[1]/a.resolution)))
             goal_cell = (int(math.floor(frame_goal[0]/a.resolution)), int(math.floor(frame_goal[1]/a.resolution)))
+            # The current vehicle cell is free by definition.  Clear only this
+            # one cell for search; do not clear a radius or historical path.
+            search_blocked = blocked - {start}
             margin = max(8, math.ceil(40.0 / a.resolution))
             bounds = (min(x[0] for x in all_xy)-margin, max(x[0] for x in all_xy)+margin, min(x[1] for x in all_xy)-margin, max(x[1] for x in all_xy)+margin)
-            path = astar(start, goal_cell, blocked, bounds)
+            path = astar(start, goal_cell, search_blocked, bounds)
             yaw = math.atan2(2 * (orientation[3] * orientation[2] + orientation[0] * orientation[1]), 1 - 2 * (orientation[1] ** 2 + orientation[2] ** 2))
             target = label_path(path, position[:2], yaw, a.resolution, a.lookahead)
             if target is None: skipped += 1; continue

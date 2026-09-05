@@ -19,6 +19,10 @@ def generate_launch_description():
         DeclareLaunchArgument("goal_topic", default_value="/goal"),
         DeclareLaunchArgument("next_goal_topic", default_value="/scalenav/local_goal"),
         DeclareLaunchArgument("frontier_goal_topic", default_value="/scalenav/frontier_goal"),
+        DeclareLaunchArgument("gcn_frontier_column_topic", default_value=""),
+        DeclareLaunchArgument("gcn_frontier_required", default_value="false"),
+        DeclareLaunchArgument("gcn_frontier_timeout_ms", default_value="1000.0"),
+        DeclareLaunchArgument("gcn_frontier_direction_weight", default_value="20.0"),
         DeclareLaunchArgument("timing_topic", default_value="/scalenav/timing"),
         DeclareLaunchArgument("next_goal_frame", default_value="world_enu"),
         DeclareLaunchArgument("visualization_frame", default_value="odom"),
@@ -53,6 +57,9 @@ def generate_launch_description():
         # Compatibility arguments; the planner publishes every update tick.
         DeclareLaunchArgument("route_plan_period_ms", default_value="100"),
         DeclareLaunchArgument("local_goal_reserve_m", default_value="0.0"),
+        DeclareLaunchArgument("local_graph_radius_m", default_value="45.0"),
+        DeclareLaunchArgument("local_sliding_graph", default_value="false"),
+        DeclareLaunchArgument("local_sliding_graph_radius_m", default_value="40.0"),
         DeclareLaunchArgument("use_edge_witness_path", default_value="false"),
         DeclareLaunchArgument("goal_path_cost_weight", default_value="1.0"),
         DeclareLaunchArgument("frontier_goal_distance_weight", default_value="2.0"),
@@ -74,6 +81,7 @@ def generate_launch_description():
         DeclareLaunchArgument("semantic_baseline_quantile", default_value="0.25"),
         DeclareLaunchArgument("semantic_point_influence_m", default_value="8.0"),
         DeclareLaunchArgument("semantic_edge_candidate_limit", default_value="8"),
+        DeclareLaunchArgument("bubble_astar_safe_distance", default_value="0.61"),
         DeclareLaunchArgument("bubble_topo/clearance_cost_weight", default_value="2.0"),
         DeclareLaunchArgument("bubble_topo/clearance_target_m", default_value="1.2"),
         DeclareLaunchArgument("previous_path_cost_factor", default_value="1.0"),
@@ -128,6 +136,12 @@ def generate_launch_description():
                 "goal_topic": LaunchConfiguration("goal_topic"),
                 "next_goal_topic": LaunchConfiguration("next_goal_topic"),
                 "frontier_goal_topic": LaunchConfiguration("frontier_goal_topic"),
+                "gcn_frontier_column_topic": LaunchConfiguration(
+                    "gcn_frontier_column_topic"),
+                "gcn_frontier_required": LaunchConfiguration("gcn_frontier_required"),
+                "gcn_frontier_timeout_ms": LaunchConfiguration("gcn_frontier_timeout_ms"),
+                "gcn_frontier_direction_weight": LaunchConfiguration(
+                    "gcn_frontier_direction_weight"),
                 "timing_topic": LaunchConfiguration("timing_topic"),
                 "next_goal_frame": LaunchConfiguration("next_goal_frame"),
                 "visualization_frame": LaunchConfiguration("visualization_frame"),
@@ -154,6 +168,10 @@ def generate_launch_description():
                 "max_update_region_num": LaunchConfiguration("max_update_region_num"),
                 "route_plan_period_ms": LaunchConfiguration("route_plan_period_ms"),
                 "local_goal_reserve_m": LaunchConfiguration("local_goal_reserve_m"),
+                "local_graph_radius_m": LaunchConfiguration("local_graph_radius_m"),
+                "local_sliding_graph": LaunchConfiguration("local_sliding_graph"),
+                "local_sliding_graph_radius_m": LaunchConfiguration(
+                    "local_sliding_graph_radius_m"),
                 "use_edge_witness_path": LaunchConfiguration("use_edge_witness_path"),
                 "goal_path_cost_weight": LaunchConfiguration("goal_path_cost_weight"),
                 "frontier_goal_distance_weight": LaunchConfiguration(
@@ -191,6 +209,8 @@ def generate_launch_description():
                     "semantic_point_influence_m"),
                 "bubble_topo/semantic_edge_candidate_limit": LaunchConfiguration(
                     "semantic_edge_candidate_limit"),
+                "bubble_astar/safe_distance": LaunchConfiguration(
+                    "bubble_astar_safe_distance"),
                 "bubble_topo/clearance_cost_weight": LaunchConfiguration(
                     "bubble_topo/clearance_cost_weight"),
                 "bubble_topo/clearance_target_m": LaunchConfiguration(
