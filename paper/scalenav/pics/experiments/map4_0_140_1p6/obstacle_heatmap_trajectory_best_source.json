@@ -1,0 +1,32 @@
+{
+  "batch_summary": "/mnt/code/lab/yopo/OpenSeek/scalenav_ws/src/aut_test/results/run_20260906_112858_1289732/summary.csv",
+  "trial_count": 10,
+  "success_count": 10,
+  "selected_trial": 8,
+  "selected_session": "/mnt/code/lab/yopo/OpenSeek/log_scalenav/session_20260906_113515_868",
+  "selection_rule": "minimum path_m among successful trials",
+  "selected_metrics": {
+    "path_m": 165.8372559583024,
+    "duration_s": 34.3642983820755,
+    "average_speed_mps": 4.825858922375191,
+    "max_speed_mps": 6.491760994260843
+  },
+  "obstacle_map": {
+    "sessions": 10,
+    "sampled_pointcloud_frames": 692,
+    "accepted_flight_height_points": 528783,
+    "occupied_cells": 7746,
+    "cell_size_m": 0.5,
+    "density_radius_m": 3.0,
+    "height_slab_m": [
+      0.3,
+      3.2
+    ],
+    "bounds_xy_m": [
+      -50.0,
+      50.0,
+      -5.0,
+      145.0
+    ]
+  }
+}

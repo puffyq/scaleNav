@@ -203,6 +203,28 @@ TEST(EpicIntegration, EdgeCrossingObservedObstacleIsRejectedBetweenEndpoints)
   EXPECT_FALSE(astar.collisionCheck_shortenPath(path));
 }
 
+TEST(EpicIntegration, ClearanceRevalidationUsesConfiguredTolerance)
+{
+  auto map = std::make_shared<LIOInterface>();
+  map->configureBounds(Eigen::Vector3f(-2.0F, -2.0F, 0.0F),
+                       Eigen::Vector3f(2.0F, 2.0F, 4.0F));
+  map->configureStorage(0.001F, 10.0F, 20000, 0.5F);
+  map->updateCloudWorld(singlePoint(PointType(0.0F, 0.50F, 1.6F)),
+                        Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity());
+
+  ParallelBubbleAstar astar;
+  astar.lidar_map_interface_ = map;
+  astar.resolution_ = 0.10;
+  astar.safe_distance_ = 0.61;
+  astar.clearance_tolerance_ = 0.20;
+  std::vector<Eigen::Vector3f> path = {p(0.0F, 0.0F), p(0.005F, 0.0F)};
+  EXPECT_TRUE(astar.collisionCheck_shortenPath(path));
+
+  astar.clearance_tolerance_ = 0.0;
+  path = {p(0.0F, 0.0F), p(0.005F, 0.0F)};
+  EXPECT_FALSE(astar.collisionCheck_shortenPath(path));
+}
+
 TEST(EpicIntegration, ObservedWallKeepsSemanticEdgeBlockedWhenNextFrameLooksAway)
 {
   auto map = std::make_shared<LIOInterface>();

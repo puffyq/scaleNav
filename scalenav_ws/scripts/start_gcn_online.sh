@@ -20,6 +20,8 @@ SEMANTIC_RATE="${GCN_SEMANTIC_RATE:-2}"
 SEMANTIC_COST_WEIGHT="${SEMANTIC_COST_WEIGHT:-2.0}"
 SEMANTIC_ROUTE_INFLUENCE_M="${SEMANTIC_ROUTE_INFLUENCE_M:-5.0}"
 SEMANTIC_POINT_INFLUENCE_M="${SEMANTIC_POINT_INFLUENCE_M:-5.0}"
+GRAPH_FIXED_LAYER="${GRAPH_FIXED_LAYER:-true}"
+FIXED_ALTITUDE="${FIXED_ALTITUDE:-true}"
 
 case "${1:-}" in
   -h|--help)
@@ -37,6 +39,14 @@ esac
 [[ -f "$GCN_MODEL" ]] || { echo "GCN model missing: $GCN_MODEL" >&2; exit 1; }
 [[ "$GCN_SEMANTIC" == "0" || "$GCN_SEMANTIC" == "1" ]] || {
   echo "GCN_SEMANTIC must be 0 or 1" >&2
+  exit 2
+}
+[[ "$GRAPH_FIXED_LAYER" == "true" || "$GRAPH_FIXED_LAYER" == "false" ]] || {
+  echo "GRAPH_FIXED_LAYER must be true or false" >&2
+  exit 2
+}
+[[ "$FIXED_ALTITUDE" == "true" || "$FIXED_ALTITUDE" == "false" ]] || {
+  echo "FIXED_ALTITUDE must be true or false" >&2
   exit 2
 }
 if pgrep -f 'online_planner_ros2.py|route_yopo_control_ros2.py' >/dev/null 2>&1; then
@@ -65,6 +75,7 @@ if [[ "$GCN_SEMANTIC" == "1" ]]; then
     --update-rate "$SEMANTIC_RATE" --pearl-root "$SRC/global_graph/heatmap_ws/pearl_ws"
 fi
 run ros2 launch scalenav_graph_ros2 scalenav_graph.launch.py \
+  graph_fixed_layer:="$GRAPH_FIXED_LAYER" \
   goal_topic:=/goal_pose next_goal_topic:=/scalenav/local_goal \
   next_goal_frame:=world_enu visualization_frame:=world_enu \
   odom_twist_frame:=body wait_for_initial_semantic:=$( [[ "$GCN_SEMANTIC" == "1" ]] && echo true || echo false ) \
@@ -80,14 +91,18 @@ run ros2 launch scalenav_graph_ros2 scalenav_graph.launch.py \
 run "$PYTHON" "$SRC/scalenav/gcn_frontier_policy_ros2.py" \
   --model "$GCN_MODEL" --device "$DEVICE" \
   --mission-goal-topic /goal_pose --output-topic /scalenav/gcn_frontier_column
+altitude_args=()
+if [[ "$FIXED_ALTITUDE" == "true" ]]; then
+  altitude_args+=(--fixed-altitude)
+fi
 run "$PYTHON" "$SRC/scalenav/online_planner_ros2.py" \
   --model "$SRC/models/original_yopo_simple/model.pt" --device "$DEVICE" \
   --config-file "$SRC/config/config.yaml" --control --original-goal-input \
   --goal-topic /scalenav/local_goal --mission-goal-topic /goal_pose \
-  --world-frame world_enu --odom-twist-frame body --fixed-altitude \
+  --world-frame world_enu --odom-twist-frame body "${altitude_args[@]}" \
   --plan-from-reference --disable-event-log \
   --maximum-trajectory-speed-mps "$MAX_SPEED" \
   --model-image-width 160 --model-image-height 96 --model-vertical-num 3
 
-echo "started online GCN frontier selector (required); model=$GCN_MODEL column=/scalenav/gcn_frontier_column local_goal=/scalenav/local_goal device=$DEVICE pearl=$GCN_SEMANTIC prompt=$SEMANTIC_PROMPT safe_distance=${GRAPH_SAFE_DISTANCE}m"
+echo "started online GCN frontier selector (required); model=$GCN_MODEL column=/scalenav/gcn_frontier_column local_goal=/scalenav/local_goal device=$DEVICE pearl=$GCN_SEMANTIC prompt=$SEMANTIC_PROMPT safe_distance=${GRAPH_SAFE_DISTANCE}m graph_fixed_layer=$GRAPH_FIXED_LAYER fixed_altitude=$FIXED_ALTITUDE"
 wait -n "${PIDS[@]}"

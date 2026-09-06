@@ -17,6 +17,7 @@ SEMANTIC_OPPORTUNITY_COOLDOWN_S="${SEMANTIC_OPPORTUNITY_COOLDOWN_S:-0.8}"
 SEMANTIC_OPPORTUNITY_DIRECTION_TOLERANCE_DEG="${SEMANTIC_OPPORTUNITY_DIRECTION_TOLERANCE_DEG:-30.0}"
 WAIT_FOR_INITIAL_SEMANTIC="${WAIT_FOR_INITIAL_SEMANTIC:-true}"
 GRAPH_FIXED_LAYER="${GRAPH_FIXED_LAYER:-true}"  # graph topology: true=single layer, false=3D
+FIXED_ALTITUDE="${FIXED_ALTITUDE:-true}"          # YOPO execution: true=lock odom z, false=3D
 LOCAL_SLIDING_GRAPH="${LOCAL_SLIDING_GRAPH:-false}"
 LOCAL_SLIDING_GRAPH_RADIUS_M="${LOCAL_SLIDING_GRAPH_RADIUS_M:-40.0}"
 LOCAL_GRAPH_RADIUS_M="${LOCAL_GRAPH_RADIUS_M:-45.0}"
@@ -87,6 +88,14 @@ done
 # startup gate. Semantic runs keep the default one-shot wait enabled.
 if ((SEMANTIC == 0)); then
   WAIT_FOR_INITIAL_SEMANTIC=false
+fi
+if [[ "$GRAPH_FIXED_LAYER" != "true" && "$GRAPH_FIXED_LAYER" != "false" ]]; then
+  echo "GRAPH_FIXED_LAYER must be true or false" >&2
+  exit 2
+fi
+if [[ "$FIXED_ALTITUDE" != "true" && "$FIXED_ALTITUDE" != "false" ]]; then
+  echo "FIXED_ALTITUDE must be true or false" >&2
+  exit 2
 fi
 
 [[ -f /opt/ros/humble/setup.bash ]] || { echo "ROS2 Humble not found" >&2; exit 1; }
@@ -164,6 +173,10 @@ if ((SEMANTIC)); then
 fi
 
 start_planner() {
+  local altitude_args=()
+  if [[ "$FIXED_ALTITUDE" == "true" ]]; then
+    altitude_args+=(--fixed-altitude)
+  fi
   run "$PYTHON" "$SRC/scalenav/online_planner_ros2.py" \
     --model "$MODEL" --device "$DEVICE" \
     --config-file "$CONFIG" \
@@ -171,7 +184,7 @@ start_planner() {
     --mission-goal-topic /goal_pose --world-frame world_enu --odom-twist-frame body \
     --model-image-width 160 --model-image-height 96 --model-vertical-num 3 \
     --trajectory-speed-color-max-mps "$MAXIMUM_TRAJECTORY_SPEED_MPS" \
-    --fixed-altitude --plan-from-reference --disable-event-log "$@"
+    "${altitude_args[@]}" --plan-from-reference --disable-event-log "$@"
 }
 
 if ((SAVE_DEPTH)); then
@@ -180,5 +193,5 @@ else
   start_planner
 fi
 
-echo "started; goal=/goal_pose semantic=$SEMANTIC prompt=$PROMPT semantic_cost_weight=$SEMANTIC_COST_WEIGHT semantic_route_influence_m=$SEMANTIC_ROUTE_INFLUENCE_M semantic_point_influence_m=$SEMANTIC_POINT_INFLUENCE_M graph_fixed_layer=$GRAPH_FIXED_LAYER local_sliding_graph=$LOCAL_SLIDING_GRAPH local_sliding_graph_radius_m=$LOCAL_SLIDING_GRAPH_RADIUS_M map_history_radius_m=$MAP_HISTORY_RADIUS_M reuse_graph_on_goal=$REUSE_GRAPH_ON_GOAL maximum_trajectory_speed_mps=$MAXIMUM_TRAJECTORY_SPEED_MPS plan_from_reference=true ignore_collision=$IGNORE_COLLISION airsim_reset=$AIRSIM_RESET_ON_START recorded_logs=$LOG_ROOT"
+echo "started; goal=/goal_pose semantic=$SEMANTIC prompt=$PROMPT semantic_cost_weight=$SEMANTIC_COST_WEIGHT semantic_route_influence_m=$SEMANTIC_ROUTE_INFLUENCE_M semantic_point_influence_m=$SEMANTIC_POINT_INFLUENCE_M graph_fixed_layer=$GRAPH_FIXED_LAYER fixed_altitude=$FIXED_ALTITUDE local_sliding_graph=$LOCAL_SLIDING_GRAPH local_sliding_graph_radius_m=$LOCAL_SLIDING_GRAPH_RADIUS_M map_history_radius_m=$MAP_HISTORY_RADIUS_M reuse_graph_on_goal=$REUSE_GRAPH_ON_GOAL maximum_trajectory_speed_mps=$MAXIMUM_TRAJECTORY_SPEED_MPS plan_from_reference=true ignore_collision=$IGNORE_COLLISION airsim_reset=$AIRSIM_RESET_ON_START recorded_logs=$LOG_ROOT"
 wait -n $PIDS

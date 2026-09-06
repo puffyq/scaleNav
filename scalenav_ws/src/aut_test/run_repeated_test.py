@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import signal
+import statistics
 import subprocess
 import sys
 import time
@@ -140,7 +141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-z", type=float, default=1.6)
     parser.add_argument("--start-x", type=float, default=0.0)
     parser.add_argument("--start-y", type=float, default=0.0)
-    parser.add_argument("--start-z", type=float, default=1.6)
+    parser.add_argument("--start-z", type=float, default=2.6)
     parser.add_argument(
         "--start-tolerance",
         type=finite_positive,
@@ -194,7 +195,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--prompt",
-        default="blocks, wall",
+        default="powerline",
         help="open-vocabulary query passed to the semantic front end",
     )
     parser.add_argument(
@@ -782,6 +783,151 @@ CSV_FIELDS = (
 )
 
 
+VALID_OUTCOMES = ("success", "collision", "timeout")
+
+
+def finite_result_value(row: dict[str, Any], key: str) -> float | None:
+    try:
+        value = float(row.get(key, ""))
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def metric_statistics(rows: list[dict[str, Any]], key: str) -> dict[str, float] | None:
+    values = [value for row in rows if (value := finite_result_value(row, key)) is not None]
+    if not values:
+        return None
+    return {
+        "mean": statistics.fmean(values),
+        "sd": statistics.stdev(values) if len(values) > 1 else 0.0,
+        "min": min(values),
+        "max": max(values),
+    }
+
+
+def summarize_results(
+    rows: list[dict[str, Any]], args: argparse.Namespace
+) -> dict[str, Any]:
+    valid = [row for row in rows if row.get("outcome") in VALID_OUTCOMES]
+    successful = [row for row in valid if row.get("outcome") == "success"]
+    failed = [row for row in valid if row.get("outcome") != "success"]
+    counts = {
+        outcome: sum(row.get("outcome") == outcome for row in rows)
+        for outcome in sorted({str(row.get("outcome", "unknown")) for row in rows})
+    }
+    valid_count = len(valid)
+    direct_distance = math.dist(
+        (args.start_x, args.start_y, args.start_z),
+        (args.goal_x, args.goal_y, args.goal_z),
+    )
+    efficiency_rows: list[dict[str, Any]] = []
+    for row in successful:
+        path = finite_result_value(row, "path_m")
+        if path is not None and path > 0.0:
+            efficiency_rows.append({"value": 100.0 * direct_distance / path})
+    successful_metrics = {
+        key: metric_statistics(successful, key)
+        for key in (
+            "duration_s", "path_m", "average_speed_mps", "max_speed_mps",
+            "final_error_m", "final_speed_mps",
+        )
+    }
+    successful_metrics["path_efficiency_percent"] = metric_statistics(
+        efficiency_rows, "value")
+    return {
+        "stack": args.stack,
+        "attempts": len(rows),
+        "valid_flights": valid_count,
+        "outcomes": counts,
+        "success_rate_percent": (
+            100.0 * len(successful) / valid_count if valid_count else None
+        ),
+        "collision_rate_percent": (
+            100.0 * counts.get("collision", 0) / valid_count if valid_count else None
+        ),
+        "timeout_rate_percent": (
+            100.0 * counts.get("timeout", 0) / valid_count if valid_count else None
+        ),
+        "successful_trials": [int(row["trial"]) for row in successful],
+        "direct_distance_m": direct_distance,
+        "successful": successful_metrics,
+        "failed_observed": {
+            key: metric_statistics(failed, key)
+            for key in ("duration_s", "path_m", "average_speed_mps", "max_speed_mps")
+        },
+    }
+
+
+def format_stat(metric: dict[str, float] | None, unit: str) -> str:
+    if metric is None:
+        return "n/a"
+    return (
+        f"{metric['mean']:.3f} +/- {metric['sd']:.3f} {unit} "
+        f"[min={metric['min']:.3f}, max={metric['max']:.3f}]"
+    )
+
+
+def print_batch_summary(metrics: dict[str, Any], metrics_path: Path) -> None:
+    valid = int(metrics["valid_flights"])
+    outcomes = metrics["outcomes"]
+    success = int(outcomes.get("success", 0))
+    collision = int(outcomes.get("collision", 0))
+    timeout = int(outcomes.get("timeout", 0))
+    rate = metrics["success_rate_percent"]
+    rate_text = "n/a" if rate is None else f"{rate:.1f}%"
+    collision_rate = metrics["collision_rate_percent"]
+    collision_rate_text = "n/a" if collision_rate is None else f"{collision_rate:.1f}%"
+    timeout_rate = metrics["timeout_rate_percent"]
+    timeout_rate_text = "n/a" if timeout_rate is None else f"{timeout_rate:.1f}%"
+    excluded = int(metrics["attempts"]) - valid
+    print("", flush=True)
+    print("=== Batch metrics ===", flush=True)
+    print(
+        f"stack={metrics['stack']} attempts={metrics['attempts']} valid={valid} "
+        f"success={success} ({rate_text}) collision={collision} ({collision_rate_text}) "
+        f"timeout={timeout} ({timeout_rate_text}) excluded={excluded}",
+        flush=True,
+    )
+    if excluded:
+        excluded_outcomes = {
+            key: value for key, value in outcomes.items() if key not in VALID_OUTCOMES
+        }
+        print(f"excluded_outcomes={excluded_outcomes}", flush=True)
+    successful_trials = metrics["successful_trials"]
+    print(
+        "successful_trials=" + (
+            ",".join(str(trial) for trial in successful_trials)
+            if successful_trials else "none"
+        ),
+        flush=True,
+    )
+    successful = metrics["successful"]
+    print(f"success duration: {format_stat(successful['duration_s'], 's')}", flush=True)
+    print(f"success path: {format_stat(successful['path_m'], 'm')}", flush=True)
+    print(
+        f"success average speed: {format_stat(successful['average_speed_mps'], 'm/s')}",
+        flush=True,
+    )
+    print(
+        f"success max speed: {format_stat(successful['max_speed_mps'], 'm/s')}",
+        flush=True,
+    )
+    print(
+        f"success final error: {format_stat(successful['final_error_m'], 'm')}",
+        flush=True,
+    )
+    print(
+        "success path efficiency: "
+        + format_stat(successful["path_efficiency_percent"], "%"),
+        flush=True,
+    )
+    if collision or timeout:
+        failed = metrics["failed_observed"]
+        print(f"failure observed path: {format_stat(failed['path_m'], 'm')}", flush=True)
+    print(f"metrics={metrics_path}", flush=True)
+
+
 def write_result(
     run_dir: Path, summary_path: Path, trial: int, result: dict[str, Any]
 ) -> None:
@@ -888,10 +1034,18 @@ def run_trial(
         }
     )
     write_result(run_dir, summary_path, trial, result)
+    path = finite_result_value(result, "path_m")
+    average_speed = finite_result_value(result, "average_speed_mps")
+    max_speed = finite_result_value(result, "max_speed_mps")
+    path_text = "nan" if path is None else f"{path:.3f}"
+    average_speed_text = "nan" if average_speed is None else f"{average_speed:.3f}"
+    max_speed_text = "nan" if max_speed is None else f"{max_speed:.3f}"
     print(
         f"trial {trial}: {result['outcome']} "
         f"duration={result.get('duration_s', float('nan')):.3f}s "
         f"error={result.get('final_error_m', float('nan')):.3f}m "
+        f"path={path_text}m avg_speed={average_speed_text}m/s "
+        f"max_speed={max_speed_text}m/s "
         f"session={result['session_dir'] or 'missing'}",
         flush=True,
     )
@@ -916,7 +1070,16 @@ def configuration(args: argparse.Namespace) -> dict[str, Any]:
         "position_tolerance_m": args.position_tolerance,
         "speed_tolerance_mps": args.speed_tolerance,
         "airsim": f"{args.airsim_host}:{args.airsim_port}",
-        "semantic": args.stack in COMBINED_SCRIPTS or args.stack == "gcn" or not args.no_semantic,
+        # Combined stacks always own their semantic front end.  For the
+        # selectable ScaleNav/GCN stacks, reflect --no-semantic accurately in
+        # the saved run metadata instead of reporting semantics for baselines.
+        "semantic": (
+            args.stack in COMBINED_SCRIPTS
+            or (
+                args.stack in {"scalenav", "gcn", "route_yopo"}
+                and not args.no_semantic
+            )
+        ),
         "prompt": args.prompt,
         "semantic_cost_weight": args.semantic_cost_weight,
         "semantic_route_influence_m": args.semantic_route_influence_m,
@@ -948,8 +1111,10 @@ def main() -> int:
     attempt = 1
     valid_trials = 0
     consecutive_startup_failures = 0
+    results: list[dict[str, Any]] = []
     while not STOP_REQUESTED and (args.count == 0 or valid_trials < args.count):
         result = run_trial(args, run_dir, summary_path, attempt)
+        results.append(result)
         outcome = result.get("outcome")
         if outcome in {"success", "collision", "timeout"}:
             consecutive_startup_failures = 0
@@ -982,6 +1147,14 @@ def main() -> int:
         attempt += 1
     # Keep the descriptor referenced until every trial and cleanup has completed.
     _ = lock_file
+    metrics = summarize_results(results, args)
+    metrics_path = run_dir / "metrics.json"
+    temporary_metrics_path = metrics_path.with_suffix(".json.tmp")
+    temporary_metrics_path.write_text(
+        json.dumps(metrics, indent=2, ensure_ascii=True) + "\n", encoding="utf-8"
+    )
+    temporary_metrics_path.replace(metrics_path)
+    print_batch_summary(metrics, metrics_path)
     print(f"test stopped; summary={summary_path}", flush=True)
     return 130 if STOP_REQUESTED else 0
 

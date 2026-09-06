@@ -54,6 +54,16 @@ ROS nodes:
 bash scalenav_ws/src/aut_test/run_0_140.sh --dry-run
 ```
 
+Run a true 3D mission with a 3D topology, unlocked YOPO altitude, and a goal
+at `z=8.0 m`. Its editable defaults are collected at the top of the script:
+
+```bash
+bash scalenav_ws/src/aut_test/run_3d_0_140.sh --count 10
+```
+
+Override the endpoint altitude or use the GCN frontier selector with
+`GOAL_Z=...` and `STACK=gcn` respectively.
+
 Each invocation creates `results/run_<time>_<pid>/summary.csv`, one JSON result
 per trial, and one full stack console log per trial. ScaleNav's sensor and graph
 logs remain in `log_scalenav/session_*`, with the matching session path recorded

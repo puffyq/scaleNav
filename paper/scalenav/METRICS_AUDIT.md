@@ -26,22 +26,18 @@ route-memory metrics for its own ablations.
 
 ## Current paper findings
 
-1. The offline corridor-conditioned numbers in `root.tex` are traceable to
-   `TRAINING_REPORT_002.md`: 1,800 independent zero-motion samples, 6 collisions,
-   8.67% corridor violation, 1.358 m mean minimum clearance, and 4.230 m mean
-   progress.  They are reasonable as an offline single-step result only.
-2. Calling that model the "current checkpoint" is stale.  The repository now
-   contains `YOPO_54` and `TRAINING_REPORT_004.md`; the older result should be
-   called the "reported checkpoint" unless the paper is updated to the newer
-   benchmark.
-3. The current online launcher loads
-   `scalenav_ws/src/models/original_yopo_simple/model.pt`.  Closed-loop logs from
-   that launcher cannot be labeled as Corridor-Conditioned YOPO results.
-4. The previous statement that failed trials participate directly in raw path
+1. Corridor-conditioned offline results are excluded from the current paper.
+   The selected closed-loop batches use
+   `scalenav_ws/src/models/original_yopo_simple/model.pt` with ScaleNav's moving
+   local goal and cannot be labeled as Corridor-Conditioned YOPO results.
+2. The planner-agnostic claim is limited to the goal interface: YOPO consumes
+   `/scalenav/local_goal` directly, while EGO-Planner and SUPER use ROS goal,
+   cloud, and command adapters without changes to their planner cores.
+3. The previous statement that failed trials participate directly in raw path
    and time means is biased: a method that crashes early obtains a short path
    and time.  Report raw flight quantities success-conditioned, and use
    success/SPL plus timeout-capped time across all trials.
-5. At least 20 paired seeds, mean, sample standard deviation, 95% confidence
+4. At least 20 paired seeds, mean, sample standard deviation, 95% confidence
    intervals, and a paired test are reasonable.  The test protocol still needs
    a fixed timeout, collision source, goal schedule, compute hardware, and the
    exact number of bootstrap resamples.

@@ -354,13 +354,19 @@ def colored_trajectory(
             c="#c62828", edgecolors="white", linewidths=0.7, zorder=5,
         )
     ax.text(
-        0.015, 0.94, label,
+        0.015, 0.965, label,
         transform=ax.transAxes,
         ha="left",
         va="top",
         fontsize=plt.rcParams["axes.titlesize"],
         fontweight="semibold",
         color="#202124",
+        bbox={
+            "boxstyle": "square,pad=0.16",
+            "facecolor": "white",
+            "edgecolor": "none",
+            "alpha": 0.94,
+        },
         zorder=6,
     )
     ax.set_ylabel("Lateral $x$ (m)")

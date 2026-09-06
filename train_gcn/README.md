@@ -95,8 +95,11 @@ Generate the checked visualization with:
 
 The viewer reports `gt_visual_mismatches`; it must be zero. A causal switching
 penalty can be selected on validation sessions and audited on test sessions
-with `evaluate_temporal.py`. The selected 0.05 penalty reached 91.3% exact and
-91.8% macro accuracy without using test labels for tuning.
+with `evaluate_temporal.py`. In the latest reproducible sweep, validation
+selected penalty `0.00`. The untouched test split reached 89.3% exact accuracy,
+89.4% macro accuracy, 99.4% within-one-column accuracy, and 0.115 mean absolute
+column error. Forcing penalty `0.05` instead gives 89.1%, 89.3%, 99.4%, and
+0.116, respectively; it is therefore not the selected result.
 
 Online GCN test (independent startup):
 

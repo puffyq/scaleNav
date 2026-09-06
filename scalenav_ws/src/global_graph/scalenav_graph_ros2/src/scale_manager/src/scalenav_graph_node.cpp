@@ -265,6 +265,14 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     (void)declare_parameter<double>("route_reuse_lateral_distance_m", 1.5);
     local_goal_hold_timeout_ms_ = declare_parameter<double>(
       "local_goal_hold_timeout_ms", 400.0);
+    stuck_replan_timeout_ms_ = std::max(0.0, declare_parameter<double>(
+      "stuck_replan_timeout_ms", 2000.0));
+    stuck_replan_speed_mps_ = std::max(0.0, declare_parameter<double>(
+      "stuck_replan_speed_mps", 0.20));
+    stuck_replan_min_goal_distance_m_ = std::max(0.0, declare_parameter<double>(
+      "stuck_replan_min_goal_distance_m", 3.0));
+    stuck_replan_cooldown_s_ = std::max(0.0, declare_parameter<double>(
+      "stuck_replan_cooldown_s", 5.0));
     (void)declare_parameter<double>("frontier_extension_search_period_ms", 1000.0);
     goal_connect_distance_m_ = declare_parameter<double>("goal_connect_distance_m", 6.0);
     goal_connect_timeout_ms_ = declare_parameter<double>("goal_connect_timeout_ms", 20.0);
@@ -362,6 +370,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     declare_parameter<double>("bubble_astar/resolution_astar", 0.30);
     declare_parameter<double>("bubble_astar/lambda_heu", 1.0);
     declare_parameter<double>("bubble_astar/safe_distance", 0.61);
+    declare_parameter<double>("bubble_astar/clearance_tolerance", 0.20);
     declare_parameter<bool>("bubble_astar/planar_search", graph_fixed_layer_);
     declare_parameter<double>("bubble_astar/planar_z", graph_layer_z_);
     declare_parameter<int>("bubble_astar/allocate_num", 100000);
@@ -2516,9 +2525,55 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     const float accepted_route_remaining =
       scalenav_graph::routeLength(scalenav_graph::forwardRouteFromT(
         accepted_route_.witness_path, accepted_route_.frontier_goal_progress_t));
-    const bool accepted_witness_usable = accepted_route_.valid &&
+    bool accepted_witness_usable = accepted_route_.valid &&
       accepted_route_.witness_path.size() >= 2 &&
       accepted_route_.topology_path.size() >= 2;
+    // SUPER can reject a locally valid goal while the graph still considers
+    // the accepted witness executable. In that case the executor remains
+    // stopped in GENERATE_TRAJ and the same local goal is fed back forever.
+    // Treat sustained zero progress as an executor-level route failure and
+    // force one fresh odom-rooted A* search. A short grace period and a
+    // cooldown keep normal trajectory startup/settling from causing churn.
+    const float local_goal_distance = have_previous_local_goal_ ?
+      (previous_local_goal_ - position_).norm() : accepted_route_remaining;
+    const bool route_ahead = accepted_witness_usable &&
+      (local_goal_distance >= static_cast<float>(stuck_replan_min_goal_distance_m_) ||
+       accepted_route_remaining >= static_cast<float>(stuck_replan_min_goal_distance_m_));
+    if (accepted_witness_usable && route_ahead &&
+        speed_mps_ <= static_cast<float>(stuck_replan_speed_mps_)) {
+      if (!have_stuck_replan_time_) {
+        stuck_replan_start_time_ = now_steady;
+        have_stuck_replan_time_ = true;
+      }
+      const double stopped_ms = std::chrono::duration<double, std::milli>(
+        now_steady - stuck_replan_start_time_).count();
+      const double since_last_s = have_last_stuck_replan_time_ ?
+        std::chrono::duration<double>(now_steady - last_stuck_replan_time_).count() :
+        std::numeric_limits<double>::infinity();
+      if (stopped_ms >= stuck_replan_timeout_ms_ &&
+          since_last_s >= stuck_replan_cooldown_s_) {
+        accepted_route_.clear();
+        accepted_witness_usable = false;
+        force_local_goal_reset_ = true;
+        map_changed_.store(true);
+        accepted_route_forced_replan = true;
+        accepted_route_forced_reason = "EXECUTOR_STUCK_ODOM_REPLAN";
+        last_stuck_replan_time_ = now_steady;
+        have_last_stuck_replan_time_ = true;
+        have_stuck_replan_time_ = false;
+        RCLCPP_WARN(
+          get_logger(),
+          "[ScaleNav route] executor stalled on accepted route; forcing fresh "
+          "odom-rooted A* position=(%.2f,%.2f,%.2f) local_goal_distance=%.2f "
+          "route_remaining=%.2f stopped_ms=%.0f",
+          position_.x(), position_.y(), position_.z(),
+          static_cast<double>(local_goal_distance),
+          static_cast<double>(accepted_route_remaining), stopped_ms);
+      }
+    } else if (speed_mps_ > static_cast<float>(stuck_replan_speed_mps_) ||
+               !accepted_witness_usable || !route_ahead) {
+      have_stuck_replan_time_ = false;
+    }
     const bool frontier_progress_replan = accepted_witness_usable &&
       scalenav_graph::routeProgressReachedFraction(
         accepted_route_.frontier_goal_progress_m,
@@ -4741,7 +4796,15 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         std::chrono::steady_clock::now() - previous_local_goal_time_).count() <=
         local_goal_hold_timeout_ms_ &&
       local_goal_offset.norm() >= local_goal_min_advance_m_ && local_goal_is_ahead;
-    const bool has_local_goal = computed_has_next_goal || hold_local_goal;
+    bool has_local_goal = computed_has_next_goal || hold_local_goal;
+    if (force_local_goal_reset_) {
+      // Send one explicit stop/reset command before the replacement route.
+      // This defeats the bridge's duplicate-goal filter when the fresh A*
+      // search happens to choose the same coordinate as the failed route.
+      has_local_goal = false;
+      force_local_goal_reset_ = false;
+      have_previous_local_goal_ = false;
+    }
     const Eigen::Vector3f local_goal = hold_local_goal ? previous_local_goal_ : computed_next_goal;
     visualization_msgs::msg::Marker next_goal_marker = skeleton_nodes;
     next_goal_marker.ns = "scalenav_local_goal";
@@ -5182,6 +5245,10 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   double clearance_cost_weight_ = 2.0;
   double clearance_target_m_ = 1.2;
   double local_goal_hold_timeout_ms_ = 400.0;
+  double stuck_replan_timeout_ms_ = 2000.0;
+  double stuck_replan_speed_mps_ = 0.20;
+  double stuck_replan_min_goal_distance_m_ = 3.0;
+  double stuck_replan_cooldown_s_ = 5.0;
   double goal_connect_distance_m_ = 6.0;
   double goal_connect_timeout_ms_ = 20.0;
   double odom_reconnect_distance_m_ = 1.0;
@@ -5224,7 +5291,12 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   std::atomic<std::uint64_t> topology_update_generation_{0};
   Eigen::Vector3f previous_local_goal_ = Eigen::Vector3f::Zero();
   bool have_previous_local_goal_ = false;
+  bool force_local_goal_reset_ = false;
   std::chrono::steady_clock::time_point previous_local_goal_time_{};
+  std::chrono::steady_clock::time_point stuck_replan_start_time_{};
+  std::chrono::steady_clock::time_point last_stuck_replan_time_{};
+  bool have_stuck_replan_time_ = false;
+  bool have_last_stuck_replan_time_ = false;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr free_ray_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr semantic_heatmap_sub_;

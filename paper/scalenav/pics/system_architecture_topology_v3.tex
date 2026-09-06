@@ -1,92 +1,162 @@
 \documentclass[tikz,border=3pt]{standalone}
+\usepackage{amsmath}
 \usepackage{xcolor}
-\usetikzlibrary{arrows.meta,positioning}
-\definecolor{ink}{HTML}{25343C}
-\definecolor{muted}{HTML}{667781}
-\definecolor{orange}{HTML}{E58A36}
-\definecolor{orangebg}{HTML}{FFF5E9}
-\definecolor{teal}{HTML}{218A81}
-\definecolor{tealbg}{HTML}{EEF9F6}
-\definecolor{coral}{HTML}{D9585C}
-\definecolor{coralbg}{HTML}{FFF0F1}
-\definecolor{violet}{HTML}{765AB5}
-\definecolor{violetbg}{HTML}{F4F0FC}
-\definecolor{blue}{HTML}{3E78C5}
-\definecolor{bluebg}{HTML}{EEF4FE}
-\definecolor{green}{HTML}{4B9969}
-\definecolor{greenbg}{HTML}{EEF9F1}
+\usetikzlibrary{arrows.meta,calc}
+
+% Quiet, print-friendly palette shared with the paper figures.
+\definecolor{ink}{HTML}{26363E}
+\definecolor{muted}{HTML}{657680}
+\definecolor{rule}{HTML}{D7DEE1}
+\definecolor{panel}{HTML}{F7F9F9}
+\definecolor{geometry}{HTML}{3973B7}
+\definecolor{geometrybg}{HTML}{EEF4FA}
+\definecolor{topology}{HTML}{167F78}
+\definecolor{topologybg}{HTML}{EDF7F5}
+\definecolor{semantic}{HTML}{C94F56}
+\definecolor{semanticbg}{HTML}{FCF0F1}
+\definecolor{policy}{HTML}{7657B5}
+\definecolor{policybg}{HTML}{F3F0FA}
+\definecolor{goal}{HTML}{D17B1F}
+\definecolor{goalbg}{HTML}{FCF4EA}
+\definecolor{execute}{HTML}{45865E}
+\definecolor{executebg}{HTML}{EEF6F0}
+
 \begin{document}
 \begin{tikzpicture}[
- x=1mm,y=1mm,font=\sffamily,
- title/.style={font=\sffamily\bfseries\fontsize{13.5}{15.5}\selectfont,text=ink},
- head/.style={font=\sffamily\bfseries\fontsize{7.3}{8.4}\selectfont,text=ink,align=center},
- body/.style={font=\sffamily\fontsize{5.3}{6.2}\selectfont,text=muted,align=center},
- card/.style={rounded corners=2.2mm,line width=.75pt,align=center},
- flow/.style={-{Latex[length=2mm,width=1.3mm]},line width=1pt}
+  x=1mm,y=1mm,font=\sffamily,
+  stage/.style={font=\sffamily\bfseries\fontsize{7.1}{8.2}\selectfont,
+                text=ink,anchor=west},
+  number/.style={circle,minimum size=4.6mm,inner sep=0pt,
+                 font=\sffamily\bfseries\fontsize{5.5}{6}\selectfont,
+                 text=white},
+  head/.style={font=\sffamily\bfseries\fontsize{5.8}{6.7}\selectfont,
+               text=ink,align=center},
+  body/.style={font=\sffamily\fontsize{4.45}{5.25}\selectfont,
+               text=muted,align=center},
+  mono/.style={font=\ttfamily\bfseries\fontsize{4.3}{5}\selectfont,
+               align=center},
+  card/.style={rounded corners=.9mm,line width=.52pt,fill=white,align=center},
+  flow/.style={-{Latex[length=1.7mm,width=1.1mm]},line width=.72pt},
+  data/.style={flow,draw=topology},
+  semflow/.style={flow,draw=semantic},
+  policyflow/.style={flow,draw=policy},
+  goalflow/.style={flow,draw=goal},
+  execflow/.style={flow,draw=execute}
 ]
-\fill[white] (-3,-3) rectangle (183,67);
-\node[title] at (90,63) {ScaleNav: topology-first navigation};
-\node[body] at (90,58.3) {persistent geometry  +  semantic route preference  +  safe local execution};
 
-% Inputs.
-\filldraw[card,draw=orange,fill=orangebg] (2,39) rectangle (27,52);
-\node[head] at (14.5,47.2) {RGB + text};
-\node[body] at (14.5,43.2) {semantic query};
-\filldraw[card,draw=blue,fill=bluebg] (2,22) rectangle (27,35);
-\node[head] at (14.5,30.2) {Depth + odometry};
-\node[body] at (14.5,26.2) {measured geometry};
-\filldraw[card,draw=orange,fill=orangebg] (2,5) rectangle (27,18);
-\node[head] at (14.5,13.2) {Mission goal};
-\node[body] at (14.5,9.2) {world-frame target};
+% Stage backgrounds and restrained separators.
+\fill[panel] (0,0) rectangle (68,56);
+\fill[panel] (72,0) rectangle (151,56);
+\fill[panel] (155,0) rectangle (199,56);
+\draw[rule,line width=.45pt] (70,0)--(70,56);
+\draw[rule,line width=.45pt] (153,0)--(153,56);
 
-% Central persistent graph.
-\filldraw[card,draw=teal,fill=tealbg,line width=.95pt] (37,18) rectangle (104,53);
-\node[head] at (70.5,48.5) {PERSISTENT TOPOLOGY GRAPH};
-\node[body] at (70.5,45) {verified bubbles + witness edges};
-\draw[teal!90,line width=1.1pt] (47,30)--(58,41)--(72,27)--(84,40)--(96,31);
-\draw[teal!90,line width=1.1pt] (58,41)--(78,47)--(84,40);
-\draw[teal!90,line width=1.1pt] (47,30)--(60,22)--(72,27);
-\foreach \x/\y/\r in {47/30/2.8,58/41/3.5,72/27/3.1,84/40/3.5,96/31/2.8,78/47/2.4,60/22/2.3} {
-  \shade[ball color=teal!45!white] (\x,\y) circle (\r mm);
-  \draw[teal!90!ink,line width=.4pt] (\x,\y) circle (\r mm);
+\node[number,fill=topology] at (5,51) {1};
+\node[stage] at (9,51) {PERSISTENT TOPOLOGY};
+\node[number,fill=policy] at (77,51) {2};
+\node[stage] at (81,51) {SEMANTIC ROUTE SELECTION};
+\node[number,fill=execute] at (160,51) {3};
+\node[stage] at (164,51) {LOCAL EXECUTION};
+
+% Stage 1: two sensor paths enter a single atomic topology snapshot.
+\filldraw[card,draw=geometry!75,fill=geometrybg] (2,31) rectangle (19,43);
+\node[head] at (10.5,38.9) {Depth + odom.};
+\node[body] at (10.5,35.0) {measured geometry};
+
+\filldraw[card,draw=semantic!75,fill=semanticbg] (2,13) rectangle (19,25);
+\node[head] at (10.5,20.9) {RGB + text};
+\node[body] at (10.5,17.0) {avoidance query};
+
+\filldraw[card,draw=geometry!72,fill=white] (24,31) rectangle (44,43);
+\node[head] at (34,38.9) {Bubble update};
+\node[body] at (34,35.0) {free rays + witnesses};
+
+\filldraw[card,draw=semantic!72,fill=white] (24,13) rectangle (44,25);
+\node[head] at (34,20.9) {Semantic projection};
+\node[body] at (34,17.0) {heatmap + far field};
+
+\draw[flow,draw=geometry] (19,37)--(24,37);
+\draw[semflow] (19,19)--(24,19);
+
+\filldraw[card,draw=topology,line width=.72pt,fill=topologybg]
+  (49,9) rectangle (66,46);
+\node[head] at (57.5,42.3) {Atomic graph\\snapshot};
+\node[body] at (57.5,37.1) {persistent IDs};
+
+% Flat graph glyph: verified edges, bubbles, and provisional semantic nodes.
+\draw[topology,line width=.72pt]
+  (52.2,27)--(55.0,32.5)--(59.1,29.0)--(63.0,34.0)
+  (52.2,27)--(56.0,22.0)--(60.6,24.0)--(63.0,34.0)
+  (55.0,32.5)--(61.0,39.0);
+\foreach \x/\y/\r in {52.2/27/1.25,55/32.5/1.55,59.1/29/1.35,
+                         63/34/1.5,56/22/1.3,60.6/24/1.25,61/39/1.2} {
+  \filldraw[fill=white,draw=topology,line width=.6pt] (\x,\y) circle (\r mm);
 }
-\node[body,text=teal] at (70.5,20.8) {persistent node IDs and checked free-space witnesses};
+\draw[semantic,line width=.8pt] (53.0,18.0)++(-1.1,-1.1)--++(2.2,2.2)
+                                      ++(-2.2,0)--++(2.2,-2.2);
+\draw[semantic,line width=.8pt] (62.0,18.8)++(-1.1,-1.1)--++(2.2,2.2)
+                                      ++(-2.2,0)--++(2.2,-2.2);
+\node[body,text=topology] at (57.5,12.3) {verified backbone};
+\node[body,text=semantic] at (57.5,7.0) {provisional semantics};
 
-% Semantic fusion branch.
-\filldraw[card,draw=coral,fill=coralbg] (37,4) rectangle (67,14);
-\node[head] at (52,10.5) {Semantic heatmap};
-\node[body] at (52,7.1) {RGB + text  ->  route preference};
-\draw[flow,draw=coral] (27,45.5)--(31,45.5)--(31,9)--(37,9);
-\draw[flow,draw=coral] (67,9)--(72,9)--(72,18);
-\draw[flow,draw=blue] (27,28.5)--(32,28.5)--(32,36)--(37,36);
+\draw[flow,draw=geometry] (44,37)--(49,34.5);
+\draw[semflow] (44,19)--(49,20.5);
 
-% Graph policy and route planning.
-\filldraw[card,draw=violet,fill=violetbg] (113,38) rectangle (145,53);
-\node[head] at (129,47.5) {Topology-graph GCN};
-\node[body] at (129,43.5) {5-way frontier direction};
-\filldraw[card,draw=blue,fill=bluebg] (113,20) rectangle (145,35);
-\node[head] at (129,29.5) {A* + collision checks};
-\node[body] at (129,25.5) {accepted witness route};
-\draw[flow,draw=violet] (96,31)--(105,31)--(105,45.5)--(113,45.5);
-\draw[flow,draw=teal] (104,38)--(109,38)--(109,27.5)--(113,27.5);
-\draw[flow,draw=violet] (129,38)--(129,35);
+% Stage 2: learned and semantic preferences remain proposals to a geometric planner.
+\filldraw[card,draw=policy!75,fill=policybg] (74,34) rectangle (104,45);
+\node[head] at (89,41.3) {Topology-graph GCN};
+\node[body] at (89,37.4) {five-way frontier ranking};
 
-% Executor.
-\filldraw[card,draw=green,fill=greenbg] (153,20) rectangle (179,35);
-\node[head] at (166,29.5) {Unchanged YOPO};
-\node[body] at (166,25.5) {local goal -> trajectory};
-\draw[flow,draw=green] (145,27.5)--(153,27.5);
-\node[body,text=green] at (166,16.2) {executor is downstream and unmodified};
+\filldraw[card,draw=semantic!75,fill=semanticbg] (74,19.5) rectangle (104,30.5);
+\node[head] at (89,26.8) {Witness semantic cost};
+\node[body] at (89,22.9) {continuous route preference};
 
-% Mission goal enters route planning; it is never sent directly to the executor.
-\draw[flow,draw=orange] (27,11.5)--(31,11.5)--(31,2.5)--(109,2.5)--(109,27.5)--(113,27.5);
-\node[body,text=orange,fill=white,inner sep=.5mm] at (70,2.5) {mission goal};
+\filldraw[card,draw=goal!78,fill=goalbg] (74,5) rectangle (104,16);
+\node[head] at (89,12.3) {Mission goal};
+\node[body] at (89,8.4) {world-frame objective};
 
-% Minimal safety boundary.
-\draw[coral!85,dashed,line width=.7pt] (108,17)--(108,55);
-\node[body,text=coral,rotate=90] at (106.4,36) {semantics suggests};
-\draw[blue!85,dashed,line width=.7pt] (148,17)--(148,55);
-\node[body,text=blue,rotate=90] at (146.4,36) {geometry decides};
-\node[body] at (90,1.3) {The graph is the interface; the local policy only executes the accepted goal.};
+% Snapshot fan-out: a solid topology edge marks geometric authority.
+\draw[data] (66,34)--(70,34)--(70,39.5)--(74,39.5);
+\draw[data] (66,27.5)--(71.5,27.5)--(71.5,25)--(74,25);
+\draw[data,line width=.9pt] (66,31)--(69,31)--(69,32.5)--(111,32.5);
+\node[body,text=topology,fill=panel,inner sep=.4mm] at (69,30.2) {verified graph};
+
+\filldraw[card,draw=topology,line width=.8pt,fill=white]
+  (111,11) rectangle (149,45);
+\node[head] at (130,40.8) {Route acceptance};
+\draw[rule,line width=.45pt] (115,37.0)--(145,37.0);
+\node[head,text=topology] at (130,33.4) {Rolling A*};
+\node[body] at (130,29.7) {reachability + edge cost};
+\node[head,text=geometry] at (130,24.2) {Collision checks};
+\node[body] at (130,20.5) {known-geometry authority};
+\draw[rule,line width=.45pt] (115,17.3)--(145,17.3);
+\node[body] at (130,13.8) {world-frame witness + route hold};
+
+\draw[policyflow,dashed] (104,39.5)--(111,39.5);
+\node[body,text=policy,fill=panel,inner sep=.35mm] at (107.5,41.6) {proposal};
+\draw[semflow,dashed] (104,25)--(111,27.5);
+\draw[goalflow] (104,10.5)--(108,10.5)--(108,19.5)--(111,19.5);
+
+% Stage 3: one generic contract, with no executor-specific branches.
+\draw[data,line width=.9pt] (149,28)--(157,28)--(157,40)--(160,40);
+\node[body,text=topology,fill=white,inner sep=.35mm] at (153.0,30.2)
+  {accepted witness};
+
+\filldraw[card,draw=goal!78,fill=goalbg] (160,34) rectangle (195,46);
+\node[head] at (177.5,41.9) {Moving-goal interface};
+\node[mono,text=goal] at (177.5,37.7) {$\boldsymbol{g}^{\mathrm{loc}}_t$};
+
+\filldraw[card,draw=execute!82,fill=executebg] (160,16) rectangle (195,29);
+\node[head] at (177.5,24.5) {Goal-conditioned\\local executor};
+\node[body] at (177.5,18.9) {depth + state + local goal};
+
+\draw[execflow] (177.5,34)--(177.5,29);
+\draw[execflow] (177.5,16)--(177.5,8.5);
+\node[mono,text=execute] at (177.5,5.8) {trajectory $\tau_t$};
+
+% One sentence states the authority boundary instead of decorative dividers.
+\node[body,text=ink,anchor=west] at (74,1.8)
+  {GCN and semantics rank; verified geometry authorizes publication.};
+
 \end{tikzpicture}
 \end{document}

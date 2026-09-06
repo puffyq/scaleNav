@@ -8,6 +8,8 @@ PROJECT_ROOT="$(cd -- "$WS/.." && pwd)"
 ROOT_DIR="$PROJECT_ROOT/bc/third_party/compare"
 PYTHON="$WS/../../YOPO-Rally/.venv/bin/python"
 LOG_ROOT="${SCALENAV_LOG_DIR:-$WS/../log_scalenav}"
+DEVICE="${DEVICE:-cuda}"
+GCN_MODEL="${GCN_MODEL:-$PROJECT_ROOT/train_gcn/frontier_gcn_map2_35m.pt}"
 PROMPT="${PROMPT:-tree, blocks, wall}"
 SEMANTIC_COST_WEIGHT="${SEMANTIC_COST_WEIGHT:-2.0}"
 SEMANTIC_ROUTE_INFLUENCE_M="${SEMANTIC_ROUTE_INFLUENCE_M:-8.0}"
@@ -21,7 +23,9 @@ source "$ROOT_DIR/EGO-Planner/install/setup.bash"
 source "$ROOT_DIR/SUPER/install/setup.bash"
 source "$ROOT_DIR/baseline_adapters/install/setup.bash"
 set -u
-export PYTHONPATH="$WS/src/scalenav:$WS/src:${PYTHONPATH:-}"
+[[ -x "$PYTHON" ]] || { echo "Python not found: $PYTHON" >&2; exit 1; }
+[[ -f "$GCN_MODEL" ]] || { echo "GCN model missing: $GCN_MODEL" >&2; exit 1; }
+export PYTHONPATH="$WS/src/scalenav:$WS/src:$PROJECT_ROOT/train_gcn:${PYTHONPATH:-}"
 
 PIDS=""
 run() {
@@ -49,16 +53,22 @@ run ros2 launch scalenav_graph_ros2 scalenav_graph.launch.py \
   semantic_cost_weight:="$SEMANTIC_COST_WEIGHT" \
   semantic_route_influence_m:="$SEMANTIC_ROUTE_INFLUENCE_M" \
   semantic_point_influence_m:="$SEMANTIC_POINT_INFLUENCE_M" \
+  gcn_frontier_column_topic:=/scalenav/gcn_frontier_column \
+  gcn_frontier_required:=true \
   wait_for_initial_semantic:=true
 run "$PYTHON" "$WS/src/scalenav/text_heatmap_ros2.py" \
   --prompt "$PROMPT" --input-topic /camera/color/image \
-  --output-topic /scalenav/text_heatmap --device cuda --update-rate 2 \
+  --output-topic /scalenav/text_heatmap --device "$DEVICE" --update-rate 2 \
   --pearl-root "$WS/src/global_graph/heatmap_ws/pearl_ws"
+run "$PYTHON" "$WS/src/scalenav/gcn_frontier_policy_ros2.py" \
+  --model "$GCN_MODEL" --device "$DEVICE" \
+  --mission-goal-topic /goal_pose --output-topic /scalenav/gcn_frontier_column
 run ros2 run baseline_adapters scalenav_goal_bridge --ros-args \
-  -p input_topic:=/scalenav/frontier_goal \
+  -p input_topic:=/scalenav/local_goal \
   -p output_topic:=/move_base_simple/goal \
-  -p min_interval_s:=3.0 -p min_change_m:=3.0 -p frame_id:=world_enu \
-  -p fixed_z:=1.6 -p max_z_error_m:=0.75
+  -p min_interval_s:=0.75 -p min_change_m:=0.75 -p frame_id:=world_enu \
+  -p fixed_z:=1.6 -p max_z_error_m:=0.75 \
+  -p odom_topic:=/sim/odom -p min_vehicle_distance_m:=1.0
 
-echo "started ScaleNav+EGO; mission_goal=/goal_pose frontier_goal=/scalenav/frontier_goal executor_goal=/move_base_simple/goal prompt=$PROMPT"
+echo "started ScaleNav+EGO+GCN; model=$GCN_MODEL mission_goal=/goal_pose astar_subgoal=/scalenav/local_goal executor_goal=/move_base_simple/goal prompt=$PROMPT"
 wait -n $PIDS

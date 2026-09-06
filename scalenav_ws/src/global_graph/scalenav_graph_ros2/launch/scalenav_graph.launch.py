@@ -82,6 +82,7 @@ def generate_launch_description():
         DeclareLaunchArgument("semantic_point_influence_m", default_value="8.0"),
         DeclareLaunchArgument("semantic_edge_candidate_limit", default_value="8"),
         DeclareLaunchArgument("bubble_astar_safe_distance", default_value="0.61"),
+        DeclareLaunchArgument("bubble_astar_clearance_tolerance", default_value="0.20"),
         DeclareLaunchArgument("bubble_topo/clearance_cost_weight", default_value="2.0"),
         DeclareLaunchArgument("bubble_topo/clearance_target_m", default_value="1.2"),
         DeclareLaunchArgument("previous_path_cost_factor", default_value="1.0"),
@@ -89,6 +90,10 @@ def generate_launch_description():
         DeclareLaunchArgument("route_reuse_horizon_m", default_value="10.0"),
         DeclareLaunchArgument("route_reuse_lateral_distance_m", default_value="1.5"),
         DeclareLaunchArgument("local_goal_hold_timeout_ms", default_value="400.0"),
+        DeclareLaunchArgument("stuck_replan_timeout_ms", default_value="2000.0"),
+        DeclareLaunchArgument("stuck_replan_speed_mps", default_value="0.20"),
+        DeclareLaunchArgument("stuck_replan_min_goal_distance_m", default_value="3.0"),
+        DeclareLaunchArgument("stuck_replan_cooldown_s", default_value="5.0"),
         DeclareLaunchArgument("frontier_extension_search_period_ms", default_value="1000.0"),
         DeclareLaunchArgument("goal_connect_distance_m", default_value="6.0"),
         DeclareLaunchArgument("goal_connect_timeout_ms", default_value="20.0"),
@@ -211,6 +216,8 @@ def generate_launch_description():
                     "semantic_edge_candidate_limit"),
                 "bubble_astar/safe_distance": LaunchConfiguration(
                     "bubble_astar_safe_distance"),
+                "bubble_astar/clearance_tolerance": LaunchConfiguration(
+                    "bubble_astar_clearance_tolerance"),
                 "bubble_topo/clearance_cost_weight": LaunchConfiguration(
                     "bubble_topo/clearance_cost_weight"),
                 "bubble_topo/clearance_target_m": LaunchConfiguration(
@@ -222,6 +229,11 @@ def generate_launch_description():
                     "route_reuse_lateral_distance_m"),
                 "local_goal_hold_timeout_ms": LaunchConfiguration(
                     "local_goal_hold_timeout_ms"),
+                "stuck_replan_timeout_ms": LaunchConfiguration("stuck_replan_timeout_ms"),
+                "stuck_replan_speed_mps": LaunchConfiguration("stuck_replan_speed_mps"),
+                "stuck_replan_min_goal_distance_m": LaunchConfiguration(
+                    "stuck_replan_min_goal_distance_m"),
+                "stuck_replan_cooldown_s": LaunchConfiguration("stuck_replan_cooldown_s"),
                 "frontier_extension_search_period_ms": LaunchConfiguration(
                     "frontier_extension_search_period_ms"),
                 "goal_connect_distance_m": LaunchConfiguration("goal_connect_distance_m"),

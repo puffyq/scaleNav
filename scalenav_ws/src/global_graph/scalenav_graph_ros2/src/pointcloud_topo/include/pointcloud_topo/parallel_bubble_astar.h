@@ -86,6 +86,9 @@ public:
   double inv_resolution_ = 10.0;
   double lambda_heu_ = 1.0;
   double safe_distance_ = 0.0;
+  // Hysteresis used only when revalidating an already found path. Search
+  // itself continues to use safe_distance_ without this margin.
+  double clearance_tolerance_ = 0.20;
   double tie_breaker_ = 1.0;
   int allocate_num_;
   bool debug_;

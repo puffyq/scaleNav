@@ -207,13 +207,174 @@ def write_binned_csv(path: Path, all_records):
                 })
 
 
+def profile(values, stage_latencies):
+    workload = {}
+    for metric in ("local_window", "expanded", "edge_evaluations"):
+        samples = np.asarray([value for _, value in values[metric]], dtype=float)
+        workload[metric] = {
+            "samples": len(samples),
+            "center": float(np.percentile(samples, 50)),
+            "p95": float(np.percentile(samples, 95)),
+        }
+    latency = {}
+    for stage in ("cloud", "background", "planner", "astar"):
+        samples = np.asarray(stage_latencies[stage], dtype=float)
+        latency[stage] = {
+            "samples": len(samples),
+            "center": float(np.mean(samples)),
+            "p95": float(np.percentile(samples, 95)),
+        }
+    return workload, latency
+
+
+def timeline_profile(sessions: list[Path], bins: int = 20):
+    """Aggregate per-session local working sets over normalized session time."""
+    session_values = []
+    for session in sessions:
+        planner, _ = timing_records(session)
+        samples = [
+            (stamp, float(data["local_graph_nodes"]))
+            for stamp, _, data in planner
+            if "local_graph_nodes" in data
+        ]
+        if len(samples) < 2:
+            continue
+        start, end = samples[0][0], samples[-1][0]
+        if end <= start:
+            continue
+        grouped = defaultdict(list)
+        for stamp, value in samples:
+            fraction = (stamp - start) / (end - start)
+            index = min(int(fraction * bins), bins - 1)
+            grouped[index].append(value)
+        row = np.full(bins, np.nan)
+        for index, values in grouped.items():
+            row[index] = np.median(values)
+        session_values.append(row)
+
+    if not session_values:
+        return []
+    matrix = np.vstack(session_values)
+    result = []
+    for index in range(bins):
+        values = matrix[:, index]
+        values = values[np.isfinite(values)]
+        if not len(values):
+            continue
+        result.append({
+            "time_pct": (index + 0.5) * 100.0 / bins,
+            "sessions": len(values),
+            "p50": float(np.percentile(values, 50)),
+            "p95": float(np.percentile(values, 95)),
+        })
+    return result
+
+
+def write_timeline_csv(path: Path, profiles):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["mode", "time_pct", "sessions", "p50", "p95"],
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        for label, rows in profiles:
+            for row in rows:
+                writer.writerow({"mode": label, **row})
+
+
+def draw_timeline(axis, profiles, panel):
+    colors = ("#2878A6", "#D97732")
+    maximum = 0.0
+    for color, (label, rows) in zip(colors, profiles):
+        x_values = np.asarray([row["time_pct"] for row in rows])
+        p50 = np.asarray([row["p50"] for row in rows])
+        p95 = np.asarray([row["p95"] for row in rows])
+        maximum = max(maximum, float(np.max(p95)))
+        axis.plot(x_values, p50, color=color, linewidth=1.3, label=label)
+        axis.plot(x_values, p95, color=color, linewidth=0.9,
+                  linestyle=(0, (3, 2)))
+    axis.text(0.01, 0.97, panel, transform=axis.transAxes, fontsize=10,
+              fontweight="bold", va="top")
+    axis.text(
+        0.98, 0.97, "Solid: P50; dashed: P95", transform=axis.transAxes,
+        ha="right", va="top", fontsize=6.5, color="#4A4F54",
+    )
+    axis.set_xlim(0, 100)
+    axis.set_ylim(0, maximum * 1.12)
+    axis.set_xticks([0, 25, 50, 75, 100])
+    axis.set_xlabel("Normalized session time (%)")
+    axis.set_ylabel("Local nodes")
+    axis.grid(color="#D9DEE2", linewidth=0.6)
+    axis.set_axisbelow(True)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    axis.tick_params(width=0.7, length=3)
+
+
+def write_profile_csv(path: Path, profiles):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["mode", "metric", "samples", "center", "p95", "unit"],
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        for label, workload, latency in profiles:
+            for metric, row in workload.items():
+                writer.writerow({"mode": label, "metric": metric, **row, "unit": "nodes"})
+            for metric, row in latency.items():
+                writer.writerow({"mode": label, "metric": metric, **row, "unit": "ms"})
+
+
+def draw_profile(axis, categories, profiles, metrics, panel, ylabel, center_name):
+    positions = np.arange(len(categories))
+    width = 0.34
+    colors = ("#2878A6", "#D97732")
+    for index, (label, rows) in enumerate(profiles):
+        centers = np.asarray([rows[metric]["center"] for metric in metrics])
+        p95 = np.asarray([rows[metric]["p95"] for metric in metrics])
+        offset = (index - 0.5) * width
+        axis.bar(
+            positions + offset, centers, width, color=colors[index], label=label,
+            edgecolor="white", linewidth=0.5, zorder=2,
+        )
+        axis.errorbar(
+            positions + offset, centers, yerr=np.vstack((np.zeros_like(centers), p95 - centers)),
+            fmt="none", ecolor="#31363B", elinewidth=0.8, capsize=2.5,
+            capthick=0.8, zorder=3,
+        )
+        for x_value, value in zip(positions + offset, p95):
+            axis.text(x_value, value, f"{value:.0f}", ha="center", va="bottom", fontsize=6.2)
+    axis.text(0.01, 0.97, panel, transform=axis.transAxes, fontsize=10,
+              fontweight="bold", va="top")
+    axis.set_xticks(positions, categories)
+    axis.set_ylabel(ylabel)
+    axis.set_ylim(0, max(rows[metric]["p95"] for _, rows in profiles for metric in metrics) * 1.22)
+    axis.grid(axis="y", color="#D9DEE2", linewidth=0.6)
+    axis.set_axisbelow(True)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    axis.tick_params(width=0.7, length=3)
+    axis.text(
+        0.98, 0.97, f"Bar: {center_name}; cap: P95", transform=axis.transAxes,
+        ha="right", va="top", fontsize=6.5, color="#4A4F54",
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--summary", type=Path)
+    parser.add_argument("--comparison-summary", type=Path)
+    parser.add_argument("--primary-label", default="Persistent geometry")
+    parser.add_argument("--comparison-label", default="Sliding geometry")
     parser.add_argument("--session", action="append", type=Path, default=[])
     parser.add_argument("--output", type=Path, required=True,
                         help="output path without extension")
     parser.add_argument("--output-csv", type=Path, required=True)
+    parser.add_argument("--timeline-csv", type=Path)
     parser.add_argument("--bin-width", type=int, default=50)
     parser.add_argument("--workload-bin-width", type=int, default=20)
     parser.add_argument("--minimum-bin-count", type=int, default=10)
@@ -230,6 +391,88 @@ def main():
     values, stage_latencies = collect(sessions, args.point_bytes, local_windows)
     if not values["local_window"]:
         parser.error("no local_graph_nodes records found in JSON or console logs")
+    if args.comparison_summary:
+        comparison_sessions = read_sessions(args.comparison_summary, [])
+        comparison_windows = read_local_window_records(args.comparison_summary)
+        comparison_values, comparison_latencies = collect(
+            comparison_sessions, args.point_bytes, comparison_windows
+        )
+        if not comparison_values["local_window"]:
+            parser.error("no comparison local_graph_nodes records found")
+
+        primary_workload, primary_latency = profile(values, stage_latencies)
+        comparison_workload, comparison_latency = profile(
+            comparison_values, comparison_latencies
+        )
+        profiles = [
+            (args.primary_label, primary_workload, primary_latency),
+            (args.comparison_label, comparison_workload, comparison_latency),
+        ]
+        write_profile_csv(args.output_csv, profiles)
+        timeline_profiles = [
+            (args.primary_label, timeline_profile(sessions)),
+            (args.comparison_label, timeline_profile(comparison_sessions)),
+        ]
+        if not all(rows for _, rows in timeline_profiles):
+            parser.error("no local_graph_nodes timeline records found")
+        timeline_csv = args.timeline_csv or args.output_csv.with_name(
+            f"{args.output_csv.stem}_timeline.csv"
+        )
+        write_timeline_csv(timeline_csv, timeline_profiles)
+
+        plt.rcParams.update({
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+            "font.size": 7.5,
+            "axes.labelsize": 8,
+            "xtick.labelsize": 7,
+            "ytick.labelsize": 7,
+            "legend.fontsize": 6.8,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        })
+        figure, axes = plt.subplots(
+            2, 1, figsize=(3.45, 2.75),
+            gridspec_kw={"height_ratios": [1.05, 1.0]},
+        )
+        draw_timeline(axes[0], timeline_profiles, "(a)")
+        draw_profile(
+            axes[1], ["Cloud", "Graph\nupdate", "Planner\ntick", "Active\nA*"],
+            [(args.primary_label, primary_latency),
+             (args.comparison_label, comparison_latency)],
+            ["cloud", "background", "planner", "astar"],
+            "(b)", "Time (ms)", "Mean",
+        )
+        handles, labels = axes[0].get_legend_handles_labels()
+        figure.legend(
+            handles, labels, loc="upper center", ncol=2,
+            bbox_to_anchor=(0.52, 0.995), frameon=False,
+        )
+        figure.subplots_adjust(
+            left=0.17, right=0.99, top=0.87, bottom=0.14, hspace=0.58
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(args.output.with_suffix(".pdf"), bbox_inches="tight", pad_inches=0.02)
+        figure.savefig(args.output.with_suffix(".svg"), bbox_inches="tight", pad_inches=0.02)
+        figure.savefig(args.output.with_suffix(".png"), dpi=300,
+                       bbox_inches="tight", pad_inches=0.02)
+        plt.close(figure)
+        print(
+            f"{args.primary_label}: {len(sessions)} sessions; local nodes "
+            f"P50/P95={primary_workload['local_window']['center']:.0f}/"
+            f"{primary_workload['local_window']['p95']:.0f}; active A* "
+            f"P50/P95={primary_workload['expanded']['center']:.0f}/"
+            f"{primary_workload['expanded']['p95']:.0f}"
+        )
+        print(
+            f"{args.comparison_label}: {len(comparison_sessions)} sessions; local nodes "
+            f"P50/P95={comparison_workload['local_window']['center']:.0f}/"
+            f"{comparison_workload['local_window']['p95']:.0f}; active A* "
+            f"P50/P95={comparison_workload['expanded']['center']:.0f}/"
+            f"{comparison_workload['expanded']['p95']:.0f}"
+        )
+        return
+
     records = {}
     for metric, samples in values.items():
         width = args.workload_bin_width if metric == "astar" else args.bin_width

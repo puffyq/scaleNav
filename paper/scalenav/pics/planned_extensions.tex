@@ -30,13 +30,13 @@
   planned/.style={font=\sffamily\bfseries\fontsize{5.3}{6}\selectfont,text=white,fill=purple,rounded corners=.8mm,inner xsep=2mm,inner ysep=.8mm}
 ]
 \fill[canvas] (-2,-5) rectangle (178,74);
-\node[title] at (88,68) {Planned Extensions with Invariant Safety Boundaries};
-\node[subtitle] at (88,63) {Widen route memory and semantic reasoning without changing geometric collision validity};
+\node[title] at (88,68) {Narrow Planner Interface and Replaceable Semantics};
+\node[subtitle] at (88,63) {Keep topology and semantic reasoning upstream of goal-conditioned local planners};
 
-% Corridor extension
+% Current moving-goal interface
 \filldraw[panel,fill=orangebg,draw=orange] (0,8) rectangle (85,58);
-\node[group,anchor=west] at (4,54) {A. Corridor-conditioned YOPO};
-\node[planned,anchor=east] at (81,54) {PLANNED};
+\node[group,anchor=west] at (4,54) {A. Moving-goal planner interface};
+\node[planned,anchor=east] at (81,54) {CURRENT};
 
 \filldraw[box,fill=white,draw=orange!60] (4,35) rectangle (23,48);
 \node[nodetitle] at (13.5,44) {Witness route};
@@ -44,25 +44,25 @@
 \foreach \x/\y/\r in {7/38/2.5,11/42/3.4,16/39/3.1,21/45/2.6}{\draw[orange!55,fill=orange!10] (\x,\y) circle (\r mm);}
 
 \filldraw[box,fill=white,draw=orange!60] (31,35) rectangle (53,48);
-\node[nodetitle] at (42,44.5) {Ray--sphere render};
-\draw[grayedge,line width=.55pt] (34,38)--(50,45) (34,38)--(50,40) (34,38)--(50,36.5);
-\fill[orange!35,opacity=.75] (41,39.8)--(49,43.2)--(49,38.2)--cycle;
+\node[nodetitle] at (42,44.5) {Arc-length lookahead};
+\draw[orange,line width=1.2pt] (34,38)--(38,42)--(43,39)--(50,45);
+\fill[orange] (47.8,42.8) circle (1.2mm);
 
 \filldraw[box,fill=blue!7,draw=blue!60] (61,35) rectangle (81,48);
-\node[nodetitle] at (71,44.5) {Depth + corridor};
-\node[note] at (71,39.5) {$[D_t,M_t]$};
+\node[nodetitle] at (71,44.5) {Moving local goal};
+\node[note] at (71,39.5) {PoseStamped};
 \draw[arrow,draw=orange] (23,41.5)--(31,41.5);
 \draw[arrow,draw=orange] (53,41.5)--(61,41.5);
 
 \filldraw[box,fill=green!8,draw=green!60] (9,17) rectangle (34,29);
-\node[nodetitle] at (21.5,25.5) {Same YOPO backbone};
-\node[note] at (21.5,21) {route width + shape};
+\node[nodetitle] at (21.5,25.5) {Goal-conditioned planner};
+\node[note] at (21.5,21) {YOPO / EGO / SUPER};
 \filldraw[box,fill=white,draw=green!60] (49,17) rectangle (76,29);
 \node[nodetitle] at (62.5,25.5) {Depth remains authoritative};
-\node[note] at (62.5,21) {unexpected obstacles override};
+\node[note] at (62.5,21) {short-horizon execution};
 \draw[arrow,draw=blue] (71,35)--(71,29);
 \draw[arrow,draw=green] (49,23)--(34,23);
-\node[note,text=orange] at (42.5,12) {memory bandwidth: goal $\rightarrow$ waypoint $\rightarrow$ spatial corridor};
+\node[note,text=orange] at (42.5,12) {executor boundary: one world-frame moving goal};
 
 % Qwen extension
 \filldraw[panel,fill=greenbg,draw=green] (91,8) rectangle (176,58);

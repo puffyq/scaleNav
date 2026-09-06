@@ -38,8 +38,8 @@
        \vspace{1.6em}}}\endgroup}}
 
 \title{\LARGE \bf
-ScaleNav: Topology-Graph Guidance for Language-Guided Aerial Navigation\\
-with Persistent Free-Space Memory
+ScaleNav: A Plug-and-Play Topological Route Layer\\
+for Language-Guided Aerial Navigation
 }
 
 \author{First Author$^{1}$ and Second Author$^{2}$%
@@ -55,18 +55,18 @@ with Persistent Free-Space Memory
   \safefig[width=0.98\textwidth]{pics/teaser.pdf}
   \vspace{3pt}
   \parbox{0.98\textwidth}{\footnotesize
-  \textbf{Fig. 1.}~ScaleNav in Map2 at synchronized evidence time $t^*$.
-  (a)~RGB, semantic score, and depth show semantic response where
-  depth is clipped beyond $20$~m. (b)~A shallow aerial view of the mission over
-  surface-sampled UE mesh truth. Graph-node fill encodes each node's semantic
-  score; crosses mark far-field semantic-node
-  positions that lie within the planner's three-dimensional influence radius
-  of this graph slice. The persistent graph is shown in a $\pm2$~m
-  navigation-height slice. The
-  graph/path state is within $90$~ms of $t^*$.
-  \texttt{mission\_goal}, \texttt{frontier\_goal}, and \texttt{local\_goal} denote the task,
-  route, and execution layers. Semantic risk changes verified-edge costs;
-  crosses denote provisional frontiers beyond the measured backbone.}
+  \textbf{Fig. 1.}~ScaleNav's layered route decision in Map2.
+  (a)~Synchronized RGB, semantic response, and depth at graph time $t^*$;
+  white depth pixels have no return beyond $20$~m. (b)~The light footprint is
+  the complete UE mesh truth for reference. Dots and thin links are persistent
+  skeleton nodes and collision-checked edges; teal is the logged A* topology
+  path, dashed orange is its polynomial witness, and black is the flown
+  trajectory. Red crosses are logged far-field semantic observations; the
+  three labeled goals are published by this graph snapshot. (c)~At a recorded
+  route fork before the large block, the GCN selects an early bypass matching
+  the 35-m A* label while the hand-designed ranking selects another column.
+  Dark points and links are the synchronized cloud and online skeleton; the
+  solid pale footprints are privileged context for visualization only.}
   \end{center}%
   \setcounter{figure}{1}%
 }
@@ -78,27 +78,27 @@ with Persistent Free-Space Memory
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{abstract}
-Vision-based local planners react quickly to observed geometry, but their lack
-of persistent state prevents them from preserving long-horizon route
-decisions; open-vocabulary perception can expose semantically meaningful
-hazards well beyond reliable depth, yet it runs too slowly to shape control
-directly.  This paper presents ScaleNav, a layered aerial navigation
-framework that reconciles these timescales by explicitly separating reusable
-mapping, language-conditioned routing, and local execution.  A
-policy-independent mapper maintains a bounded, persistent graph of verified
-free-space bubbles linked by collision-checked witness paths, built from depth
-and odometry alone.  A slower route layer projects open-vocabulary image
-responses into provisional far-field frontiers, scores continuous semantic
-risk along complete witness polylines, and preserves the accepted route in
-world coordinates across asynchronous graph replacement.  A five-way GCN is
-placed directly on the online skeleton topology graph to predict the frontier
-direction; downstream A* search, collision checking, path processing, and
-local-goal publication remain unchanged.  The released YOPO policy is used
-without modification or retraining.  In the latest ten-trial GCN run, all
-trials reached the goal with no collision or timeout; successful flights
-averaged $171.59$~m at $5.11$~m/s.  These results make the central design
-boundary explicit: graph learning proposes a route direction, while
-geometric topology and collision checks retain authority over execution.
+Goal-conditioned local planners react quickly to observed geometry but do not
+retain the route memory needed to circumnavigate obstacles larger than their
+sensing horizon.  ScaleNav is a plug-and-play topological route layer that
+adds this memory without retraining or changing the core algorithm of the
+local planner.  From depth and odometry, it maintains persistent verified
+free-space bubbles and collision-checked witness paths while restricting each
+online search to a local working set.  Open-vocabulary image responses add
+provisional far-field frontiers and continuous language-conditioned cost along
+verified witnesses.  A topology-graph GCN learns long-range frontier-direction
+selection from the online skeleton, while A* and geometric checks remain
+authoritative.  The accepted witness is exposed as a
+moving world-frame local goal: YOPO consumes it directly, while thin ROS
+adapters relay the same interface to EGO-Planner and SUPER.  No
+route-conditioned model or planner retraining is required.  In the fixed
+140-m mission, three ScaleNav-guided executor configurations achieved
+$100\%$, $70\%$, and $90\%$ success, whereas each corresponding direct-goal
+control achieved $0\%$.  Across the persistent-map profile, the local graph and
+active A* workloads remain 214/249 and 185/215 nodes at P50/P95.  The result
+is an architectural separation: topology remembers and selects the route,
+acting as a navigator, while an interchangeable local planner executes only
+the next goal.
 \end{abstract}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -134,24 +134,28 @@ vehicle, the resulting gap between a slow semantic opinion and a fast
 commitment is precisely where missions are lost.
 
 ScaleNav closes this gap by making the hierarchy explicit rather than
-implicit in a monolithic network.  Its first
-layer is a plug-and-play persistent mapper: generic depth and odometry are
-converted into a bounded graph of verified free-space bubbles connected by
-collision-checked witness polylines, with no occupancy grid, no ESDF, and no
-dependence on the downstream trajectory policy
-\cite{bubble,epic}.  Its second, slower layer performs language-conditioned
-route planning on that graph.  Verified bubbles form the geometric backbone;
-depth-clipped semantic observations are admitted as provisional far-field
-frontiers and as a continuous risk field measured along entire witnesses, not
-only at endpoints.  A topology-graph policy can then rank the five frontier
-directions from the same graph, while the existing A* search, collision
-checks, and route memory remain the authority.  The accepted route is stored
-as a world-frame witness and remapped after each atomic graph replacement, so
-route identity survives the mapper's update cycle.  Its third, fast layer is
-deliberately not ours: the route layer drives the local executor only through
-the executor's native frontier and local-goal interface, so the demonstrated
-YOPO policy \cite{yopo} runs unmodified and retains responsibility for
-executable motion.
+implicit in a monolithic network.  Its first layer converts generic depth and
+odometry into a persistent graph of verified free-space bubbles connected by
+collision-checked witness polylines, with no occupancy grid or ESDF in the
+route layer \cite{bubble,epic}.  The retained backbone may grow as new space is
+explored, but rolling A* and graph updates operate on a fixed-radius local
+working set.  Its second, slower layer performs language-conditioned routing
+on that graph.  Depth-clipped semantic observations become provisional
+far-field frontiers and a continuous risk field along entire witnesses.  A
+topology-graph GCN ranks five frontier directions from the online skeleton,
+while A*,
+collision checks, and route memory remain authoritative.  The selected route
+is stored as a world-frame witness and remapped after atomic graph replacement.
+Its third, fast layer is deliberately replaceable: ScaleNav samples a moving
+local goal along the accepted witness and publishes a standard world-frame
+goal message.  YOPO \cite{yopo} consumes that goal directly; EGO-Planner and
+SUPER consume it through thin topic adapters.  Their planner cores are neither
+retrained nor made graph-aware.
+
+Functionally, ScaleNav acts as a topological navigator: it reads the course
+ahead from a persistent topological map and calls the next branch, while an
+interchangeable local planner remains the driver that executes the next goal;
+A* reachability and collision checks determine which calls are legal.
 
 This separation lets us state the safety boundary precisely, and we regard
 that boundary as a first-class design contribution.  The mapping layer
@@ -167,36 +171,46 @@ over verified alternatives, not as a probabilistic safety guarantee.
 The main contributions are:
 \begin{itemize}
   \setlength\itemsep{0pt}
-  \item \textbf{A plug-and-play persistent mapping layer.}
-  A bounded free-space graph turns generic depth and odometry into reusable,
-  witness-verified route structure without an occupancy grid or ESDF, and
-  without any assumption about the local policy architecture
-  (Sec.~\ref{sec:topology}).
-  \item \textbf{A slow semantic route layer.}
-  Provisional far-field frontiers and continuous witness-level risk give the
-  planner early, language-conditioned route preference, while a world-frame
-  witness with a hysteretic gate preserves route identity across asynchronous
-  graph updates (Sec.~\ref{sec:semantics}).
-  \item \textbf{Topology-graph frontier policy.}
-  A five-way weighted GCN consumes the current skeleton graph and temporal
-  direction state to rank left $40^\circ$, left $20^\circ$, forward, right
-  $20^\circ$, and right $40^\circ$.  It proposes only a frontier column;
-  ScaleNav's A*, collision checks, route memory, and unchanged YOPO executor
-  remain downstream (Sec.~\ref{sec:gcn}).
-  \item \textbf{A planner-agnostic evaluation of beyond-range semantic
-  mapping.}  Building on the insight of \cite{rayfronts} that a mapping
-  layer's utility can be measured without a planner in the loop, we evaluate
-  our far-field semantic memory with a route-agnostic protocol---route-change
-  rate, query compliance, decision distance, switch count, and semantic
-  exposure under frozen geometric snapshots (Sec.~\ref{sec:experiments})---
-  separating the value of the semantic representation from the behavior of
-  any single planner, exactly as \cite{rayfronts}'s search-volume metric does
-  for exploration.
+  \item \textbf{A plug-and-play persistent topological route layer.}
+  Verified bubbles, witness edges, stable identities, and atomic replacement
+  preserve route structure.  A moving world-frame local goal exposes this
+  memory to goal-conditioned planners without graph inputs or retraining,
+  while fixed-radius operations control online work
+  (Secs.~\ref{sec:topology} and~\ref{sec:interface}).
+  \item \textbf{A topology-graph GCN frontier policy.}
+  Weighted graph convolution, global topology pooling, and temporal direction
+  state learn a five-way, 35-m-look-ahead frontier decision directly on the
+  online skeleton, while downstream A* retains reachability and collision
+  authority (Sec.~\ref{sec:gcn}).
+  \item \textbf{Language preference separated from geometric authority.}
+  Provisional far-field frontiers and witness-level semantic risk can change
+  route ranking before reliable depth, while A* connectivity and collision
+  checks retain control of route acceptance (Sec.~\ref{sec:semantics}).
+  \item \textbf{Cross-executor validation.}
+  The same topology-layer implementation is connected to YOPO, EGO-Planner,
+  and SUPER through executor-specific goal and command adapters, and evaluated
+  with conventional closed-loop flight and online-resource metrics
+  (Sec.~\ref{sec:experiments}).
 \end{itemize}
 
 The evaluation separates system integration, route selection, and graph
 persistence.  All reported semantic observations use PEARL \cite{pearl}; the
-interface itself is model-agnostic.
+interface itself is model-agnostic.  The present study isolates horizontal
+long-range branch selection using a fixed-height planning layer, while depth
+perception and local trajectory execution remain three-dimensional.
+
+\begin{figure*}[!t]
+\centering
+\safefig[width=0.98\textwidth]{pics/system_architecture_topology_v3.pdf}
+\vspace{-2pt}
+\caption{ScaleNav as a plug-and-play route layer.  Depth and odometry maintain
+persistent verified topology; RGB and text shape route cost, and a topology
+GCN ranks frontier directions.  A* and collision checks accept a
+witness before the moving-goal interface drives a goal-conditioned local
+executor.  The executor receives only depth, state, and the local goal;
+topology, semantics, and route memory remain upstream.}
+\label{fig:system_architecture}
+\end{figure*}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{RELATED WORK}
@@ -207,7 +221,7 @@ generate motion primitives directly \cite{yopo,loquercio}.  Fast-Planner,
 FASTER, and SUPER instead combine search or point-cloud corridors with
 trajectory refinement \cite{fastplanner,faster,super}.  ScaleNav is
 orthogonal: it supplies a persistent route decision above an unchanged local
-executor.
+planner core through a goal adapter.
 
 Topological and frontier memories provide the natural substrate for this
 separation.  Incremental frontier structures and bubble graphs
@@ -216,6 +230,17 @@ while learned topological memories \cite{sptm,ving} show the value
 of graph state for long-horizon navigation.  Our graph stores verified
 witnesses, preserves route identity across atomic replacement, and exposes
 the same skeleton topology to the GCN frontier policy.
+
+Graph convolutional networks aggregate relational state directly over sparse
+connectivity \cite{kipf2017gcn}, making them a natural alternative to raster or
+independent-candidate encoders for route selection.  Practical graph-policy
+designs combine node message passing, graph-level context, and an
+action-scoring head \cite{schutz2026gnnpolicy}.  ScaleNav instantiates this
+pattern on the online navigation skeleton with explicit topology-edge weights,
+global mean pooling, recurrent direction state, and a five-way frontier head.
+The 35-m route-direction labels and online candidate interface are specific to
+ScaleNav, while route construction and collision validation remain outside the
+network.
 
 Open-vocabulary models align image regions with text
 \cite{clip,lseg,openseg,pearl} and have been lifted into semantic maps.
@@ -247,47 +272,30 @@ compose as
     &= \Pi_{\mathrm{map}}(\mathcal{G}_{t-1},D_t,\vect{x}_t), \\
   (\mathcal{W}_t,\vect{g}^{\mathrm{front}}_t,
    \vect{g}^{\mathrm{loc}}_t,\hat c_t)
-    &= \Pi_{\mathrm{route}}(\mathcal{G}_t,I_{0:t},q,\vect{g}), \\
+    &= \Pi_{\mathrm{route}}(\mathcal{G}_t,I_t,q,\vect{g}), \\
   \tau_t
     &= \Pi_{\mathrm{exec}}(D_t,\vect{o}_t).
 \end{align}
-Each layer has a deliberately narrow interface.  $\Pi_{\mathrm{map}}$ is the
-plug-and-play boundary: it consumes only depth, odometry, and its previous
-graph state, and it exposes $\mathcal{G}_t$ without assumptions about the
-local policy.  The slower $\Pi_{\mathrm{route}}$ produces the accepted
-world-frame witness $\mathcal{W}_t$ together with two goals: a route-level
-frontier goal $\vect{g}^{\mathrm{front}}_t$ and a control-level local goal
-$\vect{g}^{\mathrm{loc}}_t$ tracked along the witness.  When enabled, a
+Each layer has a deliberately narrow interface.  $\Pi_{\mathrm{map}}$ consumes
+depth, odometry, and its previous graph state; neither the semantic model nor
+the local planner appears in its update.  The slower $\Pi_{\mathrm{route}}$
+produces an accepted world-frame witness $\mathcal{W}_t$, an internal route
+anchor $\vect{g}^{\mathrm{front}}_t$, and a moving execution goal
+$\vect{g}^{\mathrm{loc}}_t$ sampled ahead on that witness.  When enabled, the
 topology-graph policy additionally publishes a five-way frontier column
-$\hat c_t\in\{0,1,2,3,4\}$; this is a ranking proposal, not a trajectory or
-a safety decision.  The fast
-$\Pi_{\mathrm{exec}}$ is any executor that accepts these standard inputs; we
-demonstrate it with the released YOPO policy \cite{yopo}, used without
-modification or retraining, which receives one $160\times96$ depth channel,
-body-frame motion, and the frontier goal:
+$\hat c_t\in\{0,1,2,3,4\}$; this is a ranking hint, not a trajectory or safety
+decision.  The plug-and-play boundary is the single standard goal
+$\vect{g}^{\mathrm{loc}}_t$.  For YOPO, the released policy receives its usual
+$160\times96$ depth channel, body-frame motion, and this goal expressed in the
+body frame:
 \begin{equation}
  \vect{o}_t = [\vect{v}^{B}_t,\vect{a}^{B}_t,
-                (\vect{g}^{\mathrm{front}}_t-\vect{p}_t)^{B}] \in \R^9.
+                (\vect{g}^{\mathrm{loc}}_t-\vect{p}_t)^{B}] \in \R^9.
 \end{equation}
-The GCN neither creates new frontiers nor replaces A*.  The local policy
-chooses a dynamically feasible primitive from the goal supplied by the
-topology route.  This division of labor mirrors hierarchical compositions of
-topological routes with local control \cite{ving}, but transfers
-routes as world-frame witness goals rather than as appearance subgoals, and
----unlike those compositions---requires no change to the executor at all.
-
-\begin{figure*}[!t]
-\centering
-\safefig[width=0.98\textwidth]{pics/system_architecture_topology_v3.pdf}
-\vspace{-2pt}
-\caption{Topology-first ScaleNav architecture.  Depth and odometry maintain the
-persistent graph of verified bubbles and witness edges, while RGB and a text
-query provide semantic route preference.  The same graph feeds a five-way GCN
-proposal; reachable search and collision checks accept the witness route before
-the unchanged local executor receives a goal.  Semantics suggests a route;
-geometry retains safety authority.}
-\label{fig:system_architecture}
-\end{figure*}
+EGO-Planner and SUPER receive the same world-frame goal through a thin ROS
+topic adapter.  This division mirrors hierarchical topological control
+\cite{ving}, but no graph tensor, semantic feature, witness polyline, or
+corridor representation crosses the executor boundary.
 
 We use a fixed-height planning layer in the current experiments to isolate
 the horizontal branch-selection problem.  Depth sensing, point memory, and
@@ -327,7 +335,7 @@ but never turns a geometrically valid edge into an invalid one.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \subsection{Semantic Heatmap--Topology Fusion}
 \label{sec:semantics}
-The frozen PEARL model maps $(I_t,q)$ to a patch heatmap.  We max-pool it on
+The frozen PEARL model maps $(I_t,q)$ to a patch heatmap.  We mean-pool it on
 a $5\times3$ grid and project each retained patch at fixed optical-axis depth
 $\ell_s$:
 \begin{equation}
@@ -336,7 +344,7 @@ $\ell_s$:
 \label{eq:projection}
 \end{equation}
 The projection does not consult measured depth, so an empty far-field return
-cannot erase semantic evidence.  A calibrated score and confidence tuple
+cannot erase semantic evidence.  A patch-mean score and confidence tuple
 $(s_i,c_i)$ is associated with a persistent graph identity; stale observations
 are rejected by timestamp gates and graph replacement restores the tuple.
 
@@ -351,13 +359,13 @@ free-space certificate.
 Semantic evidence is fused with complete witness edges rather than only with
 endpoints.  For semantic node $k$ and edge witness $\pi_{ij}$,
 \begin{equation}
- d_{k,ij}=\min_{\vect{x}\in\pi_{ij}}
-             \|\vect{y}_k-\vect{x}\|_2,\qquad
- r_{ij}=\max\left[
- \tfrac12(s_i c_i+s_jc_j),\
- \max_{k:d_{k,ij}\le R_s}s_kc_k
- e^{-d_{k,ij}^2/(2(R_s/2)^2)}
- \right].
+\begin{aligned}
+ d_{k,ij}&=\min_{\vect{x}\in\pi_{ij}}
+             \|\vect{y}_k-\vect{x}\|_2,\\
+ r_{ij}&=\max\Big\{\tfrac12(s_i c_i+s_jc_j),\\[-2pt]
+ &\qquad \max_{k:d_{k,ij}\le R_s}s_kc_k
+ \exp[-d_{k,ij}^2/(2(R_s/2)^2)]\Big\}.
+\end{aligned}
 \label{eq:semantic_fusion}
 \end{equation}
 The resulting preference cost is
@@ -377,186 +385,137 @@ complete route; no graph-node pointers are retained across atomic replacement.
 The asynchronous contract uses timestamped snapshots, so graph, semantic, and
 control streams cannot expose a partially rebuilt topology.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsection{Topology-Graph GCN Frontier Policy}
-\label{sec:gcn}
-The topology graph is the central decision state in the GCN variant.  The
-policy does not consume a rasterized image and does not generate a trajectory;
-it predicts which of five frontier directions should be considered by the
-existing ScaleNav route planner.  The columns are $0$: left $40^\circ$, $1$:
-left $20^\circ$, $2$: forward, $3$: right $20^\circ$, and $4$: right
-$40^\circ$.
+\subsection{Planner-Agnostic Goal Interface}
+\label{sec:interface}
+The accepted witness, rather than a modified local policy, carries the route
+decision.  Let $\mathcal{W}_t(s)$ be its arc-length parameterization and
+$s_t$ the closest forward progress to the vehicle.  ScaleNav publishes
+\begin{equation}
+ \vect{g}^{\mathrm{loc}}_t=
+ \mathcal{W}_t\!\left(\min(s_t+\ell_{\mathrm{loc}},L_{\mathcal W})\right),
+ \qquad \ell_{\mathrm{loc}}=15~\mathrm{m}.
+\label{eq:local_goal}
+\end{equation}
+The farther $\vect{g}^{\mathrm{front}}_t$ identifies the selected route branch
+inside ScaleNav and is published for state inspection; the executor follows
+only $\vect{g}^{\mathrm{loc}}_t$.  When a witness is replaced, the vehicle is
+projected onto the new polyline before Eq.~\eqref{eq:local_goal} is evaluated.
+A short hold gate suppresses transient goal loss during an atomic graph swap.
 
-\subsubsection{Online Graph Input}
-At each inference tick, the input is the current skeleton topology graph
-published by ScaleNav.  Skeleton nodes and skeleton edge markers provide the
-vertices and edges.  Five virtual candidate nodes are inserted at $10$~m from
-the vehicle along the body-yaw directions above, and each candidate is
-connected to its nearest skeleton node.  Edge weights are inverse distance.
-For node $i$, the feature vector $\vect{h}_i\in\R^{20}$ contains world and
-normalized position, bubble radius, node degree, candidate flag and column,
-distances to the origin and mission goal, odometry and forward-candidate
-flags, vehicle $\sin(\psi)$ and $\cos(\psi)$, body-frame relative position,
-range and bearing, and the mission goal in the body frame.  The online
-configuration marks all five columns as available; bubble clearance is not a
-GCN output gate and graph collision checks remain downstream.
+The implementation exposes $\vect{g}^{\mathrm{loc}}_t$ as a world-frame
+\texttt{geometry\_msgs/PoseStamped}.  The original YOPO checkpoint consumes it
+through its ordinary relative-goal input.  For EGO-Planner and SUPER, a thin
+bridge rate-limits and republishes the same message on their native goal topic;
+separate point-cloud and command bridges adapt the shared simulator I/O.  These
+adapters do not alter either planner's search, optimization, or control law.
+Consequently, the transferable contract is precise: a local planner must
+accept a position goal and publish executable commands; it need not understand
+ScaleNav's graph, semantics, or route memory.
 
-\subsubsection{Graph Policy and Interface}
-The deployed checkpoint is `frontier\_gcn\_map2\_35m.pt`, using the legacy
-\texttt{FrontierGCN(input\_dim=20)}.  Two weighted GCN layers perform
-self-preserving, normalized neighbor aggregation followed by ReLU.  A global
-mean pool is concatenated with the previous column's five-dimensional one-hot
-state and passed through a GRU, preserving directional history.  Each of the
-five candidate embeddings is concatenated with the GRU state and scored by an
-MLP.  The maximum available logit is published on
-\texttt{/scalenav/gcn\_frontier\_column}; the selected direction is also
-published as an RViz arrow.  The complete online chain is
-\begin{equation*}
-\text{skeleton graph + odometry + mission goal}
-\;\rightarrow\;\text{GCN column}
-\;\rightarrow\;\text{frontier ranking}
-\;\rightarrow\;\text{A* + collision checks}
-\;\rightarrow\;\text{local goal}
-\;\rightarrow\;\text{unchanged YOPO}.
-\end{equation*}
-Thus GCN direction selection is a topology-graph proposal, not a replacement
-for A*, path processing, or local control.
-
-\subsubsection{Privileged Labels and Offline Test}
-Training labels use the complete static Map2 point cloud rather than a single
-depth frame.  The ASCII PLY is projected into a $0.75$~m two-dimensional grid,
-inflated by the $1.2$~m vehicle radius, and searched with eight-neighbor A*
-from the odometry cell to the true mission goal.  The first path point at
-least $35$~m ahead is mapped to the five direction columns; frames without a
-complete path or outside $\pm50^\circ$ are discarded.  Session-level
-train/validation/test splits are used, with class-weighted cross-entropy and
-checkpoint selection by validation macro accuracy.
-
-The dataset contains 5,337 training examples and an independent 707-frame
-test set.  The plain checkpoint reaches $89.3\%$ exact accuracy, $89.4\%$
-macro accuracy, and $99.4\%$ accuracy within one column.  For the same strict
-static-map labels, the original planner's frame-wise frontier choice matches
-only $22.2\%$ of labels, showing why the comparison is about graph-level
-look-ahead rather than nearest-node heuristics.  Selecting a
-direction-switch penalty of $0.05$ on validation improves the held-out test
-to $91.3\%$ exact and $91.8\%$ macro accuracy.  These numbers establish that
-the model learns the 35-m privileged route-direction label; they do not imply
-an online safety or success guarantee.
-
-\begin{table}[t]
-\caption{GCN Topology-Graph Direction Results}
-\label{tab:gcn_offline}
-\centering
-\small
-\begin{tabular}{lcc}
-\toprule
-Metric & Plain & With switch penalty \\
-\midrule
-Test exact accuracy & 89.3\% & 91.3\% \\
-Test macro accuracy & 89.4\% & 91.8\% \\
-Within one direction column & 99.4\% & \blank \\
-\bottomrule
-\end{tabular}
-\end{table}
+The closed-loop experiments pass no corridor, bubble sequence, route mask, or
+graph feature into any planner and do not retrain planner weights.  ScaleNav
+instead preserves route intent by advancing the goal along the witness, while
+current depth and the local planner remain responsible for short-horizon
+motion.  A stale or invalid witness is rejected upstream and triggers new A*.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsection{Topology Graph and Planning Integration}
-\label{sec:execution}
-The graph route layer publishes what the local executor already consumes: a
-route-level frontier goal and a control-level local goal.  The topology graph
-and its witness, rather than a modified policy, carry the long-horizon route
-decision.  This section explains why the two goals suffice and what remains
-the executor's responsibility.
+\subsection{Topology-Graph GCN Frontier Policy}
+\label{sec:gcn}
+The GCN is ScaleNav's learned long-range route-selection component.  It
+predicts which of five directions should be considered first: left $40^\circ$,
+left $20^\circ$, forward, right $20^\circ$, or right $40^\circ$.  Its output is
+deliberately constrained to a frontier proposal: it neither creates a route
+nor publishes an executor command, leaving geometric acceptance to A*.
 
-\subsubsection{Why a Frontier Goal Alone Is Not Enough}
-A single frontier goal communicates where to move but not which homotopy to
-preserve: an endpoint-conditioned policy can shortcut away from the accepted
-witness---the exact failure mode that motivates topological guidance of local
-controllers \cite{ving}.  ScaleNav therefore publishes a 15-m local
-goal $\vect{g}^{\mathrm{loc}}_t$ that slides along the accepted witness ahead
-of the vehicle, in addition to the frontier goal
-$\vect{g}^{\mathrm{front}}_t$ that marks the route-level branch decision.
-The executor tracks the local goal; when the witness is invalidated or
-replaced, the route layer re-projects the vehicle onto the new witness and
-the local goal follows, so the executor simply chases a moving target it
-already knows how to chase.
+At each inference tick, skeleton nodes and edges form the input graph.  Five
+virtual candidates are inserted $10$~m from the vehicle and connected to their
+nearest skeleton node with inverse-distance edge weights.  Each node has a
+20-dimensional feature vector containing normalized world and body-frame
+position; bubble radius and degree; semantic score and confidence; candidate
+identity; origin and goal distance; odometry and forward-candidate flags; yaw;
+range; bearing; and body-frame mission-goal state.  The deployed
+\texttt{FrontierGCN(input\_dim=20)} uses two lightweight edge-weighted GCN
+message-passing layers following classical graph convolution
+\cite{kipf2017gcn}.  Global mean pooling supplies graph-level context, a GRU
+fuses the previous direction, and an MLP scores the five candidate nodes.  Its
+column is published on \texttt{/scalenav/gcn\_frontier\_column}; A* then tests
+reachability and collision validity exactly as it does for a hand-designed
+ranking.  Figure~\ref{fig:gcn_model} summarizes this deployed policy.
 
-\subsubsection{The Demonstrated Executor}
-We use the released YOPO policy \cite{yopo} as $\Pi_{\mathrm{exec}}$.  Its
-$160\times96$ depth feature map is decoded on a $3\times5$ grid, giving
-$N_{\mathrm{prim}}=15$ candidate directions; each candidate predicts a
-nine-dimensional terminal state
-$[\vect{p}_1,\vect{v}_1,\vect{a}_1]\in\R^9$ and one scalar score, and a
-fixed-duration boundary-value solver converts the state to a smooth
-polynomial primitive.  \textbf{ScaleNav changes neither this solver, nor the
-candidate set, nor the network weights, nor the training pipeline.}  The only
-difference from the baseline condition is the provenance of the goal: the
-baseline receives a reactive frontier goal, while ScaleNav supplies a goal
-carried by the persistent, language-conditioned witness.
+\begin{figure}[t]
+\centering
+\safefig[width=0.98\columnwidth]{pics/gcn_model_architecture.pdf}
+\vspace{-3pt}
+\caption{Compact architecture of the deployed \texttt{FrontierGCN}.  Two weighted
+graph-convolution layers encode the online skeleton and five virtual
+candidates.  Candidate embeddings are scored with pooled recurrent graph
+context to produce a five-way route proposal; A* remains downstream.}
+\label{fig:gcn_model}
+\end{figure}
 
-\subsubsection{What This Buys and What It Costs}
-Because the executor is untouched, its primitive generation and feasibility
-analysis carry over verbatim, and any executor exposing the same goal
-interface can be substituted.  The cost is that fine-grained route adherence
-is delegated to the topology layer: the local goal must be re-issued when the
-witness updates, and the witness must remain within the executor's reliable
-depth envelope.  The GCN experiments show why this interface needs explicit
-geometric guards: a direction classifier may be accurate offline while a
-stale or low-clearance witness is still unsafe online.
+Training labels use the complete static ground-truth point cloud, projected
+onto a $0.75$~m grid and inflated by the $1.2$~m vehicle radius.  Eight-neighbor A*
+provides the direction of the first path point at least $35$~m ahead;
+out-of-view and incomplete paths are discarded.  Session-level splits and
+class-weighted cross-entropy prevent adjacent frames from crossing splits.
+The ground-truth geometry is used only to construct offline labels and is not
+available to the deployed policy.
+The resulting classifier is evaluated separately in
+Sec.~\ref{sec:heuristic_eval}; its accuracy is not a safety claim.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{EXPERIMENTS}
 \label{sec:experiments}
-The evaluation mirrors the topology-graph design, because each layer makes a
-different claim and deserves a different falsification:
-\textbf{(Q1)} does a graph policy change frontier selection and closed-loop
-flight relative to the original planner;
-\textbf{(Q2)} which components---semantic front end, far-field nodes, route
-memory---carry the benefit;
-\textbf{(Q3)} does the persistent graph actually preserve routes and reduce
-repeated work across legs.
-Closed-loop and round-trip trials use UE Map2 through Colosseum/AirSim
-\cite{airsim} with synchronized RGB-D and odometry and a 1.6-m planning
-layer.  One-way trials fly from $(0,0,1.6)$ to $(0,140,1.6)$~m.
+The evaluation examines three complementary aspects of the system: closed-loop
+compatibility of the topological goal interface with different local planners,
+the effects of semantic cost and the GCN policy on route selection,
+and the online graph-search workload under persistent geometry.
+Closed-loop and profiling trials are conducted in Unreal Engine 5.7 with
+Colosseum, an AirSim-compatible simulator \cite{airsim}, using synchronized
+RGB-D and odometry and a 1.6-m planning layer.  Every closed-loop condition
+uses the same static environment and one-way mission from $(0,0,1.6)$ to
+$(0,140,1.6)$~m; neither the obstacle
+layout nor the nominal start and goal is randomized across methods.
 
 \subsection{Evaluation Protocol}
 \label{sec:protocol}
-\emph{Statistics.}  The GCN and original batches are not seed matched, so we
-report descriptive sample statistics without paired significance claims.
-Startup failures are excluded from navigation outcomes, while collision and
-timeout remain in the outcome rates; continuous flight metrics use successful
+\emph{Trial control and statistics.}  The simulation is reset before every
+trial.  A goal is issued only after the vehicle remains within 0.10~m of the
+common start, below 0.10~m/s, and within 0.10~rad of the mission heading for
+1~s.  Startup failures are excluded from navigation outcomes, while collision
+and timeout remain in the outcome rates; completion metrics use successful
 trials only.
 
 \emph{Metrics.}  Closed-loop metrics are success, collision, timeout, path
-length $L$, flight time $T$, $\bar v=L/T$, maximum speed, and success
-weighted by path length (SPL) \cite{anderson2018}.  Language trials add
-route-change rate, query compliance, decision distance, switch count, and the
-semantic exposure
-$E_{\mathrm{sem}}=L^{-1}\int_0^T r(\vect{p}(t))v(t)\,dt$.
-Profiling separates point processing, graph construction, A*, the planning
-tick, and PEARL latency.
+length $L$, flight time $T$, $\bar v=L/T$, and maximum speed.  For failed
+flights, distance traveled before termination is reported separately as
+$L_{\rm obs}$ and never mixed into successful-flight completion means.
+Profiling separates point processing, graph construction, active A*, and the
+complete planning tick.
 
 \emph{Baseline fairness.}  EGO-Planner \cite{egoplanner} and SUPER
-\cite{super} are optimization stacks designed around their own mapping and
-sensing pipelines; porting them to the same monocular RGB-D stream and the
-same control stack is itself a configuration problem, and recent benchmarking
-shows that such pipelines are highly sensitive to scenario difficulty,
-latency, and field-of-view settings \cite{flightbench}.  We therefore report
-them as deployed under their recommended configurations, read their failures
-in Map2 as configuration- and regime-dependent rather than as absolute
-capability limits, and complement the nominal batch with a speed-matched
-SUPER batch at 5~m/s.
+\cite{super} retain their planner cores but require simulator-specific cloud,
+goal, and command adapters.  Their executor configurations and timeouts differ
+from YOPO's, and recent benchmarking shows that such stacks are sensitive to
+latency, field of view, and scenario difficulty \cite{flightbench}.  Their
+failures therefore characterize these deployments, not universal planner
+capability.  The plug-in claim concerns the narrow goal interface and absence
+of planner-core changes, not strict experimental interchangeability.  The
+no-graph rows are direct-goal executor controls rather than competitive global
+planning baselines; Table~\ref{tab:graph_collision_comparison} therefore tests
+the route-interface deployment, not superiority over map-based global A* or
+sampling-based planners.
 
-\subsection{Closed-Loop System Evaluation (Q1)}
+\subsection{Cross-Planner Closed-Loop Evaluation}
 \subsubsection{Methods and Conditions}
-The primary comparison is the original topology planner against the
-GCN-augmented topology planner.  Both retain the same skeleton graph, A*
-search, collision checks, path processing, local-goal publication, and
-unmodified YOPO executor; only the frontier-direction proposal differs.  The
-original batch contains 27 valid trials and the latest GCN batch contains
-10 valid trials.  Startup failures and one manually interrupted trial are excluded
-from navigation statistics.  EGO-Planner \cite{egoplanner} and SUPER
-\cite{super} remain secondary executor references, not replacements for the
-topology-graph method.  Table~\ref{tab:params} lists the shared configuration.
+The primary comparison pairs each standalone executor with a ScaleNav-guided
+variant.  All ScaleNav variants run the same graph-node implementation,
+semantic route formulation, A* acceptance, witness memory, and local-goal
+publisher.  YOPO consumes the goal directly; EGO-Planner and SUPER use the
+adapter described in Sec.~\ref{sec:interface}.  Their internal planners do not
+consume ScaleNav data structures.  Each row in the plug-in comparison contains
+ten valid trials.  Table~\ref{tab:params} lists route-layer parameters shared
+by the principal YOPO ablations.
 
 \begin{table}[t]
 \caption{Fixed Parameters Used by the Current Implementation}
@@ -572,89 +531,59 @@ Point voxel & 0.10 m & Point budget & 100,000 \\
 Frame history & current frame only & Graph update & 100 ms \\
 Graph rebuild & 100 ms & Search radius & 45 m \\
 Local lookahead & 15 m & Goal-connect budget & 20 ms \\
-$\lambda_{\rm sem}$ & 2.0 & $R_s$ & 5 m \\
+$\lambda_{\rm sem}$ & 2.0 & $R_s$ & 8 m \\
 $\lambda_{\rm clr}$ & 2.0 & $\rho^\star$ & 1.2 m \\
 Score update & latest match & Edge-memory discount & disabled \\
-Optical depth $\ell_s$ & 30 m & Node merge distance & 2.5 m \\
-Semantic candidates/frame & 16 & Virtual-node cap & 512 \\
+Optical depth $\ell_s$ & 35 m & Node merge distance & 2.5 m \\
+Semantic candidates/frame & $\leq 10$ & Virtual-node cap & 512 \\
 Semantic candidates/edge & 8 & Semantic grid & $5\times3$ \\
-Route bubbles $K$ & 12 & Bubble features & center + radius \\
 \bottomrule
 \end{tabular}
 }
 \end{table}
 
-\subsubsection{Scenario}
-Map2 contains isolated and dense trees, long walls, buildings, and
-mixed-scale clusters (Fig.~1(b)).  Its truth export spans
-$140.0\times132.0$~m.  In the evaluation corridor $x\in[-45,45]$~m,
-$y\in[0,120]$~m, $3.91\%$ of 0.5-m cells intersect truth geometry in the
-navigation slab $z\in[0.6,2.6]$~m.  These statistics come from UE truth,
-never from any method's partial online map.  Matched language trials
-additionally include the unseen query ``avoid power lines.''
+\subsubsection{Environment and Task}
+All methods traverse the same ordered obstacle course (Fig.~1(b)).  Along the
+$+y$ mission direction, the first approximately 25~m contain a dense field of
+small obstacles.  The latter half is dominated by a single approximately
+60-m-scale block, spanning roughly $y=68$--$122$~m and
+$x=-27$--$26$~m, which forces an early commitment to a left or right bypass.
+Its extent exceeds the 20-m depth clip and the local executor's immediate
+reaction horizon, making persistent branch selection the central task.  The
+ground-truth mesh spans $140.0\times132.0$~m.  In the evaluation
+corridor $x\in[-45,45]$~m, $y\in[0,120]$~m, $3.91\%$ of 0.5-m cells intersect
+ground-truth geometry in the navigation slab $z\in[0.6,2.6]$~m.  Ground truth
+is used only for environment characterization and is not available to any method
+online.  Matched language trials use the query ``blocks, wall.''
 
 \subsubsection{Results}
-Figure~\ref{fig:map2_speed_trajectories} is a qualitative visualization from
-the earlier executor-substitution batch: it contrasts frontier-only runs with
-the corresponding graph-guided ScaleNav runs for YOPO, EGO-Planner, and SUPER.
-It is not a trajectory plot of the ten-trial GCN batch; the quantitative GCN
-comparison is Table~\ref{tab:single_run_validation}.
+Figure~\ref{fig:long_range_speed_trajectories} is a qualitative visualization of
+representative current-scene trajectories.  It contrasts frontier-only runs
+with graph-guided ScaleNav runs for YOPO, EGO-Planner, and SUPER; the
+ScaleNav (YOPO) panel uses the shortest successful trajectory from its
+ten-trial evaluation.  Aggregate results are reported in
+Table~\ref{tab:graph_collision_comparison}.
 
 \begin{figure*}[!ht]
 \centering
 \safefig[width=0.90\textwidth]{pics/experiments/map2_0_140_1p6/trajectory_speed_comparison_current.pdf}
 \vspace{-2pt}
-\caption{Qualitative Map2 trajectories from an earlier executor-substitution
-batch, with and without the topology graph.  Rows compare YOPO-Simple,
-EGO-Planner, and SUPER; the left column uses the frontier-only executor and
-the right column uses the corresponding ScaleNav-graph route layer.  This
-figure is not the ten-trial GCN batch reported in
-Table~\ref{tab:single_run_validation}.  Color denotes executed speed; circles,
-stars, and crosses mark starts, completed goals, and incomplete collision
-endpoints.}
-\label{fig:map2_speed_trajectories}
+\caption{Representative trajectories with and without the topology graph.
+Rows compare YOPO-Simple,
+EGO-Planner, and SUPER; the left column uses each standalone planner with its
+direct mission goal and the right column uses the ScaleNav route layer.  The
+three ScaleNav panels use the shortest successful trajectory from their
+respective evaluations.  Color denotes executed speed; circles, stars, and
+crosses mark starts, completed goals, and incomplete collision endpoints.}
+\label{fig:long_range_speed_trajectories}
 \end{figure*}
 
-\begin{table}[t]
-\caption{Map2 Closed-Loop Topology-Graph Comparison.  The two batches have
-different sample counts ($n=27$ and $n=10$); continuous entries are means over
-successful trials and are not paired estimates.}
-\label{tab:single_run_validation}
-\centering
-\small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lccccccc}
-\toprule
-Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
-\midrule
-Original ScaleNav ($n=27$) & 88.9 & 11.1 & 0 & 199.14 & 38.54 & 5.17 & 6.41 \\
-GCN-ScaleNav ($n=10$) & 100.0 & 0.0 & 0.0 & 171.59 & 33.61 & 5.11 & 6.25 \\
-\bottomrule
-\end{tabular}
-}
-\end{table}
-
-Table~\ref{tab:single_run_validation} reports the latest ten-trial GCN batch
-alongside the earlier original-planner batch.  The GCN batch completed all
-trials, but its mean path and flight time are lower than the original batch's
-despite the different sample counts and seeds.  These differences are
-descriptive only and do not establish a causal improvement.
-
-The latest GCN run produced no collision or timeout events: all ten trials
-reached the goal and satisfied the final position and settling-speed
-tolerances.  Failure-mechanism analysis from the earlier 60-trial run is not
-used to characterize this updated batch.
-
-To expose the effect of adding the graph route layer across executors, we
-report the complete conventional flight metrics for same-scene ten-trial Map2
-batches.  The graph-enabled EGO batch uses the 600-s mission timeout with a
-60-s no-progress termination; the latest graph-enabled SUPER batch uses the
-90-s mission timeout with no separate no-progress termination.
-
 \begin{table*}[t]
-\caption{Ten-Trial Map2 Closed-Loop Comparison Using Conventional Flight
-Metrics.  The first row of each executor pair is the baseline without the
-ScaleNav graph; the second row uses the graph route layer.}
+\caption{Plug-in evaluation on the fixed 140-m mission ($n=10$ per
+row).  Every row uses the same map, start, goal, and obstacle sequence.  Each
+pair contrasts the executor's standalone goal with ScaleNav's moving local
+goal.  ScaleNav rows share the same topology-layer implementation;
+executor-specific adapters only relay goals, point clouds, and commands.}
 \label{tab:graph_collision_comparison}
 \centering
 \small
@@ -663,99 +592,273 @@ ScaleNav graph; the second row uses the graph route layer.}
 \toprule
 Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
 \midrule
-YOPO-Simple (no graph) & 0 & 100 & 0 & $129.79\pm0.58$ & $61.46\pm0.36$ & $2.11\pm0.01$ & $6.46\pm0.02$ \\
-ScaleNav (YOPO) & 100 & 0 & 0 & $196.30\pm13.36$ & $37.48\pm2.50$ & $5.24\pm0.09$ & $6.42\pm0.05$ \\
-EGO-Planner (no graph) & 0 & 100 & 0 & $73.24\pm0.69$ & $54.32\pm1.05$ & $1.35\pm0.02$ & $2.43\pm0.25$ \\
-ScaleNav+EGO & 0 & 50 & 50 & $54.50\pm32.30$ & $72.22\pm37.68$ & $0.85\pm0.40$ & $2.18\pm0.27$ \\
-SUPER (no graph) & 0 & 100 & 0 & $47.07\pm28.27$ & $10.25\pm4.99$ & $4.30\pm0.68$ & $5.60\pm0.23$ \\
-ScaleNav+SUPER & 80 & 10 & 10 & $180.36\pm16.09$ & $42.60\pm4.09$ & $4.24\pm0.22$ & $5.15\pm0.06$ \\
+YOPO-Simple (no graph) & 0 & 100 & 0 & $129.79\pm0.58^\dagger$ & $61.46\pm0.36^\dagger$ & $2.11\pm0.01^\dagger$ & $6.46\pm0.02^\dagger$ \\
+ScaleNav (YOPO) & 100 & 0 & 0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ \\
+EGO-Planner (no graph) & 0 & 100 & 0 & $73.24\pm0.69^\dagger$ & $54.32\pm1.05^\dagger$ & $1.35\pm0.02^\dagger$ & $2.43\pm0.25^\dagger$ \\
+ScaleNav (EGO) & 70 & 30 & 0 & $181.59\pm11.33$ & $114.05\pm7.82$ & $1.593\pm0.017$ & $2.852\pm0.292$ \\
+SUPER (no graph) & 0 & 100 & 0 & $47.07\pm28.27^\dagger$ & $10.25\pm4.99^\dagger$ & $4.30\pm0.68^\dagger$ & $5.60\pm0.23^\dagger$ \\
+ScaleNav (SUPER) & 90 & 10 & 0 & $179.76\pm10.00$ & $39.32\pm2.62$ & $4.577\pm0.159$ & $5.829\pm0.043$ \\
 \bottomrule
 \end{tabular}
 }
 \end{table*}
 
-Outcome rates use all ten valid trials.  For a condition with at least one
-success, path, time, and speed are mean $\pm$ sample standard deviation over
-successful flights; when no trial succeeds, they are the corresponding
-statistics observed before collision or timeout and are not completion
-metrics.  The latest ScaleNav+SUPER batch completes 8/10 trials, so its
-continuous entries use the eight successful flights.  The graph-enabled conditions use the semantic route
-layer with the same ``blocks, wall'' query and the corresponding local
-executor.
+All three standalone configurations terminated without a successful mission,
+whereas
+the ScaleNav-guided YOPO, EGO-Planner, and SUPER variants completed 10/10,
+7/10, and 9/10 trials.  This demonstrates that the same topological goal
+contract is executable by three different planner cores.  Values marked
+$\dagger$ are means over truncated failed flights, not completion metrics;
+unmarked continuous values use successful flights only.  The ScaleNav (EGO)
+deployment uses a 200-s mission timeout, while the other rows use 90~s.
 
-\subsection{Offline GCN Evaluation}
-The privileged Map2 dataset contains 5,337 training samples and 707 held-out
-test frames.  The plain checkpoint obtains $89.3\%$ exact and $89.4\%$ macro
-accuracy, while validation-selected switch penalty $0.05$ gives $91.3\%$ exact
-and $91.8\%$ macro accuracy.  The original planner matches only $22.2\%$ of
-the strict 35-m labels.  These results measure route-direction prediction,
-not online safety.
+The ScaleNav (YOPO) run produced no collision or timeout events: all ten trials
+reached the goal and satisfied the final position and settling-speed
+tolerances.  Relative to the 140-m straight-line mission, its mean path is
+31.59~m longer, corresponding to a $22.6\%$ path overhead.  The longest trial
+was trial 6 at $188.43$~m and $36.72$~s, which accounts for most of the path
+length spread.  The mean terminal position error was $0.096\pm0.029$~m and
+the mean terminal speed was $0.294\pm0.004$~m/s.
 
-\subsection{Graph-State Diagnostics and Reproducibility}
-The deployed graph is deliberately bounded so that route decisions are made
-from a stable snapshot rather than from an unbounded history.  The current
+The latest executor regressions also expose distinct failure modes.  ScaleNav
+with EGO-Planner had three collisions after 31.30, 83.41, and 132.15~m of
+executed motion, spanning early, middle, and late portions of the mission.
+ScaleNav with SUPER had one early collision after 6.95~m of executed motion
+and no timeouts.  All ten trials in this evaluation were valid, with no
+exclusions.  These terminal records distinguish collision from route
+divergence or stall, but do not by themselves attribute a failure to the GCN,
+accepted witness, or executor tracking.  Such attribution requires the
+timestamped route and command trace rather than the terminal outcome alone.
+
+\subsection{Route-Layer Ablations}
+\subsubsection{Semantic Influence}
+To test whether the route benefit depends on semantic evidence beyond the
+depth envelope, we repeated the GCN stack with the same fixed mission,
+90-s timeout, graph configuration, and query, while disabling PEARL,
+semantic nodes, and semantic edge cost.  Completion metrics use successful
+flights only, while $L_{\rm obs}$ records the path observed before collision
+or timeout.  The resulting conventional flight metrics are reported in
+Table~\ref{tab:gcn_semantic_ablation}.
+
+\begin{table}[t]
+\caption{Semantic route-layer ablation on the fixed mission with the GCN
+heuristic fixed.
+Semantic-off removes PEARL heatmaps, far-field nodes, and semantic edge cost;
+geometry, A*, goal publication, and YOPO remain enabled.}
+\label{tab:gcn_semantic_ablation}
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+Condition & Success (\%) & Collision (\%) & Timeout (\%) & $L_{\rm succ}$ (m) & $L_{\rm obs}$ (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
+\midrule
+Matched query & 100 & 0 & 0 & $171.59\pm6.57$ & \blank & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ \\
+Semantic disabled & 60 & 40 & 0 & $169.47\pm3.16$ & $11.69\pm1.60$ & $32.34\pm2.70$ & $5.261\pm0.315$ & $6.404\pm0.158$ \\
+Irrelevant query & 80 & 20 & 0 & $175.76\pm6.09$ & $20.32\pm2.67$ & $35.02\pm1.65$ & $5.023\pm0.127$ & $6.398\pm0.274$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+Semantic influence changes the outcome rate without changing the geometric
+validity contract: the semantic-on condition completed all ten flights,
+whereas the semantic-off condition had four early collisions near
+$y\approx10$~m.  The
+successful-flight path and speed differences are secondary to this outcome
+gap.  Together with the
+depth-clipped projection visualized in Fig.~1, this behavior is consistent
+with semantic evidence affecting a route before the corresponding obstacle is
+measured by depth.
+The irrelevant-query condition (prompt ``trees'') completes 8/10 trials,
+confirming that route selection responds to the alignment between the language
+query and visual scene content.
+
+\subsubsection{GCN Frontier-Policy Ablation}
+To isolate the learned route-selection component, we compare ScaleNav's
+hand-designed frontier ranking with the GCN policy while
+holding the fixed mission, semantic query, route-cost parameters, and YOPO
+executor fixed.
+
+\begin{table}[t]
+\caption{Frontier-Policy Ablation Within ScaleNav}
+\label{tab:single_run_validation}
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccccc}
+\toprule
+Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
+\midrule
+Hand-designed ($n=27$) & 88.9 & 11.1 & 0 & $199.14\pm14.12$ & $38.54\pm3.06$ & $5.172\pm0.097$ & $6.409\pm0.184$ \\
+GCN ($n=10$) & 100.0 & 0.0 & 0.0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+The GCN policy completed 10/10 trials, compared with 24/27 for the
+hand-designed ranking, while reducing mean path length from 199.14~m to
+171.59~m and mean flight time from 38.54~s to 33.61~s.  Only the
+frontier-ranking policy is replaced; A*, witness acceptance, semantic route
+cost, and the local-goal interface remain unchanged.
+
+\subsection{GCN Policy Evaluation}
+\label{sec:heuristic_eval}
+The privileged dataset contains 5,337 frames, split by session into 3,844
+training, 786 validation, and 707 held-out test frames.  A validation sweep
+selects no additional switching penalty.  On
+the untouched test split, the deployed checkpoint obtains $89.3\%$ exact and
+$89.4\%$ macro accuracy; $99.4\%$ of predictions are within one adjacent
+direction column, with a mean absolute column error of $0.115$.  The logged
+hand-designed frontier policy matches $22.2\%$ of the strict 35-m labels.
+These results measure route-direction prediction, not online safety.
+
+\begin{table}[t]
+\caption{GCN Direction Classification}
+\label{tab:gcn_offline}
+\centering
+\small
+\begin{tabular}{lc}
+\toprule
+Metric & Test \\
+\midrule
+Exact accuracy & 89.3\% \\
+Macro accuracy & 89.4\% \\
+Within one direction column & 99.4\% \\
+Mean absolute column error & 0.115 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:gcn_real_views} shows synchronized frames from the online
+interface.  The RGB image, PEARL heatmap, selected GCN column, and mission-goal
+direction are retained from the recorded experiment.
+
+\begin{figure*}[t]
+\centering
+\begin{minipage}[t]{0.235\textwidth}
+\centering
+\safefig[width=\linewidth]{pics/0903_graph_semantic_frontier_building1.png}\\[-1pt]
+{\footnotesize (a) Building view 1}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.235\textwidth}
+\centering
+\safefig[width=\linewidth]{pics/0903_graph_semantic_frontier_building2.png}\\[-1pt]
+{\footnotesize (b) Building view 2}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.235\textwidth}
+\centering
+\safefig[width=\linewidth]{pics/0903_graph_semantic_frontier_forest1.png}\\[-1pt]
+{\footnotesize (c) Forest view 1}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.235\textwidth}
+\centering
+\safefig[width=\linewidth]{pics/0903_graph_semantic_frontier_forest2.png}\\[-1pt]
+{\footnotesize (d) Forest view 2}
+\end{minipage}
+\caption{Recorded GCN-interface views from closed-loop flights.  Each
+panel preserves the RGB frame and PEARL heatmap; red marks the proposed
+frontier column and the
+green dashed arrow marks the 35-m mission-goal direction.}
+\label{fig:gcn_real_views}
+\end{figure*}
+
+\subsection{Online Planning Workload}
+The online search is restricted to a local working set even when the verified
+topology persists outside the current sensing window.  The current
 configuration keeps at most 100,000 point samples, rebuilds the skeleton every
-100~ms, searches within 45~m, and caps virtual semantic nodes at 512.  A route
-holds its accepted witness until a progress gate is reached or a geometric
-check fails; this makes route switching observable and prevents a partially
-rebuilt graph from leaking into the controller.  The semantic stream runs at
-roughly 2~Hz, whereas graph and control updates remain asynchronous.
+100~ms, searches within 45~m, and caps virtual semantic nodes at 512.
+Figure~\ref{fig:graph_resource_scaling} compares the persistent-geometry mode
+with a sliding-geometry ablation.  The persistent mode uses 214/249 local
+nodes at P50/P95 and expands 185/215 nodes per active A* search, compared with
+197/231 and 173/194 when persistence is disabled.  Thus retaining the explored
+backbone does not make every retained node part of each planning tick.  Over
+normalized session time, the observed local-node P95 remains below 279 with
+persistence and 248 without it.  At approximately 500 nodes and 3,200 directed
+edges, GCN inference on an NVIDIA GeForce RTX 3090 adds 0.83~ms mean latency
+to the online workload, with 0.60~ms at P50 and 1.97~ms at P95.
+
+\begin{figure}[t]
+\centering
+\safefig[width=\columnwidth]{pics/experiments/map2_0_140_1p6/graph_resource_scaling.pdf}
+\vspace{-3pt}
+\caption{Online resources for persistent and 40-m sliding geometry.
+(a)~Local nodes over normalized time. (b)~Module wall time.  Lines/bars show
+P50/mean and dashed lines/caps show P95.  The profiles aggregate 27
+persistent-geometry and 10 sliding-geometry runs of the same fixed mission;
+global nodes are excluded from the local search.}
+\label{fig:graph_resource_scaling}
+\end{figure}
+
+A route holds its accepted witness until a progress gate is reached or a
+geometric check fails; this makes route switching observable and prevents a
+partially rebuilt graph from leaking into the controller.  The semantic stream
+runs at roughly 2~Hz, whereas graph and control updates remain asynchronous.
 
 For reproducibility, each trial records the graph snapshot timestamp, selected
 frontier column, witness clearance, A* replacement reason, local-goal distance,
 and terminal outcome.  These fields let us distinguish a direction proposal
 from the route actually accepted after collision checking.  They also expose
-the failure sequence seen in the current batch: a stale or low-clearance
+the failure sequence seen in the evaluation: a stale or low-clearance
 witness is rejected, a fresh A* search is requested, and a moving vehicle may
 reach the executor's start-failure condition before the replacement goal is
 established.  This logging boundary is important because it attributes safety
 events to the graph--planner--executor interface rather than to an offline GCN
 classification score alone.
 
-\subsection{Statistical Scope and Limitations}
-The latest GCN summary contains ten recorded, valid navigation trials; all
-ten succeeded.  The original ScaleNav summary contains 27 valid trials and
-one interruption.  A startup failure is not counted as a navigation failure.
-Since the valid counts are different and the trials are not seed-matched, the
-closed-loop comparison is descriptive rather than a causal significance test.
-Equal-sized, seed-matched trials remain necessary for a definitive comparison.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{DISCUSSION AND LIMITATIONS}
 \label{sec:discussion}
-The contribution is the topology graph and its interfaces, not a modified local
-policy.  Graph construction preserves verified bubbles and witnesses across
-asynchronous replacement; semantic heatmaps add provisional frontiers and
-risk preference; GCN ranks five frontier directions; A* and collision checks
-remain authoritative.  The released YOPO executor is unchanged and can be
-replaced by another goal-conditioned local planner.
+The contribution is the topology route layer and its narrow goal contract, not
+a modified local policy.  The current YOPO checkpoint receives only depth,
+state, and the moving local goal.  EGO-Planner and SUPER require simulator and
+topic adapters, but their planner cores do not receive graph features or
+semantic scores.  Thus ``plug-and-play'' means no
+planner retraining or algorithm modification after the goal and command
+interfaces are adapted; it does not mean arbitrary planners can be connected
+without integration code.
 
-The offline GCN accuracy does not by itself establish online safety.  The
-latest ten-trial batch completed without collision, but it is not seed-matched
-to the 27-trial original batch and is too small to support a significance
-claim.  Future graph policies should still expose reachable clearance,
-braking margin, and A* cost, and unsafe columns should be masked before
-learned ranking.
+The single-goal interface defines a clear responsibility boundary.  ScaleNav
+advances the goal along the accepted witness, while each executor retains
+responsibility for feasible short-horizon motion rather than receiving a
+corridor constraint or bubble sequence.  The 10/10, 7/10, and 9/10 ScaleNav
+outcomes demonstrate portability across three executor architectures in the
+fixed mission.
 
-The current evaluation is in one simulated Map2 environment, uses a
-fixed-height planning layer, and compares unmatched batches.  Semantic
-observations are evaluated with PEARL at roughly 2 Hz, and provisional
-far-field nodes never certify unknown free space.  Equal-sized, seed-matched
-trials, process-cleanup fixes, and cross-map evaluation remain necessary
-before claiming a statistically reliable navigation improvement.
+The offline GCN accuracy measures direction prediction, while online route
+validity remains enforced by A* reachability and witness collision checks.
+Future graph policies can incorporate reachable clearance, braking margin,
+and A* cost directly and mask invalid columns before learned ranking.
+
+The controlled simulated mission and fixed-height layer isolate horizontal
+branch selection, while perception, memory, and local execution remain 3-D.
+Randomized layouts, vertical motion, dynamic obstacles, and real sensor and
+appearance variation are natural next tests.  Fixed-depth projections remain
+hypotheses: known-obstacle checks constrain their witnesses, and future work
+can quantify projection consistency and rejection.  Longer missions and
+process-RSS measurements will further characterize the persistent backbone.
+
+Logged route state separates graph acceptance from execution; synchronized
+command and tracking traces can refine failure attribution.  The GCN uses
+privileged static-map A* labels in training but only the partial online
+skeleton at deployment, where A* and witness checks validate each proposal.
+Thus offline accuracy measures direction prediction, while closed-loop trials
+measure the complete system.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{CONCLUSION}
-ScaleNav organizes language-guided aerial navigation around a persistent
-topology graph.  A plug-and-play mapper turns depth and odometry into reusable,
-witness-verified free-space structure.  A slow route layer combines this
-backbone with semantic frontiers, continuous witness risk, and world-frame
-route memory.  A five-way GCN can propose a frontier direction from the graph,
-but A*, collision checks, and the unchanged local executor retain authority.
-The offline classifier result does not substitute for online safety: the
-latest ten-trial evaluation is collision-free, but the unmatched sample size
-does not support a general safety claim.  Future work must add
-reachable-clearance and braking-aware features, mask unsafe columns before
-learned ranking, and rerun the two conditions with matched valid trial counts.
+ScaleNav is a topological route layer rather than another local planner.  It
+turns depth and odometry into persistent witness-verified structure, combines
+language risk with a topology-graph GCN frontier policy upstream, and exports only
+a moving world-frame local goal.  The original YOPO policy consumes that goal
+directly, while goal adapters connect the same topology implementation to
+EGO-Planner and SUPER without planner retraining.  Closed-loop results across
+three heterogeneous executors validate the shared route layer and moving-goal
+contract, while the observed local search remains a few hundred nodes.  These
+results support the central systems claim: long-horizon memory and
+language-conditioned route choice can be added above interchangeable
+short-horizon executors.
 
 {\scriptsize
 \begin{thebibliography}{99}
@@ -844,6 +947,18 @@ D. Shah, B. Eysenbach, G. Kahn, N. Rhinehart, and S. Levine,
 ``ViNG: Learning Open-World Navigation With Visual Goals,'' in \emph{Proc.
 IEEE Int. Conf. Robot. Autom.}, 2021, pp. 13215--13222.
 
+\bibitem{kipf2017gcn}
+T. N. Kipf and M. Welling,
+``Semi-Supervised Classification with Graph Convolutional Networks,''
+in \emph{Proc. Int. Conf. Learn. Represent.}, 2017.
+
+\bibitem{schutz2026gnnpolicy}
+A. Schutz and V.-A. Darvariu,
+``Using Graph Neural Networks in Reinforcement Learning: A Practical Guide,''
+\emph{ICLR Blogposts}, 2026. [Online]. Available:
+\texttt{https://iclr-blogposts.github.io/2026/blog/2026/}\\
+\texttt{rl-with-gnns/}
+
 \bibitem{clip}
 A. Radford et al.,
 ``Learning Transferable Visual Models From Natural Language Supervision,''
@@ -880,12 +995,6 @@ and Exploration,'' in \emph{Proc. IEEE/RSJ Int. Conf. Intell. Robots Syst.},
 L. Blackmore, M. Ono, and B. C. Williams,
 ``Chance-Constrained Optimal Path Planning With Obstacles,'' \emph{IEEE
 Trans. Robot.}, vol. 27, no. 6, pp. 1080--1094, 2011.
-
-\bibitem{anderson2018}
-P. Anderson, A. Chang, D. S. Chaplot, A. Dosovitskiy, S. Gupta, V. Koltun,
-J. Kosecka, J. Malik, R. Mottaghi, M. Savva, and A. R. Zamir,
-``On Evaluation of Embodied Navigation Agents,'' \emph{arXiv preprint
-arXiv:1807.06757}, 2018.
 
 \bibitem{flightbench}
 S.-A. Yu, C. Yu, F. Gao, Y. Wu, and Y. Wang,

@@ -13,6 +13,8 @@ void ParallelBubbleAstar::init(ros::NodeHandle &nh, const LIOInterface::Ptr &lid
   nh.param("bubble_astar/lambda_heu", lambda_heu_, 1.0);
   nh.param("bubble_astar/allocate_num", allocate_num_, -1);
   nh.param("bubble_astar/safe_distance", safe_distance_, -1.0);
+  nh.param("bubble_astar/clearance_tolerance", clearance_tolerance_, 0.20);
+  clearance_tolerance_ = std::clamp(clearance_tolerance_, 0.0, std::max(0.0, safe_distance_));
   nh.param("bubble_astar/debug", debug_, false);
   nh.param("bubble_astar/planar_search", planar_search_, false);
   double planar_z = 0.0;
@@ -307,6 +309,11 @@ bool ParallelBubbleAstar::collisionCheck_shortenPath(
     if (info != nullptr) info->reason = CollisionCheckInfo::INVALID_PATH;
     return false;
   }
+  // Use explicit hysteresis for route revalidation so the sliding clearance
+  // field does not repeatedly invalidate and restore a route near the safety
+  // boundary. New A* searches still use safe_distance_ itself.
+  const double validation_safe_distance =
+    std::max(0.0, safe_distance_ - clearance_tolerance_);
   std::vector<Eigen::Vector3f> path_shorten;
   std::vector<double> raduis_lis;
   raduis_lis.reserve(path.size());
@@ -329,7 +336,7 @@ bool ParallelBubbleAstar::collisionCheck_shortenPath(
         info->minimum_clearance = clearance;
         info->minimum_clearance_point = point;
       }
-      const double radius = clearance - safe_distance_;
+      const double radius = clearance - validation_safe_distance;
       if (!std::isfinite(radius) || radius < 1e-3) {
         if (info != nullptr) {
           info->reason = CollisionCheckInfo::CLEARANCE;
@@ -355,7 +362,7 @@ bool ParallelBubbleAstar::collisionCheck_shortenPath(
       info->minimum_clearance = clearance;
       info->minimum_clearance_point = path[i];
     }
-    double dis = clearance - safe_distance_;
+    double dis = clearance - validation_safe_distance;
     raduis_lis.push_back(dis);
     if (raduis_lis.back() < 1e-3) {
       if (info != nullptr) {
