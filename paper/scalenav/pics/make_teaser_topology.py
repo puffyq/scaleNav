@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a topology-first ScaleNav teaser from a recorded flight log.
+"""Render a topology-first TopoGuide teaser from a recorded flight log.
 
 The figure uses one atomic graph snapshot and the nearest sensor/odometry
 records from the same session.  The persistent skeleton and its A* / polynomial
@@ -371,7 +371,7 @@ def draw_topology(axis, footprint: np.ndarray, bounds: tuple[float, float, float
     axis.set_title("(b) Persistent topology and route state", fontsize=10, pad=4)
     for spine in axis.spines.values():
         spine.set_visible(False)
-    axis.text(0.015, 0.03, "ScaleNav skeleton graph: nodes + collision-checked edges",
+    axis.text(0.015, 0.03, "TopoGuide skeleton graph: nodes + collision-checked edges",
               transform=axis.transAxes, fontsize=7.2, color=NODE,
               bbox=dict(boxstyle="square,pad=0.22", facecolor="white",
                         edgecolor="none", alpha=0.86))

@@ -6,11 +6,18 @@ import argparse
 import json
 import math
 import os
+import sys
 from heapq import heappop, heappush
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scalenav_ws" / "src" / "scalenav"))
+from text_tracker.heatmap import sample_heatmap_at_body_directions  # noqa: E402
+from text_tracker.pearl_adapter import PEARLHeatmapEncoder  # noqa: E402
 
 
 def neighbors26():
@@ -276,6 +283,9 @@ def main():
     parser.add_argument("--start-z", type=float, default=3.5)
     parser.add_argument("--goal-z", type=float, default=3.5)
     parser.add_argument("--prompt", default="line")
+    parser.add_argument("--semantic-prompt", default="")
+    parser.add_argument("--pearl-root", default=str(ROOT / "scalenav_ws" / "src" / "global_graph" / "heatmap_ws" / "pearl_ws"))
+    parser.add_argument("--checkpoint", default="ViT-B/16")
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
 
@@ -289,6 +299,16 @@ def main():
     if abs(resolution - args.resolution) > 1e-5:
         raise ValueError(f"occupancy resolution is {resolution}, requested {args.resolution}")
     blocked = inflate_occupancy(occupied, max(1, math.ceil(args.inflate / resolution)))
+
+    semantic_prompt = args.semantic_prompt.strip() or args.prompt.strip()
+    encoder = None
+    if semantic_prompt:
+        encoder = PEARLHeatmapEncoder(
+            args.pearl_root,
+            checkpoint=args.checkpoint,
+            device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        )
+        encoder.prepare_prompt(semantic_prompt)
 
     start_world = np.asarray([0.0, 0.0, args.start_z], dtype=np.float32)
     goal_world = np.asarray([0.0, 140.0, args.goal_z], dtype=np.float32)
@@ -327,7 +347,7 @@ def main():
             and e.get("data", {}).get("selected_semantic_column", -1) >= 0
         ]
         graph_records = [e for e in entries if e.get("kind") == "graph" and e.get("file")]
-        semantic_records = [e for e in entries if e.get("kind") == "semantic" and e.get("file")]
+        rgb_records = [e for e in entries if e.get("kind") == "rgb" and e.get("file")]
         if not odom_records or not timing_records or not graph_records:
             continue
         first_z = float(odom_records[0].get("data", {}).get("position", [0.0, 0.0, 0.0])[2])
@@ -342,14 +362,43 @@ def main():
             stamp = int(timing["stamp_ns"])
             graph = nearest(graph_records, stamp)
             pose = nearest(odom_records, stamp)
-            semantic = nearest(semantic_records, stamp) if semantic_records else None
+            rgb_record = nearest(rgb_records, stamp) if rgb_records else None
             snapshot = graph_snapshot(
                 {
                     "file": os.path.join(session, graph["file"]),
                 }
             )
-            if semantic is None:
-                semantic_ranking = {}
+            semantic_ranking = {}
+            if encoder is not None and rgb_record is not None:
+                rgb_path = os.path.join(session, rgb_record["file"])
+                rgb = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
+                if rgb is None:
+                    skipped += 1
+                    continue
+                rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+                heatmap = encoder.encode_rgb(rgb, semantic_prompt)
+                directions = torch.tensor(
+                    [[[
+                        [math.cos((column - 2) * math.radians(20.0)),
+                         math.sin((column - 2) * math.radians(20.0)),
+                         0.0]
+                        for column in range(5)
+                    ]]],
+                    dtype=torch.float32,
+                    device=encoder.device,
+                )
+                heatmap_tensor = torch.from_numpy(heatmap).unsqueeze(0).to(encoder.device)
+                column_scores = sample_heatmap_at_body_directions(
+                    heatmap_tensor,
+                    directions,
+                    horizontal_fov_deg=90.0,
+                    vertical_fov_deg=60.0,
+                    horizontal_only=False,
+                )[0, 0].detach().cpu().numpy()
+                semantic_ranking = {
+                    column: {"score": float(column_scores[column]), "confidence": 1.0}
+                    for column in range(5)
+                }
             else:
                 semantic_ranking = {
                     int(item.get("column", -1)): {
@@ -371,16 +420,17 @@ def main():
                 "snapshot": snapshot,
                 "ranking": semantic_ranking,
                 "progress_t": float(timing.get("data", {}).get("frontier_progress_t", 0.0)),
-                "planner_target": int(timing["data"].get("selected_semantic_column", -1)),
+                "planner_target": int(min(semantic_ranking, key=lambda k: semantic_ranking[k]["score"]))
+                if semantic_ranking else int(timing["data"].get("selected_semantic_column", -1)),
                 "session": os.path.basename(session),
                 "seq": int(timing.get("seq", 0)),
-                "prompt": args.prompt,
+                "prompt": semantic_prompt,
             }
             sample = make_sample(position, yaw, frame_goal, route, route_index, blocked, bounds, resolution, semantic_bundle)
             if sample is None:
                 skipped += 1
                 continue
-            sample["session"] = f"{args.prompt}_{sample['session']}"
+            sample["session"] = f"{semantic_prompt}_{sample['session']}"
             samples.append(sample)
         print(f"session={os.path.basename(session)} collected={len(samples)}")
 

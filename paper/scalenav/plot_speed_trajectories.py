@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot speed-colored Map2 trajectories from ScaleNav JSONL event logs."""
+"""Plot speed-colored Map2 trajectories from TopoGuide JSONL event logs."""
 
 from __future__ import annotations
 
@@ -389,7 +389,7 @@ def main():
         help="plot a recorded non-goal-reaching flight with an X endpoint",
     )
     parser.add_argument("--scalenav", required=True, type=Path)
-    parser.add_argument("--scalenav-label", default="ScaleNav (ours)")
+    parser.add_argument("--scalenav-label", default="TopoGuide (ours)")
     parser.add_argument(
         "--layout-order", action="append", default=[], metavar="LABEL",
         help="place runs in this label order after loading them",
