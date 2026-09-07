@@ -12,15 +12,16 @@
     "max_speed_mps": 6.491760994260843
   },
   "obstacle_map": {
-    "sessions": 10,
-    "sampled_pointcloud_frames": 692,
-    "accepted_flight_height_points": 528783,
-    "occupied_cells": 7746,
-    "cell_size_m": 0.5,
-    "density_radius_m": 3.0,
+    "source": "/mnt/code/lab/yopo/OpenSeek/paper/scalenav/pics/map4_privileged_rgbd_survey_20260906.ply",
+    "sessions": null,
+    "sampled_pointcloud_frames": null,
+    "accepted_flight_height_points": 17264,
+    "occupied_cells": 6778,
+    "cell_size_m": 0.25,
+    "density_radius_m": 1.0,
     "height_slab_m": [
-      0.3,
-      3.2
+      0.6,
+      2.6
     ],
     "bounds_xy_m": [
       -50.0,

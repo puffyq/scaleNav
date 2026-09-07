@@ -1,6 +1,8 @@
+from typing import List
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
@@ -10,6 +12,7 @@ def generate_launch_description():
     package_share = FindPackageShare("airsim_renderer")
     controller_share = FindPackageShare("uav_sim")
     controller_config = LaunchConfiguration("controller_config")
+    initial_position = LaunchConfiguration("initial_position")
     maximum_linear_speed = LaunchConfiguration("maximum_linear_speed")
     renderer_config = LaunchConfiguration("renderer_config")
     ignore_collision = LaunchConfiguration("ignore_collision")
@@ -26,6 +29,13 @@ def generate_launch_description():
                 "maximum_linear_speed",
                 default_value="6.0",
                 description="Physical speed cap; start.sh keeps this equal to YOPO's trajectory cap",
+            ),
+            DeclareLaunchArgument(
+                "initial_position",
+                default_value=EnvironmentVariable(
+                    "UAV_INITIAL_POSITION", default_value="[0.0, 0.0, 1.6]"
+                ),
+                description="Controller reset position [x, y, z] in world_enu",
             ),
             DeclareLaunchArgument(
                 "renderer_config",
@@ -46,6 +56,9 @@ def generate_launch_description():
                 parameters=[
                     controller_config,
                     {
+                        "initial_position": ParameterValue(
+                            initial_position, value_type=List[float]
+                        ),
                         "maximum_linear_speed": ParameterValue(
                             maximum_linear_speed, value_type=float
                         )

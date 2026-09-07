@@ -182,7 +182,7 @@ def snapshot_route(snapshot, position, orientation, goal, target):
 HTML = r'''<!doctype html><meta charset="utf-8"><title>ScaleNav goal-aware GCN</title>
 <style>body{margin:0;background:#10141a;color:#e8edf3;font:14px system-ui}header{padding:12px 16px;border-bottom:1px solid #39434f;display:flex;gap:10px;align-items:center;flex-wrap:wrap}button,select{background:#202832;color:#fff;border:1px solid #536171;padding:6px 10px;border-radius:4px}main{display:grid;grid-template-columns:minmax(550px,1fr) 370px;gap:12px;padding:12px}.panel{background:#171d25;border:1px solid #39434f;padding:10px;border-radius:4px}canvas{width:100%;background:#111820;border:1px solid #39434f}.sensors{display:grid;grid-template-columns:1fr 1fr;gap:8px}.sensors img{width:100%;background:#0b1015}.stats{display:grid;grid-template-columns:1fr 1fr;gap:6px}.stats div{background:#202832;padding:7px}.label{color:#9eacbb;font-size:12px}.value{font-size:17px;font-weight:600}.hint{color:#9eacbb;font-size:12px;line-height:1.5}.row{padding:5px 0;border-bottom:1px solid #303944}@media(max-width:900px){main{grid-template-columns:1fr}}</style>
 <header><b>ScaleNav goal-aware GCN</b><button id="prev">上一帧</button><button id="next">下一帧</button><select id="sample"></select><select id="session"><option value="">全部 Session</option></select><span id="count"></span></header>
-<main><section class="panel"><canvas id="map" width="960" height="650"></canvas><div class="hint" style="display:flex;gap:14px;flex-wrap:wrap;padding-top:7px"><span style="color:#ef5b65">● 飞机</span><span style="color:#45d483">● GT 35 m 点</span><span style="color:#f4c95d">● mission goal</span><span style="color:#ba7cff">━ GCN 选择方向</span><span style="color:#f0a04a">━ Planner 选择方向</span><span style="color:#36c5d8">━ 点云栅格 A* 路径</span></div><h3>RGB / Depth / Heatmap</h3><div class="sensors"><img id="rgb"><img id="depth"><img id="semantic"></div><p class="hint">灰线=当前帧 skeleton；蓝灰点=当前帧局部点云。青线来自跨 session 统一 world 点云占据栅格；绿色点是沿完整 A* 路径累计 35 m 的 GT 方向点。</p></section><aside class="panel"><div id="title"></div><div class="stats" id="stats"></div><h3>五列</h3><div id="cols"></div><p class="hint">GT 将统一点云地图 A* 的 35 m look-ahead 方向映射到左前、左、中、右、右前五列。GCN 分数是五列 softmax 概率。</p></aside></main>
+<main><section class="panel"><canvas id="map" width="960" height="650"></canvas><div class="hint" style="display:flex;gap:14px;flex-wrap:wrap;padding-top:7px"><span style="color:#ef5b65">● 飞机</span><span style="color:#45d483">● GT 35 m 点</span><span style="color:#f4c95d">● mission goal</span><span style="color:#ba7cff">━ GCN 选择方向</span><span style="color:#f0a04a">━ Planner 选择方向</span><span style="color:#36c5d8">━ 静态真值 A* 路径</span></div><h3>RGB / Depth / Heatmap</h3><div class="sensors"><img id="rgb"><img id="depth"><img id="semantic"></div><p class="hint">灰线=当前帧 skeleton；蓝灰点=当前帧局部点云。青线来自统一静态真值占据栅格；绿色点是沿完整 A* 路径累计 35 m 的 GT 方向点。</p></section><aside class="panel"><div id="title"></div><div class="stats" id="stats"></div><h3>五列</h3><div id="cols"></div><p class="hint">GT 将静态真值地图 A* 的 35 m look-ahead 方向映射到左前、左、中、右、右前五列。GCN 分数是五列 softmax 概率。</p></aside></main>
 <script>
 const D=__DATA__,S=document.querySelector('#sample'),F=document.querySelector('#session'),M=document.querySelector('#map'),C=M.getContext('2d');
 [...new Set(D.samples.map(s=>s.session))].sort().forEach(s=>F.add(new Option(s,s)));
@@ -261,7 +261,9 @@ def main():
                 blocked, bounds, resolution = occupancy_cache[root]
                 start_cell = (int(math.floor(position[0] / resolution)), int(math.floor(position[1] / resolution)))
                 goal_cell = (int(math.floor(goal[0] / resolution)), int(math.floor(goal[1] / resolution)))
-                cells = grid_astar(start_cell, goal_cell, blocked, bounds)
+                # Match dataset generation: the UAV's current cell is known
+                # free even when obstacle inflation reaches into it.
+                cells = grid_astar(start_cell, goal_cell, blocked - {start_cell}, bounds)
                 if cells:
                     global_path = [[(x + 0.5) * resolution, (y + 0.5) * resolution] for x, y in cells]
                     global_cost = sum(math.dist(global_path[i], global_path[i + 1]) for i in range(len(global_path) - 1))
@@ -285,8 +287,8 @@ def main():
                         "let X=s.nodes.map(p=>p[0]),Y=s.nodes.map(p=>p[1]);D.map_obstacles.forEach(p=>{X.push(p[0]);Y.push(p[1])});")
     page = page.replace("C.clearRect(0,0,M.width,M.height);C.fillStyle='#66788b';",
                         "C.clearRect(0,0,M.width,M.height);C.fillStyle='#8d647d';D.map_obstacles.forEach(p=>{C.fillRect(px(p[0])-1,py(p[1])-1,3,3)});C.fillStyle='#66788b';")
-    page = page.replace('点云栅格 A* 路径</span>', '点云栅格 A* 路径</span><span style="color:#8d647d">■ 静态障碍膨胀栅格</span>')
-    page = page.replace('蓝灰点=当前帧局部点云。', '蓝灰点=当前帧局部点云；紫灰点=完整静态 Map2 障碍膨胀栅格。')
+    page = page.replace('静态真值 A* 路径</span>', '静态真值 A* 路径</span><span style="color:#8d647d">■ 静态障碍膨胀栅格</span>')
+    page = page.replace('蓝灰点=当前帧局部点云。', '蓝灰点=当前帧局部点云；紫灰点=完整静态障碍膨胀栅格。')
     path = os.path.abspath(args.output); os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', encoding='utf-8') as stream: stream.write(page)
     print(f'wrote={path} embedded={len(output)} total={len(raw)} '

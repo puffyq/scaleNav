@@ -40,7 +40,11 @@ class GcnFrontierPolicy(Node):
         self.args = args
         self.device = torch.device(args.device)
         checkpoint = torch.load(args.model, map_location=self.device, weights_only=False)
-        self.model = build_model(int(checkpoint["input_dim"]), checkpoint.get("architecture", "legacy"))
+        self.input_dim = int(checkpoint["input_dim"])
+        self.architecture = str(checkpoint.get("architecture", "legacy"))
+        self.num_classes = int(checkpoint.get("num_classes", 5))
+        self.is_3d_model = self.architecture == "3d" or self.input_dim == 24 or self.num_classes == 15
+        self.model = build_model(self.input_dim, self.architecture)
         self.model.load_state_dict(checkpoint["model"])
         self.model.to(self.device).eval()
         self.lock = threading.RLock()
@@ -50,6 +54,7 @@ class GcnFrontierPolicy(Node):
         self.have_goal = False
         self.graph_markers: MarkerArray | None = None
         self.semantic_ranking: dict[int, dict[str, float]] = {}
+        self.route_progress_t = 0.0
         self.hidden = None
         self.previous = -1
         self.last_selected = -1
@@ -99,6 +104,10 @@ class GcnFrontierPolicy(Node):
         """Cache the planner's latest semantic five-column ranking."""
         try:
             payload = json.loads(message.data)
+            progress_t = payload.get("frontier_progress_t")
+            if progress_t is not None:
+                with self.lock:
+                    self.route_progress_t = float(progress_t)
             ranking = payload.get("semantic_frontier_ranking", [])
             parsed = {}
             for item in ranking:
@@ -119,6 +128,23 @@ class GcnFrontierPolicy(Node):
         for i in range(0, len(marker.points) - 1, 2):
             left = np.array([marker.points[i].x, marker.points[i].y], dtype=np.float32)
             right = np.array([marker.points[i + 1].x, marker.points[i + 1].y], dtype=np.float32)
+            a = int(np.argmin(np.linalg.norm(nodes - left[None], axis=1)))
+            b = int(np.argmin(np.linalg.norm(nodes - right[None], axis=1)))
+            if a != b:
+                edges.add((a, b)); edges.add((b, a))
+        return edges
+
+    @staticmethod
+    def nearest_edges_3d(nodes: np.ndarray, marker: Marker | None) -> set[tuple[int, int]]:
+        edges: set[tuple[int, int]] = set()
+        if marker is None:
+            return edges
+        for i in range(0, len(marker.points) - 1, 2):
+            left = np.array(
+                [marker.points[i].x, marker.points[i].y, marker.points[i].z], dtype=np.float32)
+            right = np.array(
+                [marker.points[i + 1].x, marker.points[i + 1].y, marker.points[i + 1].z],
+                dtype=np.float32)
             a = int(np.argmin(np.linalg.norm(nodes - left[None], axis=1)))
             b = int(np.argmin(np.linalg.norm(nodes - right[None], axis=1)))
             if a != b:
@@ -210,22 +236,125 @@ class GcnFrontierPolicy(Node):
             "safe_columns": torch.tensor(safe, dtype=torch.bool, device=self.device),
         }, nodes_np, frontier
 
+    def make_sample_3d(self, markers: MarkerArray, position: np.ndarray, yaw: float,
+                       goal: np.ndarray):
+        node_marker = next((m for m in markers.markers
+                            if m.ns == "scalenav_skeleton_nodes" and m.action == Marker.ADD), None)
+        edge_marker = next((m for m in markers.markers
+                            if m.ns == "scalenav_skeleton_edges" and m.action == Marker.ADD), None)
+        if node_marker is None or not node_marker.points:
+            return None
+        base = np.asarray([[p.x, p.y, p.z] for p in node_marker.points], dtype=np.float32)
+        if len(base) < 1:
+            return None
+        edges = self.nearest_edges_3d(base, edge_marker)
+        degree = np.zeros(len(base), dtype=np.float32)
+        for a, _ in edges:
+            degree[a] += 1.0
+        nodes = base.tolist()
+        candidate_indices = []
+        pitch_rows = (20.0, 0.0, -20.0)
+        for row, pitch_deg in enumerate(pitch_rows):
+            pitch = math.radians(pitch_deg)
+            for col in range(5):
+                angle = yaw + (col - 2) * math.radians(20.0)
+                candidate = position + 10.0 * np.asarray([
+                    math.cos(pitch) * math.cos(angle),
+                    math.cos(pitch) * math.sin(angle),
+                    math.sin(pitch)], dtype=np.float32)
+                candidate_indices.append(len(nodes))
+                nodes.append(candidate.tolist())
+        nodes_np = np.asarray(nodes, dtype=np.float32)
+        if len(base):
+            for j in candidate_indices:
+                nearest = int(np.argmin(np.linalg.norm(base - nodes_np[j][None], axis=1)))
+                edges.add((nearest, j))
+                edges.add((j, nearest))
+        degree = np.zeros(len(nodes_np), dtype=np.float32)
+        for a, _ in edges:
+            degree[a] += 1.0
+        columns = np.full(len(nodes), -1, dtype=np.int64)
+        for class_index, index in enumerate(candidate_indices):
+            columns[index] = class_index
+        odom_index = int(np.argmin(np.linalg.norm(base - position[None], axis=1)))
+        x = np.zeros((len(nodes), 24), dtype=np.float32)
+        x[:, :3] = nodes_np / np.asarray([50.0, 150.0, 12.0], dtype=np.float32)
+        x[:, 3] = np.minimum(degree, 8.0) / 8.0
+        with self.lock:
+            ranking = dict(self.semantic_ranking)
+        for row in range(3):
+            for col in range(5):
+                class_index = row * 5 + col
+                idx = candidate_indices[class_index]
+                semantic = ranking.get(col)
+                if semantic is None:
+                    score = 0.5
+                    confidence = 1.0
+                else:
+                    score = float(semantic["score"])
+                    confidence = float(semantic["confidence"])
+                x[idx, 4] = score
+                x[idx, 5] = confidence
+                x[idx, 6] = 1.0
+                x[idx, 7] = class_index / 14.0
+        x[:, 8] = np.linalg.norm(nodes_np, axis=1) / 160.0
+        x[:, 9] = np.linalg.norm(nodes_np - goal[None], axis=1) / 160.0
+        x[odom_index, 10] = 1.0
+        x[candidate_indices[5:10], 11] = 1.0
+        x[:, 12] = math.sin(yaw)
+        x[:, 13] = math.cos(yaw)
+        delta = nodes_np - position[None]
+        c, s = math.cos(yaw), math.sin(yaw)
+        body_x = c * delta[:, 0] + s * delta[:, 1]
+        body_y = -s * delta[:, 0] + c * delta[:, 1]
+        x[:, 14] = body_x / 80.0
+        x[:, 15] = body_y / 80.0
+        x[:, 16] = delta[:, 2] / 12.0
+        x[:, 17] = np.linalg.norm(delta, axis=1) / 80.0
+        x[:, 18] = np.arctan2(body_y, body_x) / math.pi
+        x[:, 19] = np.arctan2(delta[:, 2], np.maximum(np.linalg.norm(delta[:, :2], axis=1), 1e-6)) / math.pi
+        goal_delta = goal - position
+        goal_body = np.array([
+            c * goal_delta[0] + s * goal_delta[1],
+            -s * goal_delta[0] + c * goal_delta[1]], dtype=np.float32)
+        x[:, 20] = goal_body[0] / 140.0
+        x[:, 21] = goal_body[1] / 140.0
+        x[:, 22] = goal_delta[2] / 12.0
+        x[:, 23] = float(np.clip(self.route_progress_t, 0.0, 1.0))
+        directed = list(edges)
+        edge_index = torch.tensor(directed, dtype=torch.long).t().contiguous()
+        weights = [1.0 / max(float(np.linalg.norm(nodes_np[a] - nodes_np[b])), 1e-3)
+                   for a, b in directed]
+        return {
+            "x": torch.from_numpy(x).to(self.device),
+            "edge_index": edge_index.to(self.device),
+            "edge_weight": torch.tensor(weights, dtype=torch.float32, device=self.device),
+            "frontier_index": torch.tensor(candidate_indices, dtype=torch.long, device=self.device),
+            "frontier_columns": torch.arange(15, dtype=torch.long, device=self.device),
+            "safe_columns": torch.ones(15, dtype=torch.bool, device=self.device),
+        }, nodes_np, candidate_indices
+
     def tick(self) -> None:
         with self.lock:
             odom, markers, goal = self.odom, self.graph_markers, self.goal.copy()
         if odom is None or markers is None or not self.have_goal:
             return
-        position = np.array([odom.pose.pose.position.x, odom.pose.pose.position.y], dtype=np.float32)
+        position = np.array([
+            odom.pose.pose.position.x, odom.pose.pose.position.y, odom.pose.pose.position.z
+        ], dtype=np.float32)
         yaw = yaw_from_quaternion(odom.pose.pose.orientation)
-        candidates = []
-        for column in range(5):
-            angle = yaw + (column - 2) * math.radians(20.0)
-            candidates.append(position + self.args.candidate_distance *
-                             np.array([math.cos(angle), math.sin(angle)], dtype=np.float32))
-        # Reachability and collision safety remain the downstream A*'s job.
-        # The classifier only selects one of the five relative directions.
-        safe = [True] * 5
-        sample_data = self.make_sample(markers, position, yaw, goal, safe)
+        if self.is_3d_model:
+            sample_data = self.make_sample_3d(markers, position, yaw, goal)
+        else:
+            candidates = []
+            for column in range(5):
+                angle = yaw + (column - 2) * math.radians(20.0)
+                candidates.append(position[:2] + self.args.candidate_distance *
+                                 np.array([math.cos(angle), math.sin(angle)], dtype=np.float32))
+            # Reachability and collision safety remain the downstream A*'s job.
+            # The classifier only selects one of the five relative directions.
+            safe = [True] * 5
+            sample_data = self.make_sample(markers, position[:2], yaw, goal, safe)
         if sample_data is None:
             return
         sample, _, _ = sample_data
@@ -249,9 +378,20 @@ class GcnFrontierPolicy(Node):
         marker.type = Marker.ARROW; marker.action = Marker.ADD; marker.scale.x = 2.0
         marker.scale.y = 0.15; marker.scale.z = 0.15
         marker.color.r = 0.73; marker.color.b = 1.0; marker.color.a = 1.0
-        marker.pose.position.x = float(position[0]); marker.pose.position.y = float(position[1]); marker.pose.position.z = float(odom.pose.pose.position.z)
-        marker.pose.orientation.z = math.sin(0.5 * (yaw + (selected - 2) * math.radians(20.0)))
-        marker.pose.orientation.w = math.cos(0.5 * (yaw + (selected - 2) * math.radians(20.0)))
+        marker.pose.position.x = float(position[0]); marker.pose.position.y = float(position[1]); marker.pose.position.z = float(position[2])
+        if self.is_3d_model:
+            row, col = divmod(selected, 5)
+            pitch = math.radians({0: 20.0, 1: 0.0, 2: -20.0}[row])
+            yaw_sel = yaw + (col - 2) * math.radians(20.0)
+            half_yaw = 0.5 * yaw_sel
+            half_pitch = 0.5 * pitch
+            marker.pose.orientation.x = 0.0
+            marker.pose.orientation.y = math.sin(half_pitch)
+            marker.pose.orientation.z = math.sin(half_yaw) * math.cos(half_pitch)
+            marker.pose.orientation.w = math.cos(half_yaw) * math.cos(half_pitch)
+        else:
+            marker.pose.orientation.z = math.sin(0.5 * (yaw + (selected - 2) * math.radians(20.0)))
+            marker.pose.orientation.w = math.cos(0.5 * (yaw + (selected - 2) * math.radians(20.0)))
         self.marker_pub.publish(marker)
 
 

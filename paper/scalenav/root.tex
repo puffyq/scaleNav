@@ -1,5 +1,5 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% ScaleNav -- ICRA-style manuscript (revised draft)
+% TopoGuide -- ICRA-style manuscript (revised draft)
 % Compile with ./build.sh
 % Figures under pics/ are rendered when present; otherwise a labeled
 % placeholder box is shown so the manuscript compiles standalone.
@@ -38,24 +38,19 @@
        \vspace{1.6em}}}\endgroup}}
 
 \title{\LARGE \bf
-ScaleNav: A Plug-and-Play Topological Route Layer\\
+TopoGuide: A Plug-and-Play Topological Route Layer\\
 for Language-Guided Aerial Navigation
 }
 
-\author{First Author$^{1}$ and Second Author$^{2}$%
-\thanks{This work was not supported by any organization.}%
-\thanks{$^{1}$First Author is with the Affiliation,
-        {\tt\small first.author@example.com}}%
-\thanks{$^{2}$Second Author is with the Affiliation,
-        {\tt\small second.author@example.com}}%
-}
+% Author block anonymized for the double-anonymous review process.
+\author{Anonymous Authors}
 
 \IEEEaftertitletext{%
   \begin{center}
   \safefig[width=0.98\textwidth]{pics/teaser.pdf}
   \vspace{3pt}
   \parbox{0.98\textwidth}{\footnotesize
-  \textbf{Fig. 1.}~ScaleNav's layered route decision in Map2.
+  \textbf{Fig. 1.}~TopoGuide's layered route decision in Map2.
   (a)~Synchronized RGB, semantic response, and depth at graph time $t^*$;
   white depth pixels have no return beyond $20$~m. (b)~The light footprint is
   the complete UE mesh truth for reference. Dots and thin links are persistent
@@ -80,7 +75,7 @@ for Language-Guided Aerial Navigation
 \begin{abstract}
 Goal-conditioned local planners react quickly to observed geometry but do not
 retain the route memory needed to circumnavigate obstacles larger than their
-sensing horizon.  ScaleNav is a plug-and-play topological route layer that
+sensing horizon.  TopoGuide is a plug-and-play topological route layer that
 adds this memory without retraining or changing the core algorithm of the
 local planner.  From depth and odometry, it maintains persistent verified
 free-space bubbles and collision-checked witness paths while restricting each
@@ -91,14 +86,16 @@ selection from the online skeleton, while A* and geometric checks remain
 authoritative.  The accepted witness is exposed as a
 moving world-frame local goal: YOPO consumes it directly, while thin ROS
 adapters relay the same interface to EGO-Planner and SUPER.  No
-route-conditioned model or planner retraining is required.  In the fixed
-140-m mission, three ScaleNav-guided executor configurations achieved
+route-conditioned model or planner retraining is required.  In the primary
+140-m mission, three TopoGuide-guided executor configurations achieved
 $100\%$, $70\%$, and $90\%$ success, whereas each corresponding direct-goal
-control achieved $0\%$.  Across the persistent-map profile, the local graph and
-active A* workloads remain 214/249 and 185/215 nodes at P50/P95.  The result
-is an architectural separation: topology remembers and selects the route,
-acting as a navigator, while an interchangeable local planner executes only
-the next goal.
+control achieved $0\%$.  In a separate height-changing line-obstacle mission,
+the 3-D configuration achieved $80\%$ success and a
+$2.22\pm0.48$~m vertical span over successful flights.  Across the
+persistent-map profile, the local graph and active A* workloads remain
+214/249 and 185/215 nodes at P50/P95.  The result is an architectural
+separation: topology remembers and selects the route, acting as a navigator,
+while an interchangeable local planner executes only the next goal.
 \end{abstract}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -133,7 +130,7 @@ space, and hand a reactive executor a goal rather than a route.  For an aerial
 vehicle, the resulting gap between a slow semantic opinion and a fast
 commitment is precisely where missions are lost.
 
-ScaleNav closes this gap by making the hierarchy explicit rather than
+TopoGuide closes this gap by making the hierarchy explicit rather than
 implicit in a monolithic network.  Its first layer converts generic depth and
 odometry into a persistent graph of verified free-space bubbles connected by
 collision-checked witness polylines, with no occupancy grid or ESDF in the
@@ -142,17 +139,17 @@ explored, but rolling A* and graph updates operate on a fixed-radius local
 working set.  Its second, slower layer performs language-conditioned routing
 on that graph.  Depth-clipped semantic observations become provisional
 far-field frontiers and a continuous risk field along entire witnesses.  A
-topology-graph GCN ranks five frontier directions from the online skeleton,
+topology-graph GCN ranks discrete frontier directions from the online skeleton,
 while A*,
 collision checks, and route memory remain authoritative.  The selected route
 is stored as a world-frame witness and remapped after atomic graph replacement.
-Its third, fast layer is deliberately replaceable: ScaleNav samples a moving
+Its third, fast layer is deliberately replaceable: TopoGuide samples a moving
 local goal along the accepted witness and publishes a standard world-frame
 goal message.  YOPO \cite{yopo} consumes that goal directly; EGO-Planner and
 SUPER consume it through thin topic adapters.  Their planner cores are neither
 retrained nor made graph-aware.
 
-Functionally, ScaleNav acts as a topological navigator: it reads the course
+Functionally, TopoGuide acts as a topological navigator: it reads the course
 ahead from a persistent topological map and calls the next branch, while an
 interchangeable local planner remains the driver that executes the next goal;
 A* reachability and collision checks determine which calls are legal.
@@ -178,10 +175,11 @@ The main contributions are:
   while fixed-radius operations control online work
   (Secs.~\ref{sec:topology} and~\ref{sec:interface}).
   \item \textbf{A topology-graph GCN frontier policy.}
-  Weighted graph convolution, global topology pooling, and temporal direction
-  state learn a five-way, 35-m-look-ahead frontier decision directly on the
-  online skeleton, while downstream A* retains reachability and collision
-  authority (Sec.~\ref{sec:gcn}).
+  Weighted graph convolution and global topology pooling learn a
+  35-m-look-ahead frontier decision directly on the online skeleton.  The
+  policy supports five planar directions or 15 yaw--pitch directions, while
+  downstream A* retains reachability and collision authority
+  (Sec.~\ref{sec:gcn}).
   \item \textbf{Language preference separated from geometric authority.}
   Provisional far-field frontiers and witness-level semantic risk can change
   route ranking before reliable depth, while A* connectivity and collision
@@ -189,21 +187,21 @@ The main contributions are:
   \item \textbf{Cross-executor validation.}
   The same topology-layer implementation is connected to YOPO, EGO-Planner,
   and SUPER through executor-specific goal and command adapters, and evaluated
-  with conventional closed-loop flight and online-resource metrics
-  (Sec.~\ref{sec:experiments}).
+  in both the primary cross-planner mission and a height-changing 3-D
+  line-obstacle mission (Sec.~\ref{sec:experiments}).
 \end{itemize}
 
-The evaluation separates system integration, route selection, and graph
-persistence.  All reported semantic observations use PEARL \cite{pearl}; the
-interface itself is model-agnostic.  The present study isolates horizontal
-long-range branch selection using a fixed-height planning layer, while depth
-perception and local trajectory execution remain three-dimensional.
+The evaluation separates system integration, route selection, volumetric
+navigation, and graph persistence.  All reported semantic observations use
+PEARL \cite{pearl}; the interface itself is model-agnostic.  The primary
+cross-planner comparison holds altitude fixed for controlled branch selection,
+and a separate 3-D task enables the full volumetric graph and vertical motion.
 
 \begin{figure*}[!t]
 \centering
 \safefig[width=0.98\textwidth]{pics/system_architecture_topology_v3.pdf}
 \vspace{-2pt}
-\caption{ScaleNav as a plug-and-play route layer.  Depth and odometry maintain
+\caption{TopoGuide as a plug-and-play route layer.  Depth and odometry maintain
 persistent verified topology; RGB and text shape route cost, and a topology
 GCN ranks frontier directions.  A* and collision checks accept a
 witness before the moving-goal interface drives a goal-conditioned local
@@ -219,7 +217,7 @@ NanoMap operate on depth and short history \cite{rappids,nanomap}, EGO-Planner
 removes the ESDF from optimization \cite{egoplanner}, and learned policies
 generate motion primitives directly \cite{yopo,loquercio}.  Fast-Planner,
 FASTER, and SUPER instead combine search or point-cloud corridors with
-trajectory refinement \cite{fastplanner,faster,super}.  ScaleNav is
+trajectory refinement \cite{fastplanner,faster,super}.  TopoGuide is
 orthogonal: it supplies a persistent route decision above an unchanged local
 planner core through a goal adapter.
 
@@ -235,18 +233,19 @@ Graph convolutional networks aggregate relational state directly over sparse
 connectivity \cite{kipf2017gcn}, making them a natural alternative to raster or
 independent-candidate encoders for route selection.  Practical graph-policy
 designs combine node message passing, graph-level context, and an
-action-scoring head \cite{schutz2026gnnpolicy}.  ScaleNav instantiates this
+action-scoring head \cite{schutz2026gnnpolicy}.  TopoGuide instantiates this
 pattern on the online navigation skeleton with explicit topology-edge weights,
-global mean pooling, recurrent direction state, and a five-way frontier head.
+global topology pooling, and a candidate-scoring head; the planar policy also
+uses recurrent direction state.
 The 35-m route-direction labels and online candidate interface are specific to
-ScaleNav, while route construction and collision validation remain outside the
+TopoGuide, while route construction and collision validation remain outside the
 network.
 
 Open-vocabulary models align image regions with text
 \cite{clip,lseg,openseg,pearl} and have been lifted into semantic maps.
 Frontier-selection systems \cite{vlfm,rayfronts} use such evidence to choose
 where to go.
-ScaleNav addresses the complementary aerial problem of where to avoid:
+TopoGuide addresses the complementary aerial problem of where to avoid:
 semantic heatmaps become provisional graph frontiers and witness-level risk,
 but geometric graph checks remain authoritative.
 
@@ -282,9 +281,10 @@ the local planner appears in its update.  The slower $\Pi_{\mathrm{route}}$
 produces an accepted world-frame witness $\mathcal{W}_t$, an internal route
 anchor $\vect{g}^{\mathrm{front}}_t$, and a moving execution goal
 $\vect{g}^{\mathrm{loc}}_t$ sampled ahead on that witness.  When enabled, the
-topology-graph policy additionally publishes a five-way frontier column
-$\hat c_t\in\{0,1,2,3,4\}$; this is a ranking hint, not a trajectory or safety
-decision.  The plug-and-play boundary is the single standard goal
+topology-graph policy additionally publishes a frontier index $\hat c_t$:
+$\hat c_t\in\{0,\ldots,4\}$ in planar mode and
+$\hat c_t\in\{0,\ldots,14\}$ in volumetric mode.  This is a ranking hint, not
+a trajectory or safety decision.  The plug-and-play boundary is the single standard goal
 $\vect{g}^{\mathrm{loc}}_t$.  For YOPO, the released policy receives its usual
 $160\times96$ depth channel, body-frame motion, and this goal expressed in the
 body frame:
@@ -297,10 +297,12 @@ topic adapter.  This division mirrors hierarchical topological control
 \cite{ving}, but no graph tensor, semantic feature, witness polyline, or
 corridor representation crosses the executor boundary.
 
-We use a fixed-height planning layer in the current experiments to isolate
-the horizontal branch-selection problem.  Depth sensing, point memory, and
-local trajectory execution remain 3-D, and the semantic cost is defined on
-3-D witness polylines without requiring the fixed-height assumption.
+Bubble centers, checked witnesses, route progress, and moving goals are all
+represented in $\R^3$.  The implementation can optionally project the derived
+topology onto one navigation height for controlled planar comparisons.  With
+that projection disabled, graph construction and A* preserve node altitude,
+and the same witness interface commands vertical as well as horizontal motion.
+Semantic cost is evaluated on the complete 3-D witness in either mode.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \subsection{Topology Graph Construction and Maintenance}
@@ -389,7 +391,7 @@ control streams cannot expose a partially rebuilt topology.
 \label{sec:interface}
 The accepted witness, rather than a modified local policy, carries the route
 decision.  Let $\mathcal{W}_t(s)$ be its arc-length parameterization and
-$s_t$ the closest forward progress to the vehicle.  ScaleNav publishes
+$s_t$ the closest forward progress to the vehicle.  TopoGuide publishes
 \begin{equation}
  \vect{g}^{\mathrm{loc}}_t=
  \mathcal{W}_t\!\left(\min(s_t+\ell_{\mathrm{loc}},L_{\mathcal W})\right),
@@ -397,7 +399,7 @@ $s_t$ the closest forward progress to the vehicle.  ScaleNav publishes
 \label{eq:local_goal}
 \end{equation}
 The farther $\vect{g}^{\mathrm{front}}_t$ identifies the selected route branch
-inside ScaleNav and is published for state inspection; the executor follows
+inside TopoGuide and is published for state inspection; the executor follows
 only $\vect{g}^{\mathrm{loc}}_t$.  When a witness is replaced, the vehicle is
 projected onto the new polyline before Eq.~\eqref{eq:local_goal} is evaluated.
 A short hold gate suppresses transient goal loss during an atomic graph swap.
@@ -410,10 +412,10 @@ separate point-cloud and command bridges adapt the shared simulator I/O.  These
 adapters do not alter either planner's search, optimization, or control law.
 Consequently, the transferable contract is precise: a local planner must
 accept a position goal and publish executable commands; it need not understand
-ScaleNav's graph, semantics, or route memory.
+TopoGuide's graph, semantics, or route memory.
 
 The closed-loop experiments pass no corridor, bubble sequence, route mask, or
-graph feature into any planner and do not retrain planner weights.  ScaleNav
+graph feature into any planner and do not retrain planner weights.  TopoGuide
 instead preserves route intent by advancing the goal along the witness, while
 current depth and the local planner remain responsible for short-horizon
 motion.  A stale or invalid witness is rejected upstream and triggers new A*.
@@ -421,15 +423,18 @@ motion.  A stale or invalid witness is rejected upstream and triggers new A*.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \subsection{Topology-Graph GCN Frontier Policy}
 \label{sec:gcn}
-The GCN is ScaleNav's learned long-range route-selection component.  It
-predicts which of five directions should be considered first: left $40^\circ$,
-left $20^\circ$, forward, right $20^\circ$, or right $40^\circ$.  Its output is
-deliberately constrained to a frontier proposal: it neither creates a route
+The GCN is TopoGuide's learned long-range route-selection component.  In the
+planar configuration, it predicts which of five yaw directions should be
+considered first: left $40^\circ$, left $20^\circ$, forward, right $20^\circ$,
+or right $40^\circ$.  The 3-D configuration crosses these yaw angles with
+upward, level, and downward pitch rows, yielding 15 candidate directions.  In
+both cases, the output is only a frontier proposal: it neither creates a route
 nor publishes an executor command, leaving geometric acceptance to A*.
 
-At each inference tick, skeleton nodes and edges form the input graph.  Five
-virtual candidates are inserted $10$~m from the vehicle and connected to their
-nearest skeleton node with inverse-distance edge weights.  Each node has a
+At each inference tick, skeleton nodes and edges form the input graph.  In the
+planar configuration, five virtual candidates are inserted $10$~m from the
+vehicle and connected to their nearest skeleton node with inverse-distance
+edge weights.  Each node has a
 20-dimensional feature vector containing normalized world and body-frame
 position; bubble radius and degree; semantic score and confidence; candidate
 identity; origin and goal distance; odometry and forward-candidate flags; yaw;
@@ -453,29 +458,39 @@ context to produce a five-way route proposal; A* remains downstream.}
 \label{fig:gcn_model}
 \end{figure}
 
-Training labels use the complete static ground-truth point cloud, projected
+The volumetric checkpoint inserts all 15 yaw--pitch candidates, preserves
+three-dimensional graph coordinates, and uses 24 node features and three
+weighted GCN layers.  Its pitch rows are $+20^\circ$, $0^\circ$, and
+$-20^\circ$; the output remains subject to the same downstream A* and witness
+checks as the planar policy.
+
+Planar training labels use the complete static ground-truth point cloud, projected
 onto a $0.75$~m grid and inflated by the $1.2$~m vehicle radius.  Eight-neighbor A*
 provides the direction of the first path point at least $35$~m ahead;
 out-of-view and incomplete paths are discarded.  Session-level splits and
 class-weighted cross-entropy prevent adjacent frames from crossing splits.
+For the 3-D checkpoint, a 26-connected A* instead searches the inflated Unreal
+mesh volume and labels the yaw--pitch direction of the 35-m look-ahead point.
 The ground-truth geometry is used only to construct offline labels and is not
 available to the deployed policy.
-The resulting classifier is evaluated separately in
+The resulting planar classifier is evaluated separately in
 Sec.~\ref{sec:heuristic_eval}; its accuracy is not a safety claim.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{EXPERIMENTS}
 \label{sec:experiments}
-The evaluation examines three complementary aspects of the system: closed-loop
+The evaluation examines four complementary aspects of the system: closed-loop
 compatibility of the topological goal interface with different local planners,
 the effects of semantic cost and the GCN policy on route selection,
-and the online graph-search workload under persistent geometry.
+height-changing 3-D navigation, and the online graph-search workload under
+persistent geometry.
 Closed-loop and profiling trials are conducted in Unreal Engine 5.7 with
 Colosseum, an AirSim-compatible simulator \cite{airsim}, using synchronized
-RGB-D and odometry and a 1.6-m planning layer.  Every closed-loop condition
-uses the same static environment and one-way mission from $(0,0,1.6)$ to
-$(0,140,1.6)$~m; neither the obstacle
-layout nor the nominal start and goal is randomized across methods.
+RGB-D and odometry.  Unless noted otherwise, the primary experiments use a
+1.6-m planning layer and one-way mission from $(0,0,1.6)$ to
+$(0,140,1.6)$~m; neither the obstacle layout nor the nominal start and goal is
+randomized across methods.  Section~\ref{sec:3d_eval} separately evaluates a
+volumetric Map4 mission with the fixed-layer constraints disabled.
 
 \subsection{Evaluation Protocol}
 \label{sec:protocol}
@@ -508,12 +523,12 @@ sampling-based planners.
 
 \subsection{Cross-Planner Closed-Loop Evaluation}
 \subsubsection{Methods and Conditions}
-The primary comparison pairs each standalone executor with a ScaleNav-guided
-variant.  All ScaleNav variants run the same graph-node implementation,
+The primary comparison pairs each standalone executor with a TopoGuide-guided
+variant.  All TopoGuide variants run the same graph-node implementation,
 semantic route formulation, A* acceptance, witness memory, and local-goal
 publisher.  YOPO consumes the goal directly; EGO-Planner and SUPER use the
 adapter described in Sec.~\ref{sec:interface}.  Their internal planners do not
-consume ScaleNav data structures.  Each row in the plug-in comparison contains
+consume TopoGuide data structures.  Each row in the plug-in comparison contains
 ten valid trials.  Table~\ref{tab:params} lists route-layer parameters shared
 by the principal YOPO ablations.
 
@@ -559,8 +574,8 @@ online.  Matched language trials use the query ``blocks, wall.''
 \subsubsection{Results}
 Figure~\ref{fig:long_range_speed_trajectories} is a qualitative visualization of
 representative current-scene trajectories.  It contrasts frontier-only runs
-with graph-guided ScaleNav runs for YOPO, EGO-Planner, and SUPER; the
-ScaleNav (YOPO) panel uses the shortest successful trajectory from its
+with graph-guided TopoGuide runs for YOPO, EGO-Planner, and SUPER; the
+TopoGuide (YOPO) panel uses the shortest successful trajectory from its
 ten-trial evaluation.  Aggregate results are reported in
 Table~\ref{tab:graph_collision_comparison}.
 
@@ -571,8 +586,8 @@ Table~\ref{tab:graph_collision_comparison}.
 \caption{Representative trajectories with and without the topology graph.
 Rows compare YOPO-Simple,
 EGO-Planner, and SUPER; the left column uses each standalone planner with its
-direct mission goal and the right column uses the ScaleNav route layer.  The
-three ScaleNav panels use the shortest successful trajectory from their
+direct mission goal and the right column uses the TopoGuide route layer.  The
+three TopoGuide panels use the shortest successful trajectory from their
 respective evaluations.  Color denotes executed speed; circles, stars, and
 crosses mark starts, completed goals, and incomplete collision endpoints.}
 \label{fig:long_range_speed_trajectories}
@@ -581,8 +596,8 @@ crosses mark starts, completed goals, and incomplete collision endpoints.}
 \begin{table*}[t]
 \caption{Plug-in evaluation on the fixed 140-m mission ($n=10$ per
 row).  Every row uses the same map, start, goal, and obstacle sequence.  Each
-pair contrasts the executor's standalone goal with ScaleNav's moving local
-goal.  ScaleNav rows share the same topology-layer implementation;
+pair contrasts the executor's standalone goal with TopoGuide's moving local
+goal.  TopoGuide rows share the same topology-layer implementation;
 executor-specific adapters only relay goals, point clouds, and commands.}
 \label{tab:graph_collision_comparison}
 \centering
@@ -593,11 +608,11 @@ executor-specific adapters only relay goals, point clouds, and commands.}
 Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
 \midrule
 YOPO-Simple (no graph) & 0 & 100 & 0 & $129.79\pm0.58^\dagger$ & $61.46\pm0.36^\dagger$ & $2.11\pm0.01^\dagger$ & $6.46\pm0.02^\dagger$ \\
-ScaleNav (YOPO) & 100 & 0 & 0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ \\
+TopoGuide (YOPO) & 100 & 0 & 0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ \\
 EGO-Planner (no graph) & 0 & 100 & 0 & $73.24\pm0.69^\dagger$ & $54.32\pm1.05^\dagger$ & $1.35\pm0.02^\dagger$ & $2.43\pm0.25^\dagger$ \\
-ScaleNav (EGO) & 70 & 30 & 0 & $181.59\pm11.33$ & $114.05\pm7.82$ & $1.593\pm0.017$ & $2.852\pm0.292$ \\
+TopoGuide (EGO) & 70 & 30 & 0 & $181.59\pm11.33$ & $114.05\pm7.82$ & $1.593\pm0.017$ & $2.852\pm0.292$ \\
 SUPER (no graph) & 0 & 100 & 0 & $47.07\pm28.27^\dagger$ & $10.25\pm4.99^\dagger$ & $4.30\pm0.68^\dagger$ & $5.60\pm0.23^\dagger$ \\
-ScaleNav (SUPER) & 90 & 10 & 0 & $179.76\pm10.00$ & $39.32\pm2.62$ & $4.577\pm0.159$ & $5.829\pm0.043$ \\
+TopoGuide (SUPER) & 90 & 10 & 0 & $179.76\pm10.00$ & $39.32\pm2.62$ & $4.577\pm0.159$ & $5.829\pm0.043$ \\
 \bottomrule
 \end{tabular}
 }
@@ -605,14 +620,14 @@ ScaleNav (SUPER) & 90 & 10 & 0 & $179.76\pm10.00$ & $39.32\pm2.62$ & $4.577\pm0.
 
 All three standalone configurations terminated without a successful mission,
 whereas
-the ScaleNav-guided YOPO, EGO-Planner, and SUPER variants completed 10/10,
+the TopoGuide-guided YOPO, EGO-Planner, and SUPER variants completed 10/10,
 7/10, and 9/10 trials.  This demonstrates that the same topological goal
 contract is executable by three different planner cores.  Values marked
 $\dagger$ are means over truncated failed flights, not completion metrics;
-unmarked continuous values use successful flights only.  The ScaleNav (EGO)
+unmarked continuous values use successful flights only.  The TopoGuide (EGO)
 deployment uses a 200-s mission timeout, while the other rows use 90~s.
 
-The ScaleNav (YOPO) run produced no collision or timeout events: all ten trials
+The TopoGuide (YOPO) run produced no collision or timeout events: all ten trials
 reached the goal and satisfied the final position and settling-speed
 tolerances.  Relative to the 140-m straight-line mission, its mean path is
 31.59~m longer, corresponding to a $22.6\%$ path overhead.  The longest trial
@@ -620,10 +635,10 @@ was trial 6 at $188.43$~m and $36.72$~s, which accounts for most of the path
 length spread.  The mean terminal position error was $0.096\pm0.029$~m and
 the mean terminal speed was $0.294\pm0.004$~m/s.
 
-The latest executor regressions also expose distinct failure modes.  ScaleNav
+The latest executor regressions also expose distinct failure modes.  TopoGuide
 with EGO-Planner had three collisions after 31.30, 83.41, and 132.15~m of
 executed motion, spanning early, middle, and late portions of the mission.
-ScaleNav with SUPER had one early collision after 6.95~m of executed motion
+TopoGuide with SUPER had one early collision after 6.95~m of executed motion
 and no timeouts.  All ten trials in this evaluation were valid, with no
 exclusions.  These terminal records distinguish collision from route
 divergence or stall, but do not by themselves attribute a failure to the GCN,
@@ -675,13 +690,13 @@ confirming that route selection responds to the alignment between the language
 query and visual scene content.
 
 \subsubsection{GCN Frontier-Policy Ablation}
-To isolate the learned route-selection component, we compare ScaleNav's
+To isolate the learned route-selection component, we compare TopoGuide's
 hand-designed frontier ranking with the GCN policy while
 holding the fixed mission, semantic query, route-cost parameters, and YOPO
 executor fixed.
 
 \begin{table}[t]
-\caption{Frontier-Policy Ablation Within ScaleNav}
+\caption{Frontier-Policy Ablation Within TopoGuide}
 \label{tab:single_run_validation}
 \centering
 \small
@@ -764,6 +779,43 @@ green dashed arrow marks the 35-m mission-goal direction.}
 \label{fig:gcn_real_views}
 \end{figure*}
 
+\subsection{Height-Changing 3-D Navigation}
+\label{sec:3d_eval}
+We further evaluate the volumetric mode in a separate Map4 line-obstacle
+mission.  The start and goal are $(0,0,3.5)$ and $(0,140,3.5)$~m, placing the
+nominal flight height through the power-line corridor.  Both the graph-layer
+projection and YOPO's fixed-altitude constraint are disabled.  A dedicated
+15-direction checkpoint, trained on 2,200 graph states labeled by
+26-connected A* in the privileged 3-D mesh volume, ranks three pitch rows and
+five yaw columns; the online planner still observes only RGB-D, odometry, and
+the text query ``line.''
+
+\begin{table}[t]
+\caption{Height-Changing Map4 Line-Obstacle Mission ($n=10$).  Continuous
+values are computed over the successful flights.}
+\label{tab:3d_line_navigation}
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccccc}
+\toprule
+Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & $z$ span (m) \\
+\midrule
+TopoGuide (GCN-3D) & 80 & 20 & 0 & $167.40\pm13.83$ & $36.98\pm5.30$ & $4.564\pm0.327$ & $2.225\pm0.477$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+TopoGuide completes $80\%$ of the trials without timeout.  Every successful
+flight changes altitude substantially: the per-flight vertical span ranges
+from 1.731 to 2.934~m.  The shortest successful route is 149.203~m in
+30.934~s and spans 1.808~m vertically.  The two failures are early collisions
+after 10.907 and 10.019~m.  Together with the non-planar graph and executor
+settings, these trajectories verify that the same topology--witness--goal
+pipeline supports height-changing route execution rather than only planar
+branch selection.
+
 \subsection{Online Planning Workload}
 The online search is restricted to a local working set even when the verified
 topology persists outside the current sensing window.  The current
@@ -819,10 +871,10 @@ planner retraining or algorithm modification after the goal and command
 interfaces are adapted; it does not mean arbitrary planners can be connected
 without integration code.
 
-The single-goal interface defines a clear responsibility boundary.  ScaleNav
+The single-goal interface defines a clear responsibility boundary.  TopoGuide
 advances the goal along the accepted witness, while each executor retains
 responsibility for feasible short-horizon motion rather than receiving a
-corridor constraint or bubble sequence.  The 10/10, 7/10, and 9/10 ScaleNav
+corridor constraint or bubble sequence.  The 10/10, 7/10, and 9/10 TopoGuide
 outcomes demonstrate portability across three executor architectures in the
 fixed mission.
 
@@ -831,13 +883,16 @@ validity remains enforced by A* reachability and witness collision checks.
 Future graph policies can incorporate reachable clearance, braking margin,
 and A* cost directly and mask invalid columns before learned ranking.
 
-The controlled simulated mission and fixed-height layer isolate horizontal
-branch selection, while perception, memory, and local execution remain 3-D.
-Randomized layouts, vertical motion, dynamic obstacles, and real sensor and
-appearance variation are natural next tests.  Fixed-depth projections remain
-hypotheses: known-obstacle checks constrain their witnesses, and future work
-can quantify projection consistency and rejection.  Longer missions and
-process-RSS measurements will further characterize the persistent backbone.
+The primary Map2 comparison uses a common fixed-height layer to control the
+cross-executor study, while the Map4 line-obstacle evaluation exercises the
+volumetric graph, 15-direction GCN, and vertical executor motion.  Across its
+successful flights, the latter produces a mean vertical span of
+$2.225\pm0.477$~m.  Evaluation across randomized layouts, dynamic obstacles,
+and real sensor and appearance variation will test the same 3-D pipeline more
+broadly.  Fixed-depth projections remain hypotheses: known-obstacle checks
+constrain their witnesses, and future work can quantify projection consistency
+and rejection.  Longer missions and process-RSS measurements will further
+characterize the persistent backbone.
 
 Logged route state separates graph acceptance from execution; synchronized
 command and tracking traces can refine failure attribution.  The GCN uses
@@ -848,19 +903,22 @@ measure the complete system.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{CONCLUSION}
-ScaleNav is a topological route layer rather than another local planner.  It
+TopoGuide is a topological route layer rather than another local planner.  It
 turns depth and odometry into persistent witness-verified structure, combines
 language risk with a topology-graph GCN frontier policy upstream, and exports only
 a moving world-frame local goal.  The original YOPO policy consumes that goal
 directly, while goal adapters connect the same topology implementation to
 EGO-Planner and SUPER without planner retraining.  Closed-loop results across
 three heterogeneous executors validate the shared route layer and moving-goal
-contract, while the observed local search remains a few hundred nodes.  These
-results support the central systems claim: long-horizon memory and
-language-conditioned route choice can be added above interchangeable
-short-horizon executors.
+contract; a separate 3-D line-obstacle evaluation demonstrates height-changing
+graph construction and route execution.  The observed local search remains a
+few hundred nodes.  These results support the central systems claim:
+long-horizon memory and language-conditioned route choice can be added above
+interchangeable short-horizon executors in planar and volumetric missions.
 
-{\scriptsize
+\addtolength{\textheight}{-12cm}   % Balance the column lengths on the last
+                                   % page, as in the official ieeeconf template.
+
 \begin{thebibliography}{99}
 
 \bibitem{yopo}
@@ -1008,6 +1066,5 @@ S. Shah, D. Dey, C. Lovett, and A. Kapoor,
 Vehicles,'' in \emph{Field and Service Robotics}, 2018, pp. 621--635.
 
 \end{thebibliography}
-}
 
 \end{document}

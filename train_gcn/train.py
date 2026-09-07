@@ -167,7 +167,39 @@ class JointFrontierGCN(nn.Module):
         return logits.masked_fill(~sample["safe_columns"].bool(), torch.finfo(x.dtype).min), None
 
 
+class ThreeDFrontierGCN(nn.Module):
+    """GCN policy for fifteen 3-D directions (3 pitch rows x 5 yaw columns)."""
+
+    def __init__(self, input_dim=24, hidden_dim=128, num_classes=15):
+        super().__init__()
+        self.num_classes = num_classes
+        self.conv1 = WeightedGCN(input_dim, hidden_dim)
+        self.conv2 = WeightedGCN(hidden_dim, hidden_dim)
+        self.conv3 = WeightedGCN(hidden_dim, hidden_dim)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim * 4 + input_dim, hidden_dim * 2), nn.ReLU(),
+            nn.LayerNorm(hidden_dim * 2), nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(), nn.Linear(hidden_dim, 1))
+
+    def forward(self, sample, hidden=None, previous=-1):
+        raw = sample["x"]
+        x = torch.relu(self.conv1(raw, sample["edge_index"], sample["edge_weight"]))
+        x = x + torch.relu(self.conv2(x, sample["edge_index"], sample["edge_weight"]))
+        x = x + torch.relu(self.conv3(x, sample["edge_index"], sample["edge_weight"]))
+        graph = torch.cat([x.mean(0), x.max(0).values, x.min(0).values], dim=0)
+        candidates = x[sample["frontier_index"]]
+        raw_candidates = raw[sample["frontier_index"]]
+        values = self.head(torch.cat([
+            candidates, raw_candidates,
+            graph.expand(candidates.shape[0], -1)], dim=-1)).squeeze(-1)
+        logits = torch.full((self.num_classes,), torch.finfo(x.dtype).min, device=x.device)
+        logits[sample["frontier_columns"]] = values
+        return logits.masked_fill(~sample["safe_columns"].bool(), torch.finfo(x.dtype).min), None
+
+
 def build_model(input_dim, architecture="legacy"):
+    if architecture == "3d":
+        return ThreeDFrontierGCN(input_dim=input_dim, num_classes=15)
     if architecture == "strong":
         return StrongFrontierGCN(input_dim=input_dim)
     if architecture == "hybrid":
@@ -190,10 +222,12 @@ def session_groups(samples):
             for session, group in groups.items()}
 
 
-def accuracy_metrics(predictions, targets):
+def accuracy_metrics(predictions, targets, num_classes=None):
+    if num_classes is None:
+        num_classes = max([*predictions, *targets], default=0) + 1
     accuracy = sum(a == b for a, b in zip(predictions, targets)) / max(1, len(targets))
     per_class = []
-    for column in range(5):
+    for column in range(num_classes):
         indices = [i for i, target in enumerate(targets) if target == column]
         if indices:
             per_class.append(sum(predictions[i] == column for i in indices) / len(indices))
@@ -251,7 +285,7 @@ def baseline_report(samples):
         return 0.0, 0.0, 0.0
     targets = [s["target"] for s in samples]
     planner = [s["planner_target"] for s in samples]
-    planner_accuracy, planner_macro = accuracy_metrics(planner, targets)
+    planner_accuracy, planner_macro = accuracy_metrics(planner, targets, max(targets, default=0) + 1)
     switches = comparisons = 0
     for group in session_groups(samples).values():
         switches += sum(a["planner_target"] != b["planner_target"]
@@ -287,7 +321,7 @@ def main():
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--save", default="train_gcn/frontier_gcn.pt")
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
-    parser.add_argument("--architecture", default="joint", choices=("legacy", "strong", "hybrid", "joint"))
+    parser.add_argument("--architecture", default="joint", choices=("legacy", "strong", "hybrid", "joint", "3d"))
     parser.add_argument("--grad-accum", type=int, default=32)
     parser.add_argument("--no-class-weights", action="store_true")
     args = parser.parse_args()
@@ -321,9 +355,10 @@ def main():
         val_end = max(train_end + 1, int(len(ordered) * (1.0 - args.test_ratio)))
         train, val, test = ordered[:train_end], ordered[train_end:val_end], ordered[val_end:]
     input_dim = int(train[0]["x"].shape[1])
+    num_classes = int(bundle.get("num_classes", max(s["target"] for s in samples) + 1))
     model = build_model(input_dim, args.architecture).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    counts = [sum(sample["target"] == column for sample in train) for column in range(5)]
+    counts = [sum(sample["target"] == column for sample in train) for column in range(num_classes)]
     class_weights = torch.tensor(
         [len(train) / max(1, 5 * count) for count in counts],
         dtype=torch.float32, device=device)
@@ -331,8 +366,8 @@ def main():
         class_weights = None
     planner_acc, planner_macro, planner_switch_rate = baseline_report(test)
     test_targets = [sample["target"] for sample in test]
-    majority = max(range(5), key=lambda column: counts[column])
-    majority_acc, majority_macro = accuracy_metrics([majority] * len(test), test_targets)
+    majority = max(range(num_classes), key=lambda column: counts[column])
+    majority_acc, majority_macro = accuracy_metrics([majority] * len(test), test_targets, num_classes)
     print(f"device={device} samples={len(samples)} train={len(train)} val={len(val)} "
           f"test={len(test)} "
           f"sessions={len(sessions)} train_label_counts={counts}")
@@ -369,6 +404,7 @@ def main():
           f"test_column_mae={test_column_mae:.3f}")
     torch.save({"model": model.state_dict(), "input_dim": input_dim,
                 "architecture": args.architecture,
+                "num_classes": num_classes,
                 "best_epoch": best_epoch,
                 "train_sessions": sorted(train_sessions),
                 "val_sessions": sorted(val_sessions),

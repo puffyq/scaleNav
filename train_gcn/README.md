@@ -82,6 +82,35 @@ frames. 99.4% of predictions were within one adjacent column. The logged
 original planner matched the same strict static-map labels on only 22.2% of
 those frames.
 
+### Map4 render-mesh truth
+
+Map4 must not use `map4_privileged_rgbd_survey_20260906.ply` as ground truth:
+that file is still a finite set of camera observations. The Map4 dataset uses
+`paper/scalenav/pics/map4_mesh_truth_20260906.ply`, produced directly from all
+runtime UE static-render-mesh triangles. Instanced foliage is expanded using
+each instance's world transform. Triangles are clipped to the navigation slab
+`z=0.6..2.6 m` before their horizontal footprint is rasterized at `0.25 m`.
+Neither RGB-D nor flight-log point clouds contribute obstacle geometry.
+
+The exported truth contains 5,779 occupied cells from 227,360 triangle/slab
+intersections. At training resolution `0.75 m`, the 1.2 m inflated map has
+8,062 blocked cells and a valid A* route from `(0,0)` to `(0,140)`. Only
+`session_20260906_*` logs whose mission goal is `(0,140,1.6)` are eligible.
+
+The resulting artifacts are:
+
+```text
+train_gcn/dataset_privileged_map4_35m.pt       2,380 samples / 106 sessions
+train_gcn/global_occupancy_map4_r075_i12.pt    UE mesh truth occupancy
+train_gcn/frontier_gcn_map4_35m.pt             legacy GCN, best epoch 29
+train_gcn/map4_35m_gcn_viewer.html             300 checked samples
+```
+
+On the untouched session-level test split, Map4 reaches 71.3% exact accuracy,
+69.1% macro accuracy, and 89.0% within one adjacent column, versus 34.0% exact
+accuracy for the logged planner under the same oracle labels. The HTML viewer
+recomputed all embedded A* labels with `gt_visual_mismatches=0`.
+
 Generate the checked visualization with:
 
 ```bash

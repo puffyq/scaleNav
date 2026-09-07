@@ -1,0 +1,47 @@
+{
+  "source": "privileged AirSim DepthPlanar grid survey",
+  "frame": "world_enu",
+  "rpc_port": 41451,
+  "camera": "0",
+  "survey_positions": 40,
+  "yaw_views_per_position": 4,
+  "captures": 160,
+  "survey_x_enu_m": [
+    -40.0,
+    -20.0,
+    0.0,
+    20.0,
+    40.0
+  ],
+  "survey_y_enu_m": [
+    0.0,
+    20.0,
+    40.0,
+    60.0,
+    80.0,
+    100.0,
+    120.0,
+    140.0
+  ],
+  "survey_z_enu_m": 1.6,
+  "retained_bounds_enu_m": {
+    "x": [
+      -50.0,
+      50.0
+    ],
+    "y": [
+      -10.0,
+      150.0
+    ],
+    "z": [
+      0.6,
+      2.6
+    ]
+  },
+  "max_depth_m": 30.0,
+  "pixel_stride": 2,
+  "voxel_size_m": 0.25,
+  "surface_voxels": 17264,
+  "ply": "/mnt/code/lab/yopo/OpenSeek/paper/scalenav/pics/map4_privileged_rgbd_survey_20260906.ply",
+  "vehicle_pose_restored": true
+}

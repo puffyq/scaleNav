@@ -34,6 +34,23 @@ def load_summary(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(stream))
 
 
+def load_ply_xyz(path: Path) -> np.ndarray:
+    with path.open(encoding="ascii") as stream:
+        vertex_count = None
+        for line in stream:
+            if line.startswith("element vertex"):
+                vertex_count = int(line.split()[-1])
+            if line.strip() == "end_header":
+                break
+        if vertex_count is None:
+            raise ValueError(f"PLY has no vertex count: {path}")
+        points = np.loadtxt(stream, max_rows=vertex_count)
+    points = np.asarray(points, dtype=float)
+    if points.ndim != 2 or points.shape[1] < 3:
+        raise ValueError(f"PLY contains no XYZ vertices: {path}")
+    return points[:, :3]
+
+
 def read_record(line: str) -> dict:
     line = (line.replace(":-inf", ":-Infinity")
             .replace(":inf", ":Infinity")
@@ -100,6 +117,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--summary", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--obstacle-ply", type=Path,
+        help="privileged simulator survey used instead of logged online clouds",
+    )
     parser.add_argument("--expected-trials", type=int, default=10)
     parser.add_argument("--cell-size", type=float, default=0.5)
     parser.add_argument("--output-cell", type=float, default=1.0)
@@ -124,29 +145,47 @@ def main() -> None:
     best = min(successes, key=lambda row: float(row["path_m"]))
 
     analysis = load_analysis_module()
-    occupied = set()
-    sampled_frames = 0
-    accepted_points = 0
     intervals = {}
-    for row in rows:
-        session = Path(row["session_dir"])
-        start_ns, end_ns = mission_interval(session / "index.jsonl")
-        intervals[row["trial"]] = (start_ns, end_ns)
-        odom, pointclouds, _ = analysis.load_index(session)
-        cells, frames, points = analysis.load_occupied_cells(
-            session,
-            odom,
-            pointclouds,
-            start_ns,
-            end_ns,
-            cell_size=args.cell_size,
-            sample_period_ns=round(args.sample_period * 1e9),
-            min_z=args.min_z,
-            max_z=args.max_z,
+    best_session = Path(best["session_dir"])
+    intervals[best["trial"]] = mission_interval(best_session / "index.jsonl")
+    if args.obstacle_ply:
+        obstacle_points = load_ply_xyz(args.obstacle_ply)
+        height_mask = (
+            (obstacle_points[:, 2] >= args.min_z)
+            & (obstacle_points[:, 2] <= args.max_z)
         )
-        occupied.update(cells)
-        sampled_frames += frames
-        accepted_points += points
+        obstacle_points = obstacle_points[height_mask]
+        occupied = {
+            (int(np.floor(point[0] / args.cell_size)),
+             int(np.floor(point[1] / args.cell_size)))
+            for point in obstacle_points
+        }
+        sampled_frames = None
+        accepted_points = len(obstacle_points)
+        obstacle_source = str(args.obstacle_ply.resolve())
+    else:
+        occupied = set()
+        sampled_frames = 0
+        accepted_points = 0
+        obstacle_source = "union of online depth clouds from the batch"
+        for row in rows:
+            session = Path(row["session_dir"])
+            start_ns, end_ns = mission_interval(session / "index.jsonl")
+            odom, pointclouds, _ = analysis.load_index(session)
+            cells, frames, points = analysis.load_occupied_cells(
+                session,
+                odom,
+                pointclouds,
+                start_ns,
+                end_ns,
+                cell_size=args.cell_size,
+                sample_period_ns=round(args.sample_period * 1e9),
+                min_z=args.min_z,
+                max_z=args.max_z,
+            )
+            occupied.update(cells)
+            sampled_frames += frames
+            accepted_points += points
 
     bounds = (args.x_min, args.x_max, args.y_min, args.y_max)
     grid = analysis.density_grid(
@@ -160,7 +199,6 @@ def main() -> None:
     positive = image[image > 0.0]
     color_max = float(np.percentile(positive, 98.0)) if positive.size else 1.0
 
-    best_session = Path(best["session_dir"])
     positions, _ = load_trajectory(
         best_session / "index.jsonl", *intervals[best["trial"]]
     )
@@ -210,7 +248,12 @@ def main() -> None:
     axis.set_ylim(args.x_min, args.x_max)
     axis.set_xlabel("Longitudinal $y$ (m)")
     axis.set_ylabel("Lateral $x$ (m)")
-    axis.set_title("Map4 obstacle density and shortest successful trajectory", pad=7)
+    title = (
+        "Map4 privileged obstacle survey and shortest successful trajectory"
+        if args.obstacle_ply
+        else "Map4 observed obstacle density and shortest successful trajectory"
+    )
+    axis.set_title(title, pad=7)
     axis.grid(color="white", alpha=0.45, linewidth=0.55)
     for spine in axis.spines.values():
         spine.set_linewidth(0.7)
@@ -255,7 +298,8 @@ def main() -> None:
             for key in ("path_m", "duration_s", "average_speed_mps", "max_speed_mps")
         },
         "obstacle_map": {
-            "sessions": len(rows),
+            "source": obstacle_source,
+            "sessions": None if args.obstacle_ply else len(rows),
             "sampled_pointcloud_frames": sampled_frames,
             "accepted_flight_height_points": accepted_points,
             "occupied_cells": len(occupied),

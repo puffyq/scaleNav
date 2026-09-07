@@ -409,6 +409,11 @@ def start_stack(
         ]
     environment = os.environ.copy()
     environment["SCALENAV_LOG_DIR"] = str(args.log_root.resolve())
+    # Keep the controller's /scalenav/reset_sim target identical to the
+    # benchmark start pose after all command-line overrides are parsed.
+    environment["UAV_INITIAL_POSITION"] = (
+        f"[{args.start_x}, {args.start_y}, {args.start_z}]"
+    )
     if args.stack == "gcn":
         # The GCN launcher owns the optional PEARL process as well as the
         # frontier selector, so pass the same semantic settings used by the

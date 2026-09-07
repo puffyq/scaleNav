@@ -1,0 +1,88 @@
+{
+  "source": "Unreal runtime static render-mesh triangles",
+  "uses_camera_observations": false,
+  "uses_flight_logs_for_geometry": false,
+  "frame": "world_enu",
+  "bounds_enu_m": [
+    [
+      -50.0,
+      50.0
+    ],
+    [
+      -10.0,
+      150.0
+    ],
+    [
+      -2.0,
+      12.0
+    ]
+  ],
+  "resolution_m": 0.5,
+  "shape_xyz": [
+    200,
+    320,
+    28
+  ],
+  "rpc_seconds": 26.753958743996918,
+  "runtime_meshes": 0,
+  "source_triangles": 16657101,
+  "occupied_voxels": 203727,
+  "contributing_meshes": [
+    {
+      "name": "instancedfoliageactor_25600_-1_0_0",
+      "triangles": 843237,
+      "new_voxels": 11696
+    },
+    {
+      "name": "instancedfoliageactor_25600_0_-1_0",
+      "triangles": 7422628,
+      "new_voxels": 95074
+    },
+    {
+      "name": "instancedfoliageactor_25600_-1_-1_0",
+      "triangles": 161574,
+      "new_voxels": 1700
+    },
+    {
+      "name": "instancedfoliageactor_25600_-1_-1_0",
+      "triangles": 247385,
+      "new_voxels": 2002
+    },
+    {
+      "name": "instancedfoliageactor_25600_0_0_0",
+      "triangles": 7882701,
+      "new_voxels": 93079
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "triangles": 16596,
+      "new_voxels": 38
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "triangles": 16596,
+      "new_voxels": 20
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "triangles": 16596,
+      "new_voxels": 31
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "triangles": 16596,
+      "new_voxels": 37
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "triangles": 16596,
+      "new_voxels": 25
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "triangles": 16596,
+      "new_voxels": 25
+    }
+  ],
+  "npz": "/mnt/code/lab/yopo/OpenSeek/paper/scalenav/pics/map4_mesh_truth_3d_20260906.npz"
+}
