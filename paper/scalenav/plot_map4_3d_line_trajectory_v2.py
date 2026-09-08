@@ -133,24 +133,25 @@ def main() -> None:
     ])
     ax3d.scatter(
         trajectory[0, 1], trajectory[0, 0], trajectory[0, 2],
-        s=26, c="#111111", edgecolors="white", linewidths=0.6,
+        s=36, c="#111111", edgecolors="white", linewidths=0.7,
         depthshade=False, zorder=11,
     )
     ax3d.scatter(
-        140.0, 0.0, 3.5, marker="*", s=70, c=C_TRAJ,
-        edgecolors="white", linewidths=0.6, depthshade=False, zorder=11,
+        140.0, 0.0, 3.5, marker="*", s=80, c=C_TRAJ,
+        edgecolors="white", linewidths=0.7, depthshade=False, zorder=11,
     )
     ax3d.set_xlim(-6, 146)
     ax3d.set_ylim(-40, 40)
     ax3d.set_zlim(0, 8)
     ax3d.set_box_aspect((4.4, 2.4, 1.9))
     ax3d.view_init(elev=18, azim=-60)
-    ax3d.set_xlabel("$y$ (m)", labelpad=0)
-    ax3d.set_ylabel("$x$ (m)", labelpad=0)
-    ax3d.set_zlabel("$z$ (m)", labelpad=-2)
     ax3d.set_xticks([0, 35, 70, 105, 140])
     ax3d.set_yticks([-40, -20, 0, 20, 40])
     ax3d.set_zticks([0, 4, 8])
+    ax3d.text2D(0.30, 0.055, "$y$ (m)", transform=ax3d.transAxes, fontsize=8)
+    ax3d.text2D(0.955, 0.015, "$x$ (m)", transform=ax3d.transAxes, fontsize=8)
+    ax3d.text2D(1.005, 0.47, "$z$ (m)", transform=ax3d.transAxes,
+                fontsize=8, rotation=90, va="center")
     style_3d(ax3d)
     ax3d.text2D(0.02, 0.94, "(a)", transform=ax3d.transAxes,
                 fontsize=8.5, fontweight="bold", color=C_TEXT)

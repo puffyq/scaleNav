@@ -97,10 +97,15 @@ def main() -> None:
     edge_points = body_view(marker_points(graph, "scalenav_skeleton_edges"), origin, yaw)
     edges = edge_points.reshape(-1, 2, 2)
     path = body_view(marker_points(graph, "scalenav_astar_topology_path"), origin, yaw)
-    semantic = body_view(marker_points(graph, "scalenav_semantic_points"), origin, yaw)
     cloud_cam = read_pcd(SESSION / POINTCLOUD_FILE)
     cloud_world = rotate_points(cloud_cam, pose["orientation"]) + origin[None, :]
     cloud = body_view(cloud_world, origin, yaw)
+    mission_goal = body_view(np.asarray([[0.0, 140.0, origin[2]]]), origin, yaw)[0]
+    mission_dir = mission_goal[:2] / max(np.linalg.norm(mission_goal[:2]), 1e-6)
+    mission_tip = 31.0 * mission_dir
+    frontier_goal = body_view(
+        np.asarray([marker(graph, "scalenav_frontier_goal")["pose"]["position"]]),
+        origin, yaw)[0]
 
     plt.rcParams.update({
         "font.family": "serif",
@@ -114,30 +119,39 @@ def main() -> None:
                              gridspec_kw={"wspace": 0.34})
     fig.subplots_adjust(left=0.01, right=0.99, top=0.80, bottom=0.04)
 
-    def base(ax):
-        for edge in edges:
-            ax.plot(edge[:, 0], edge[:, 1], color="#B4C0C4", lw=0.34, alpha=0.8)
-        ax.scatter(nodes[:, 0], nodes[:, 1], s=2.7, color="#526D77", alpha=0.9)
-        if len(semantic):
-            ax.scatter(semantic[:, 0], semantic[:, 1], marker="x", s=8,
-                       color="#D6544D", lw=0.55, alpha=0.7)
+    def base(ax, show_graph=False):
+        if len(cloud):
+            ax.scatter(cloud[:, 0], cloud[:, 1], s=1.0, color="#88969C", alpha=0.38,
+                       linewidths=0, zorder=1)
+        if show_graph:
+            for edge in edges[::5]:
+                ax.plot(edge[:, 0], edge[:, 1], color="#B4C0C4", lw=0.30, alpha=0.58)
+            ax.scatter(nodes[::2, 0], nodes[::2, 1], s=2.5, color="#526D77", alpha=0.86)
         ax.scatter(0, 0, marker="^", s=21, color="#273941", edgecolors="white", lw=0.3)
         ax.set_xlim(-22, 22)
         ax.set_ylim(-1, 38)
         ax.set_aspect("equal", adjustable="box")
 
     base(axes[0])
-    axes[0].set_title("recorded graph sample", fontsize=5.2, loc="left", pad=1)
+    axes[0].plot([0.0, mission_tip[0]], [0.0, mission_tip[1]], color="#167F78", lw=1.15,
+                 solid_capstyle="round")
+    axes[0].scatter(mission_tip[0], mission_tip[1], marker="*", s=24,
+                    color="#167F78", edgecolors="white", lw=0.3)
+    axes[0].text(mission_tip[0] - 4.0, mission_tip[1] - 2.0, "mission",
+                 fontsize=4.0, color="#167F78", fontweight="bold", ha="right")
+    axes[0].set_title("point cloud + mission", fontsize=5.2, loc="left", pad=1)
 
     base(axes[1])
-    if len(cloud):
-        axes[1].scatter(cloud[:, 0], cloud[:, 1], s=1.0, color="#88969C", alpha=0.34,
-                        linewidths=0, zorder=1)
-    axes[1].set_title("recorded geometry", fontsize=5.2, loc="left", pad=1)
-
-    base(axes[2])
     if len(path) > 1:
-        axes[2].plot(path[:, 0], path[:, 1], color="#00878B", lw=1.35)
+        axes[1].plot(path[:, 0], path[:, 1], color="#00878B", lw=1.35)
+        axes[1].scatter(path[-1, 0], path[-1, 1], marker="o", s=12,
+                        color="#C97820", edgecolors="white", lw=0.3)
+    axes[1].text(-20.5, 34.0, r"GT path (A*)", fontsize=4.0,
+                 color="#00878B", fontweight="bold", ha="left",
+                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.88, pad=1.0))
+    axes[1].set_title("privileged GT path", fontsize=5.2, loc="left", pad=1)
+
+    base(axes[2], show_graph=True)
     offsets = np.deg2rad([40, 20, 0, -20, -40])
     for column, angle in enumerate(offsets):
         end = np.array([-16 * np.sin(angle), 16 * np.cos(angle)])
@@ -145,10 +159,12 @@ def main() -> None:
                      color="#7856D8" if column == TARGET_COLUMN else "#D8D0ED",
                      lw=1.25 if column == TARGET_COLUMN else 0.35,
                      alpha=1.0 if column == TARGET_COLUMN else 0.7)
-    axes[2].text(-20.5, 34.0, r"A* target $c=2$ (C)", fontsize=4.0,
+    axes[2].scatter(frontier_goal[0], frontier_goal[1], marker="*", s=25,
+                    color="#C97820", edgecolors="white", lw=0.3, zorder=5)
+    axes[2].text(-20.5, 34.0, r"FrontierGCN $\rightarrow c=2$ (C)", fontsize=3.8,
                  color="#7856D8", fontweight="bold", ha="left",
                  bbox=dict(facecolor="white", edgecolor="none", alpha=0.88, pad=1.0))
-    axes[2].set_title("offline A* target", fontsize=5.2, loc="left", pad=1)
+    axes[2].set_title("FrontierGCN output", fontsize=5.2, loc="left", pad=1)
 
     for ax in axes:
         ax.set_xticks([])
