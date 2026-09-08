@@ -8,7 +8,6 @@ from pathlib import Path
 
 import matplotlib
 import numpy as np
-from PIL import Image
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -20,6 +19,7 @@ SESSION = REPO / "log_scalenav" / "session_20260902_082638_86"
 RGB_FILE = "rgb/rgb_66.ppm"
 DEPTH_FILE = "depth/depth_76.pgm"
 GRAPH_FILE = "graph/graph_55.json"
+POINTCLOUD_FILE = "pointcloud/pointcloud_131.pcd"
 TARGET_COLUMN = 2
 
 
@@ -49,6 +49,32 @@ def marker_points(graph: dict, name: str) -> np.ndarray:
     return np.asarray(values, dtype=float).reshape(-1, 3)
 
 
+def read_pcd(path: Path) -> np.ndarray:
+    """Read XYZ points from a logged ASCII PCD."""
+    points = []
+    data = False
+    with path.open(encoding="ascii", errors="ignore") as stream:
+        for line in stream:
+            if line.lower().startswith("data"):
+                data = True
+                continue
+            if not data:
+                continue
+            fields = line.split()
+            if len(fields) >= 3:
+                try:
+                    points.append((float(fields[0]), float(fields[1]), float(fields[2])))
+                except ValueError:
+                    pass
+    return np.asarray(points, dtype=float)
+
+
+def rotate_points(points: np.ndarray, q: list[float]) -> np.ndarray:
+    qx, qy, qz, qw = map(float, q)
+    t = 2.0 * np.cross(np.array([qx, qy, qz]), points)
+    return points + qw * t + np.cross(np.array([qx, qy, qz]), t)
+
+
 def main() -> None:
     events = read_events()
     timing = min(
@@ -67,15 +93,14 @@ def main() -> None:
                            1 - 2 * (qy * qy + qz * qz)))
     graph = json.loads((SESSION / GRAPH_FILE).read_text(encoding="utf-8"))
 
-    rgb = np.asarray(Image.open(SESSION / RGB_FILE).convert("RGB"))
-    depth = np.asarray(Image.open(SESSION / DEPTH_FILE), dtype=float) / 1000.0
-    shown_depth = np.ma.masked_where(depth >= 20.0, depth)
-
     nodes = body_view(marker_points(graph, "scalenav_skeleton_nodes"), origin, yaw)
     edge_points = body_view(marker_points(graph, "scalenav_skeleton_edges"), origin, yaw)
     edges = edge_points.reshape(-1, 2, 2)
     path = body_view(marker_points(graph, "scalenav_astar_topology_path"), origin, yaw)
     semantic = body_view(marker_points(graph, "scalenav_semantic_points"), origin, yaw)
+    cloud_cam = read_pcd(SESSION / POINTCLOUD_FILE)
+    cloud_world = rotate_points(cloud_cam, pose["orientation"]) + origin[None, :]
+    cloud = body_view(cloud_world, origin, yaw)
 
     plt.rcParams.update({
         "font.family": "serif",
@@ -85,47 +110,45 @@ def main() -> None:
         "figure.facecolor": "white",
         "savefig.facecolor": "white",
     })
-    fig, axes = plt.subplots(1, 3, figsize=(3.48, 0.98),
-                             gridspec_kw={"wspace": 0.30})
+    fig, axes = plt.subplots(1, 3, figsize=(3.48, 1.02),
+                             gridspec_kw={"wspace": 0.34})
     fig.subplots_adjust(left=0.01, right=0.99, top=0.80, bottom=0.04)
 
-    axes[0].imshow(rgb, interpolation="nearest")
-    axes[0].set_title("logged RGB", fontsize=5.2, loc="left", pad=1)
-    axes[0].text(0.03, 0.05, "same frame as depth", transform=axes[0].transAxes,
-                 fontsize=3.8, color="white", fontweight="bold",
-                 bbox=dict(facecolor="#26363E", edgecolor="none", pad=1.2))
+    def base(ax):
+        for edge in edges:
+            ax.plot(edge[:, 0], edge[:, 1], color="#B4C0C4", lw=0.34, alpha=0.8)
+        ax.scatter(nodes[:, 0], nodes[:, 1], s=2.7, color="#526D77", alpha=0.9)
+        if len(semantic):
+            ax.scatter(semantic[:, 0], semantic[:, 1], marker="x", s=8,
+                       color="#D6544D", lw=0.55, alpha=0.7)
+        ax.scatter(0, 0, marker="^", s=21, color="#273941", edgecolors="white", lw=0.3)
+        ax.set_xlim(-22, 22)
+        ax.set_ylim(-1, 38)
+        ax.set_aspect("equal", adjustable="box")
 
-    axes[1].imshow(shown_depth, cmap="viridis", vmin=0.0, vmax=20.0,
-                   interpolation="nearest")
-    axes[1].set_title("logged depth", fontsize=5.2, loc="left", pad=1)
-    axes[1].text(0.03, 0.05, "depth-limited input", transform=axes[1].transAxes,
-                 fontsize=3.8, color="white", fontweight="bold",
-                 bbox=dict(facecolor="#26363E", edgecolor="none", pad=1.2))
+    base(axes[0])
+    axes[0].set_title("recorded graph sample", fontsize=5.2, loc="left", pad=1)
 
-    ax = axes[2]
-    for edge in edges:
-        ax.plot(edge[:, 0], edge[:, 1], color="#B4C0C4", lw=0.34, alpha=0.8)
-    ax.scatter(nodes[:, 0], nodes[:, 1], s=2.7, color="#526D77", alpha=0.9)
-    if len(semantic):
-        ax.scatter(semantic[:, 0], semantic[:, 1], marker="x", s=8,
-                   color="#D6544D", lw=0.55, alpha=0.7)
+    base(axes[1])
+    if len(cloud):
+        axes[1].scatter(cloud[:, 0], cloud[:, 1], s=1.0, color="#88969C", alpha=0.34,
+                        linewidths=0, zorder=1)
+    axes[1].set_title("recorded geometry", fontsize=5.2, loc="left", pad=1)
+
+    base(axes[2])
     if len(path) > 1:
-        ax.plot(path[:, 0], path[:, 1], color="#00878B", lw=1.35)
-    ax.scatter(0, 0, marker="^", s=21, color="#273941", edgecolors="white", lw=0.3)
+        axes[2].plot(path[:, 0], path[:, 1], color="#00878B", lw=1.35)
     offsets = np.deg2rad([40, 20, 0, -20, -40])
     for column, angle in enumerate(offsets):
         end = np.array([-16 * np.sin(angle), 16 * np.cos(angle)])
-        ax.plot([0, end[0]], [0, end[1]],
-                color="#7856D8" if column == TARGET_COLUMN else "#D8D0ED",
-                lw=1.25 if column == TARGET_COLUMN else 0.35,
-                alpha=1.0 if column == TARGET_COLUMN else 0.7)
-    ax.text(-16.0, 29.2, r"privileged A* $c=2$ (C)", fontsize=4.0,
-            color="#7856D8", fontweight="bold", ha="left",
-            bbox=dict(facecolor="white", edgecolor="none", alpha=0.88, pad=1.0))
-    ax.set_title("graph + expert label", fontsize=5.2, loc="left", pad=1)
-    ax.set_xlim(-17, 17)
-    ax.set_ylim(-1, 32)
-    ax.set_aspect("equal", adjustable="box")
+        axes[2].plot([0, end[0]], [0, end[1]],
+                     color="#7856D8" if column == TARGET_COLUMN else "#D8D0ED",
+                     lw=1.25 if column == TARGET_COLUMN else 0.35,
+                     alpha=1.0 if column == TARGET_COLUMN else 0.7)
+    axes[2].text(-20.5, 34.0, r"A* target $c=2$ (C)", fontsize=4.0,
+                 color="#7856D8", fontweight="bold", ha="left",
+                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.88, pad=1.0))
+    axes[2].set_title("offline A* target", fontsize=5.2, loc="left", pad=1)
 
     for ax in axes:
         ax.set_xticks([])
