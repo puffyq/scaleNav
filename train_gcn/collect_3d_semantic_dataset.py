@@ -272,6 +272,114 @@ def make_sample(position, yaw, goal, route, route_index, blocked, bounds, resolu
     }
 
 
+def make_privileged_sample(position, yaw, goal, route, route_index, free_points, bounds, resolution, rng, semantic_ranking):
+    target_cell = route_target(route, route_index, resolution, 35.0)
+    if target_cell is None:
+        return None
+    target_world = cell_to_world(target_cell, bounds, resolution)
+    target = class_for_direction(target_world - position, yaw)
+
+    dist = np.linalg.norm(free_points - position[None], axis=1)
+    local = free_points[dist < 30.0]
+    if len(local) > 180:
+        local = local[rng.choice(len(local), 180, replace=False)]
+
+    graph_nodes = local.tolist()
+    candidate_indices = []
+    for row, pitch_deg in enumerate((20.0, 0.0, -20.0)):
+        pitch = math.radians(pitch_deg)
+        for col in range(5):
+            angle = yaw + (col - 2) * math.radians(20.0)
+            candidate = position + 10.0 * np.asarray(
+                [
+                    math.cos(pitch) * math.cos(angle),
+                    math.cos(pitch) * math.sin(angle),
+                    math.sin(pitch),
+                ],
+                dtype=np.float32,
+            )
+            candidate_indices.append(len(graph_nodes))
+            graph_nodes.append(candidate.tolist())
+
+    graph_nodes = np.asarray(graph_nodes, dtype=np.float32)
+    local_count = len(local)
+    odom_index = int(np.argmin(np.linalg.norm(graph_nodes[:local_count] - position[None], axis=1))) if local_count else 0
+
+    edges = set()
+    for i in range(local_count):
+        nearest_local = np.argsort(np.linalg.norm(graph_nodes[:local_count] - graph_nodes[i], axis=1))[1:7]
+        edges.update((i, int(j)) for j in nearest_local)
+    for j in candidate_indices:
+        if local_count:
+            nearest_base = int(np.argmin(np.linalg.norm(graph_nodes[:local_count] - graph_nodes[j], axis=1)))
+            edges.add((nearest_base, j))
+            edges.add((j, nearest_base))
+
+    degree = np.zeros(len(graph_nodes), dtype=np.float32)
+    for a, _ in edges:
+        degree[a] += 1.0
+
+    x = np.zeros((len(graph_nodes), 24), dtype=np.float32)
+    x[:, :3] = graph_nodes / np.asarray([50.0, 150.0, 12.0], dtype=np.float32)
+    x[:, 3] = np.minimum(degree, 8.0) / 8.0
+    for row in range(3):
+        for col in range(5):
+            idx = candidate_indices[row * 5 + col]
+            semantic = semantic_ranking.get(col)
+            if semantic is None:
+                score = 0.5
+                confidence = 1.0
+            else:
+                score = float(semantic["score"])
+                confidence = float(semantic["confidence"])
+            x[idx, 4] = score
+            x[idx, 5] = confidence
+            x[idx, 6] = 1.0
+            x[idx, 7] = (row * 5 + col) / 14.0
+    x[:, 8] = np.linalg.norm(graph_nodes, axis=1) / 160.0
+    x[:, 9] = np.linalg.norm(graph_nodes - goal[None], axis=1) / 160.0
+    x[odom_index, 10] = 1.0
+    x[candidate_indices[5:10], 11] = 1.0
+    x[:, 12] = math.sin(yaw)
+    x[:, 13] = math.cos(yaw)
+    delta = graph_nodes - position[None]
+    c, s = math.cos(yaw), math.sin(yaw)
+    body_x = c * delta[:, 0] + s * delta[:, 1]
+    body_y = -s * delta[:, 0] + c * delta[:, 1]
+    x[:, 14] = body_x / 80.0
+    x[:, 15] = body_y / 80.0
+    x[:, 16] = delta[:, 2] / 12.0
+    x[:, 17] = np.linalg.norm(delta, axis=1) / 80.0
+    x[:, 18] = np.arctan2(body_y, body_x) / math.pi
+    x[:, 19] = np.arctan2(delta[:, 2], np.maximum(np.linalg.norm(delta[:, :2], axis=1), 1e-6)) / math.pi
+    goal_delta = goal - position
+    x[:, 20] = (c * goal_delta[0] + s * goal_delta[1]) / 140.0
+    x[:, 21] = (-s * goal_delta[0] + c * goal_delta[1]) / 140.0
+    x[:, 22] = goal_delta[2] / 12.0
+    x[:, 23] = float(route_index) / max(1, len(route))
+
+    directed = sorted(edges)
+    edge_index = torch.tensor(directed, dtype=torch.long).t().contiguous() if directed else torch.empty((2, 0), dtype=torch.long)
+    edge_weight = torch.tensor(
+        [1.0 / max(float(np.linalg.norm(graph_nodes[a] - graph_nodes[b])), 1e-3) for a, b in directed],
+        dtype=torch.float32,
+    )
+    return {
+        "x": torch.from_numpy(x),
+        "edge_index": edge_index,
+        "edge_weight": edge_weight,
+        "frontier_index": torch.tensor(candidate_indices),
+        "frontier_columns": torch.arange(15),
+        "safe_columns": torch.ones(15, dtype=torch.bool),
+        "target": target,
+        "planner_target": target,
+        "session": semantic_ranking.get("session", "map4_3d_privileged"),
+        "seq": int(semantic_ranking.get("seq", route_index)),
+        "position": position.tolist(),
+        "prompt": semantic_ranking.get("prompt", ""),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--logs-root", default="log_scalenav")
@@ -286,6 +394,7 @@ def main():
     parser.add_argument("--semantic-prompt", default="")
     parser.add_argument("--pearl-root", default=str(ROOT / "scalenav_ws" / "src" / "global_graph" / "heatmap_ws" / "pearl_ws"))
     parser.add_argument("--checkpoint", default="ViT-B/16")
+    parser.add_argument("--synthetic-samples", type=int, default=2200)
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
 
@@ -332,6 +441,7 @@ def main():
     )
 
     samples = []
+    semantic_profiles = []
     skipped = 0
     sessions = sorted(
         str(path) for path in Path(args.logs_root).glob("session_*")
@@ -409,6 +519,8 @@ def main():
                     if 0 <= int(item.get("column", -1)) < 5
                 }
             position = np.asarray(pose["data"]["position"], dtype=np.float32)
+            if semantic_ranking:
+                semantic_profiles.append((float(position[1]), dict(semantic_ranking)))
             orientation = pose["data"].get("orientation", [0.0, 0.0, 0.0, 1.0])
             yaw = yaw_from_quaternion(orientation)
             route_index = int(np.argmin(np.linalg.norm(route_world - position[None], axis=1)))
@@ -434,6 +546,58 @@ def main():
             samples.append(sample)
         print(f"session={os.path.basename(session)} collected={len(samples)}")
 
+    if args.synthetic_samples > 0:
+        free_cells = np.argwhere(~blocked)
+        free_points = np.asarray([cell_to_world(tuple(c), bounds, resolution) for c in free_cells], dtype=np.float32)
+        semantic_profiles.sort(key=lambda item: item[0])
+
+        def semantic_for_y(y_value):
+            if not semantic_profiles:
+                return {column: {"score": 0.5, "confidence": 1.0} for column in range(5)}
+            idx = int(np.argmin([abs(y - y_value) for y, _ in semantic_profiles]))
+            return dict(semantic_profiles[idx][1])
+
+        positions = []
+        stride = max(1, int(2.0 / resolution))
+        for i in range(0, len(route), stride):
+            positions.append((i, route_world[i]))
+        while len(positions) < args.synthetic_samples:
+            idx = int(rng.integers(0, len(route)))
+            base = route_world[idx]
+            jitter = rng.normal(0.0, 1.5, 3).astype(np.float32)
+            candidate = base + jitter
+            cell = world_to_cell(candidate, bounds, resolution)
+            if all(0 <= cell[i] < blocked.shape[i] for i in range(3)) and not blocked[cell]:
+                positions.append((idx, candidate))
+
+        synthetic_added = 0
+        for sample_index, (idx, position) in enumerate(positions[:args.synthetic_samples]):
+            if idx < len(route) - 1:
+                tangent = route_world[min(len(route) - 1, idx + max(1, int(4.0 / resolution)))] - route_world[idx]
+            else:
+                tangent = goal_world - position
+            yaw = math.atan2(float(tangent[1]), float(tangent[0]))
+            semantic_ranking = semantic_for_y(float(position[1]))
+            semantic_ranking["session"] = f"{semantic_prompt}_map4_3d_privileged_{sample_index // 200:02d}"
+            semantic_ranking["seq"] = sample_index % 200
+            semantic_ranking["prompt"] = semantic_prompt
+            sample = make_privileged_sample(
+                position,
+                yaw,
+                goal_world,
+                route,
+                min(idx, len(route) - 1),
+                free_points,
+                bounds,
+                resolution,
+                rng,
+                semantic_ranking,
+            )
+            if sample is not None:
+                samples.append(sample)
+                synthetic_added += 1
+        print(f"synthetic_privileged_added={synthetic_added} total={len(samples)}")
+
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     torch.save(
         {
@@ -448,6 +612,7 @@ def main():
                 "goal": goal_world.tolist(),
                 "route": route_world.tolist(),
                 "lookahead_m": args.lookahead,
+                "synthetic_samples": int(args.synthetic_samples),
             },
         },
         args.output,

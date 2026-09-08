@@ -33,18 +33,23 @@ planner's 5-column semantic ranking repeated across the three pitch rows.
 
 ## Offline result
 
-The dataset contains 2,200 generated graph states. The route from the start to
-the goal is 145.51 m and its A* height range is -1.75..3.75 m, so the route
-actually performs a vertical detour at the obstacle corridor.
+The current prompt-conditioned dataset contains 2,722 graph states: 522 states
+from eligible 3-D logs plus 2,200 privileged mesh-route states. The route from
+the start to the goal is 145.51 m and its A* height range is -1.75..3.75 m, so
+the route actually performs a vertical detour at the obstacle corridor. The
+dataset includes non-horizontal labels, so this is no longer just a 5-column
+horizontal classifier wrapped as 15 classes.
 
 Using the session-level split in `train.py`:
 
 ```text
-GCN accuracy              93.0%
-GCN macro accuracy        79.4%
-within one direction      96.5%
-majority-class baseline   79.5%
-planner/oracle label      100.0%
+majority-class baseline   22.7%
+planner semantic baseline 78.1%
+GCN accuracy              87.1%
+GCN macro accuracy        76.6%
+within one direction      96.9%
+mean column error         0.238
+best epoch                15
 ```
 
 ## Online command

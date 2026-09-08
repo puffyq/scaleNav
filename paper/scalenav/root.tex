@@ -45,27 +45,6 @@ for Language-Guided Aerial Navigation
 % Author block anonymized for the double-anonymous review process.
 \author{Anonymous Authors}
 
-\IEEEaftertitletext{%
-  \begin{center}
-  \safefig[width=0.98\textwidth]{pics/teaser_topoguide.pdf}
-  \vspace{3pt}
-  \parbox{0.98\textwidth}{\footnotesize
-  \textbf{Fig. 1.}~TopoGuide's layered route decision in Map2.
-  (a)~Synchronized RGB, semantic response, and depth at graph time $t^*$;
-  white depth pixels have no return beyond $20$~m. (b)~The light footprint is
-  the complete UE mesh truth for reference. Dots and thin links are persistent
-  skeleton nodes and collision-checked edges; teal is the logged A* topology
-  path, dashed orange is its polynomial witness, and black is the flown
-  trajectory. Red crosses are logged far-field semantic observations; the
-  three labeled goals are published by this graph snapshot. (c)~At a recorded
-  route fork before the large block, the GCN selects an early bypass matching
-  the 35-m A* label while the hand-designed ranking selects another column.
-  Dark points and links are the synchronized cloud and online skeleton; the
-  solid pale footprints are privileged context for visualization only.}
-  \end{center}%
-  \setcounter{figure}{1}%
-}
-
 \begin{document}
 \maketitle
 \thispagestyle{empty}
@@ -73,129 +52,138 @@ for Language-Guided Aerial Navigation
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{abstract}
-Goal-conditioned local planners react quickly to observed geometry but do not
-retain the route memory needed to circumnavigate obstacles larger than their
-sensing horizon.  TopoGuide is a plug-and-play topological route layer that
-adds this memory without retraining or changing the core algorithm of the
-local planner.  From depth and odometry, it maintains persistent verified
-free-space bubbles and collision-checked witness paths while restricting each
-online search to a local working set.  Open-vocabulary image responses add
-provisional far-field frontiers and continuous language-conditioned cost along
-verified witnesses.  A topology-graph GCN learns long-range frontier-direction
-selection from the online skeleton, while A* and geometric checks remain
-authoritative.  The accepted witness is exposed as a
-moving world-frame local goal: YOPO consumes it directly, while thin ROS
-adapters relay the same interface to EGO-Planner and SUPER.  No
-route-conditioned model or planner retraining is required.  In the primary
-140-m mission, three TopoGuide-guided executor configurations achieved
-$100\%$, $70\%$, and $90\%$ success, whereas each corresponding direct-goal
-control achieved $0\%$.  In a separate height-changing line-obstacle mission,
-the 3-D configuration achieved $80\%$ success and a
-$2.22\pm0.48$~m vertical span over successful flights.  Across the
-persistent-map profile, the local graph and active A* workloads remain
-214/249 and 185/215 nodes at P50/P95.  The result is an architectural
-separation: topology remembers and selects the route, acting as a navigator,
-while an interchangeable local planner executes only the next goal.
+Local obstacle avoiders perform well in dense small-obstacle fields.
+Their mapping modules, however, lack a unified representation for
+obstacles much larger than the sensing horizon.  Sensor limits make
+this gap worse: an obstacle can be visually obvious while depth
+returns no measurement until the vehicle is too close to react.
+Semantic heatmaps provide a beyond-visual-range cue that can guide
+route selection early in a mission, before reliable geometry exists.
+This paper presents TopoGuide, a plug-and-play topological route
+layer that combines the sparse, persistent representation of a
+verified topology graph with the long-range guidance of
+open-vocabulary semantic heatmaps.  A lightweight FrontierGCN ranks
+route directions directly on the online skeleton, while A* and
+collision checks remain authoritative.  The accepted route is
+exported only as a moving local goal, allowing existing
+local planners to keep their fast small-obstacle avoidance while
+gaining large-obstacle circumnavigation, without retraining or
+modification of the planner core.  The semantic heatmap is
+resolution-sensitive: higher input resolution carries richer scene
+information.  The fusion interface supports various input resolutions.  In a
+mission featuring a single 60-m-scale block that exceeds the depth
+range, TopoGuide raises success from $0\%$ to $100\%$ for the
+end-to-end planner YOPO, and to $70\%$ and $90\%$ for the
+conventional pipelines EGO-Planner and SUPER.  A height-changing
+mission with power-line obstacles and tree canopies further confirms
+the same interface in volumetric flight.  TopoGuide acts as a
+navigator: it remembers and selects the route, while an
+interchangeable local planner executes only the next goal.
 \end{abstract}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{INTRODUCTION}
-Flying quickly through an unknown environment forces a robot to reconcile
-processes that naturally operate at very different rates.  A local policy must
-convert the current depth image and vehicle state into a dynamically feasible
-command within milliseconds
-\cite{rappids,nanomap,egoplanner,yopo,loquercio}, whereas building a reusable
-map, reasoning over long-horizon alternatives, and running open-vocabulary
-perception all take orders of magnitude longer
-\cite{voxblox,clip}.  Learned one-stage planners
-\cite{yopo,loquercio} have shown
-how much a fast reactive layer alone can achieve; yet a single observation
-cannot preserve an early left--right commitment around a long obstacle, and
-once the fork disappears from view a memoryless policy is free to undo it.
-Topological memories in ground navigation have repeatedly demonstrated that
-retaining route structure, rather than reconstructing it from scratch at every
-tick, is what converts local reactivity into reliable long-range behavior
-\cite{sptm,ving}.
+Aerial missions in forests, cities, and mines demand simultaneous
+obstacle avoidance at vastly different scales, from branches and
+wires to buildings and large structures.  Receding-horizon local
+planners address the small-scale end of this spectrum well: fast
+geometric planners and learned policies use depth and vehicle state
+to generate short-horizon motion within milliseconds
+\cite{rappids,yopo,loquercio}, and optimization-based pipelines
+search and refine trajectories locally
+\cite{egoplanner,fastplanner,super}.  Both families have demonstrated
+effective avoidance in their evaluated dense environments.  Their
+mapping modules, however, lack a unified representation that supports
+both scales: local grids, distance fields, and lazy depth memories
+remain confined to a sensing window \cite{voxblox}.  These planners are fast but carry no route memory: a single
+observation cannot preserve an early left--right commitment around a
+long obstacle, and the decision can be reversed once the fork leaves
+the field of view.  A low-resolution global map \cite{voxblox} is a
+natural remedy.  It can route around large structures.  Coarse
+resolution, however, inflates narrow passages and closes them
+entirely, making dense regions untraversable precisely where the
+local planner excelled.  Sparse topological maps resolve this
+asymmetry: they preserve verified free-space connectivity at local
+geometric resolution while extending route memory far beyond the
+sensing horizon \cite{yamauchi,sptm,ving,epic,bubble}.
 
-A complementary opportunity has emerged on the perception side.  RGB carries
-evidence that depth does not: a power line, a glass facade, or a distant
-building can be semantically obvious in pixels while remaining invisible to a
-depth channel clipped at tens of meters.  Open-vocabulary models make this
-evidence addressable in free language
-\cite{clip,lseg,openseg,pearl}, and recent navigation systems already exploit
-it to choose \emph{where to go} \cite{vlfm,rayfronts}.
-What they largely do not address is \emph{where not to go} at flight speed:
-their semantic layers run at a few hertz, hold no executable notion of free
-space, and hand a reactive executor a goal rather than a route.  For an aerial
-vehicle, the resulting gap between a slow semantic opinion and a fast
-commitment is precisely where missions are lost.
+\begin{figure}[!t]
+\centering
+\safefig[width=\columnwidth]{pics/teaser_candidate_v4.png}
+\caption{Schematic of TopoGuide's layered route decision beyond the
+depth-sensing horizon. (a)~The RGB image, semantic response, and depth map
+are synchronized at graph time $t^*$; white depth pixels indicate no return
+beyond $20$~m. (b)~FrontierGCN selects the central direction at the route
+fork before the large obstacle, combines semantic observations with the
+verified graph and safety checks, and provides the selected route as a
+frontier goal. Blue-gray dots and links are verified graph nodes and edges;
+red crosses are high-confidence far-field semantic observations, while gray
+crosses are lower-confidence semantic candidates. The teal line is the
+accepted A* topology path, the orange dashed line is its polynomial witness,
+and the magenta diamond is the moving local goal.}
+\label{fig:teaser}
+\end{figure}
 
-TopoGuide closes this gap by making the hierarchy explicit rather than
-implicit in a monolithic network.  Its first layer converts generic depth and
-odometry into a persistent graph of verified free-space bubbles connected by
-collision-checked witness polylines, with no occupancy grid or ESDF in the
-route layer \cite{bubble,epic}.  The retained backbone may grow as new space is
-explored, but rolling A* and graph updates operate on a fixed-radius local
-working set.  Its second, slower layer performs language-conditioned routing
-on that graph.  Depth-clipped semantic observations become provisional
-far-field frontiers and a continuous risk field along entire witnesses.  A
-topology-graph GCN ranks discrete frontier directions from the online skeleton,
-while A*,
-collision checks, and route memory remain authoritative.  The selected route
-is stored as a world-frame witness and remapped after atomic graph replacement.
-Its third, fast layer is deliberately replaceable: TopoGuide samples a moving
-local goal along the accepted witness and publishes a standard world-frame
-goal message.  YOPO \cite{yopo} consumes that goal directly; EGO-Planner and
-SUPER consume it through thin topic adapters.  Their planner cores are neither
-retrained nor made graph-aware.
 
-Functionally, TopoGuide acts as a topological navigator: it reads the course
-ahead from a persistent topological map and calls the next branch, while an
-interchangeable local planner remains the driver that executes the next goal;
-A* reachability and collision checks determine which calls are legal.
+Onboard range sensors, including depth cameras and lightweight
+LiDARs, are bounded in range, field of view, and angular resolution.
+Thin or distant structures, such as power lines and building
+facades, can be visually conspicuous yet return no reliable range
+measurement until the vehicle is too close to react.  Open-vocabulary
+semantic heatmaps offer a complementary beyond-visual-range cue
+\cite{clip,openseg,pearl}: language-conditioned image responses
+can mark hazardous regions early in a mission, before reliable
+geometry exists.  Existing language-guided navigation systems exploit
+this cue to decide \emph{where to go} \cite{vlfm,rayfronts}, but they
+typically operate more slowly than the local controller and hand the
+executor a goal rather than a collision-certified route.  They do not
+address \emph{where not to go} at flight speed.
 
-This separation lets us state the safety boundary precisely, and we regard
-that boundary as a first-class design contribution.  The mapping layer
-validates measured free space.  A provisional semantic-frontier connection is
-an optimistic route hypothesis: it is checked against all currently known
-obstacles before publication, but it is never treated as proof that
-unobserved space is free.  Semantic risk repels or attracts route choices,
-while current depth and the local executor remain solely responsible for
-newly observed obstacles.  In the language of risk-aware planning
-\cite{blackmore}, semantic evidence enters as a shaped preference
-over verified alternatives, not as a probabilistic safety guarantee.
+This paper presents TopoGuide, a plug-and-play topological route
+layer that closes this gap.  TopoGuide maintains a sparse, persistent
+graph of verified free space \cite{bubble,epic} and fuses it with the
+long-range guidance of open-vocabulary semantic heatmaps
+\cite{pearl,clip}.  A lightweight FrontierGCN ranks candidate route
+directions directly on the online skeleton \cite{kipf2017gcn}, while
+A* search and collision checking retain acceptance authority.  The
+accepted route is exposed to the executor solely as a moving
+local goal.  Existing local planners therefore retain
+their small-obstacle agility and additionally acquire large-obstacle
+circumnavigation, with no retraining or modification of the planner
+core.  In this division of labor, TopoGuide acts as a navigator that
+remembers and selects the route, while an interchangeable local
+planner executes only the next goal \cite{ving}.
+
+Experiments on a 140-m course containing both dense small obstacles
+and a single 60-m-scale block show that three standalone executors,
+an end-to-end reactive policy and two conventional pipelines, fail to
+complete the mission, whereas the same planners guided by TopoGuide
+achieve success rates of $100\%$, $70\%$, and $90\%$.  A
+height-changing mission with power-line obstacles and tree canopies
+further validates the interface in volumetric flight.
 
 The main contributions are:
 \begin{itemize}
   \setlength\itemsep{0pt}
-  \item \textbf{A plug-and-play persistent topological route layer.}
-  Verified bubbles, witness edges, stable identities, and atomic replacement
-  preserve route structure.  A moving world-frame local goal exposes this
-  memory to goal-conditioned planners without graph inputs or retraining,
-  while fixed-radius operations control online work
-  (Secs.~\ref{sec:topology} and~\ref{sec:interface}).
-  \item \textbf{A topology-graph GCN frontier policy.}
-  Weighted graph convolution and global topology pooling learn a
-  35-m-look-ahead frontier decision directly on the online skeleton.  The
-  policy supports five planar directions or 15 yaw--pitch directions, while
-  downstream A* retains reachability and collision authority
+  \item \textbf{A plug-and-play topological route layer} that unifies
+  small- and large-scale obstacle avoidance: verified bubbles and
+  witness edges retain route memory, exposed to planners only through
+  a moving local goal (Secs.~\ref{sec:topology}
+  and~\ref{sec:interface}).
+  \item \textbf{A semantic heatmap fusion scheme} that supplies
+  beyond-visual-range guidance: far-field frontiers and witness-level
+  cost shape route preference without overriding geometric validity
+  (Sec.~\ref{sec:semantics}).
+  \item \textbf{A FrontierGCN frontier policy} that learns route
+  direction selection on the online skeleton, trained on privileged
+  A* labels from global environment maps, with recurrent temporal
+  state smoothing unreliable semantic observations
   (Sec.~\ref{sec:gcn}).
-  \item \textbf{Language preference separated from geometric authority.}
-  Provisional far-field frontiers and witness-level semantic risk can change
-  route ranking before reliable depth, while A* connectivity and collision
-  checks retain control of route acceptance (Sec.~\ref{sec:semantics}).
-  \item \textbf{Cross-executor validation.}
-  The same topology-layer implementation is connected to YOPO, EGO-Planner,
-  and SUPER through executor-specific goal and command adapters, and evaluated
-  in both the primary cross-planner mission and a height-changing 3-D
-  line-obstacle mission (Sec.~\ref{sec:experiments}).
+  \item \textbf{A cross-executor evaluation} in which one route-layer
+  implementation lifts three heterogeneous planners, end-to-end and
+  conventional, from $0\%$ to up to $100\%$ success on a mission none
+  completes alone (Sec.~\ref{sec:experiments}).
 \end{itemize}
-
-The evaluation separates system integration, route selection, volumetric
-navigation, and graph persistence.  All reported semantic observations use
-PEARL \cite{pearl}; the interface itself is model-agnostic.  The primary
-cross-planner comparison holds altitude fixed for controlled branch selection,
-and a separate 3-D task enables the full volumetric graph and vertical motion.
 
 \begin{figure*}[!t]
 \centering
@@ -212,60 +200,88 @@ topology, semantics, and route memory remain upstream.}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{RELATED WORK}
-Reactive aerial planners trade global consistency for latency: RAPPIDS and
-NanoMap operate on depth and short history \cite{rappids,nanomap}, EGO-Planner
-removes the ESDF from optimization \cite{egoplanner}, and learned policies
-generate motion primitives directly \cite{yopo,loquercio}.  Fast-Planner,
-FASTER, and SUPER instead combine search or point-cloud corridors with
-trajectory refinement \cite{fastplanner,faster,super}.  TopoGuide is
-orthogonal: it supplies a persistent route decision above an unchanged local
-planner core through a goal adapter.
+\subsection{Local Planning and Topological Route Memory}
+Local planners for aerial robots fall into two families.  Fast
+geometric planners and learned policies use depth and vehicle state
+to generate short-horizon motion commands or trajectories within
+milliseconds \cite{rappids,yopo,loquercio}, whereas
+optimization-based pipelines search and refine trajectories in local
+maps \cite{egoplanner,fastplanner} or plan directly on point
+clouds \cite{super}.  Both families have demonstrated effective
+avoidance in their evaluated dense environments, but these methods
+generally do not maintain a persistent, reusable route representation
+across local replanning.
 
-Topological and frontier memories provide the natural substrate for this
-separation.  Incremental frontier structures and bubble graphs
-\cite{yamauchi,tare,epic,bubble} preserve reusable free-space structure,
-while learned topological memories \cite{sptm,ving} show the value
-of graph state for long-horizon navigation.  Our graph stores verified
-witnesses, preserves route identity across atomic replacement, and exposes
-the same skeleton topology to the GCN frontier policy.
+Sparse topological representations complement such planners with
+route memory.  Frontier-based exploration retains frontier and
+explored-space structure \cite{yamauchi}; bubble-based structures
+support local replanning \cite{bubble}; and skeleton-based
+topological graphs organize exploration in complex environments
+\cite{epic}; and a persistent visibility graph enables
+route recall and backtracking in partially known environments
+\cite{farplanner}.  Learned visual memories and visual-goal
+policies further show that retained experience benefits
+longer-horizon navigation in ground and simulated domains
+\cite{sptm,ving}.  We build on these components for goal-directed
+flight: a topological skeleton with persistent, collision-checked
+witness paths, shared by geometric search and the learned frontier
+policy, and layered above an unchanged local planner core.
 
-Graph convolutional networks aggregate relational state directly over sparse
-connectivity \cite{kipf2017gcn}, making them a natural alternative to raster or
-independent-candidate encoders for route selection.  Practical graph-policy
-designs combine node message passing, graph-level context, and an
-action-scoring head \cite{schutz2026gnnpolicy}.  TopoGuide instantiates this
-pattern on the online navigation skeleton with explicit topology-edge weights,
-global topology pooling, and a candidate-scoring head; the planar policy also
-uses recurrent direction state.
-The 35-m route-direction labels and online candidate interface are specific to
-TopoGuide, while route construction and collision validation remain outside the
-network.
+\subsection{Semantic Heatmaps in Navigation}
+Open-vocabulary models align image regions with free-language queries
+\cite{clip,openseg,pearl} and have been lifted into spatial
+representations such as visual-language occupancy maps
+\cite{vlmaps}.  For navigation, VLFM
+builds frontier value maps from vision-language scores \cite{vlfm},
+and RayFronts couples semantic ray frontiers with a dense onboard
+occupancy map \cite{rayfronts}.  Their semantic update rates are
+generally lower than those of the local controller, and they do not
+directly provide collision-certified executable trajectories: in the
+cited systems, semantic evidence is primarily used for frontier or
+goal selection, while collision-certified route costs are handled
+separately.  We
+address the complementary question of where to avoid at flight speed:
+heatmap responses become provisional far-field frontiers and
+witness-level route cost.  This is consistent with risk-aware
+planning \cite{blackmore}, where uncertain evidence modifies route
+cost while geometric feasibility remains separately enforced.
 
-Open-vocabulary models align image regions with text
-\cite{clip,lseg,openseg,pearl} and have been lifted into semantic maps.
-Frontier-selection systems \cite{vlfm,rayfronts} use such evidence to choose
-where to go.
-TopoGuide addresses the complementary aerial problem of where to avoid:
-semantic heatmaps become provisional graph frontiers and witness-level risk,
-but geometric graph checks remain authoritative.
-
-Risk-aware planning shapes route preference without treating confidence as a
-collision probability \cite{blackmore}.  We follow this
-principle and keep semantic evidence behind a narrow interface; the
-topology graph, A*, and collision checks define executable free space.
+\subsection{Graph Neural Policies}
+Graph neural networks provide a general message-passing pattern that
+aggregates relational state over sparse connectivity \cite{kipf2017gcn}.
+In navigation, learned policies over topological or
+belief graphs select long-range subgoals and frontier nodes for visual
+navigation and exploration
+\cite{chaplot2020ntslam,chen2020gnnexplore,cao2023ariadne}, and have
+been validated on an aerial platform \cite{herrera2023gnnexplore}.
+On the training side, global search has been distilled into learned
+policies through imitation of heuristic search \cite{bhardwaj2017imitation},
+differentiable A* search \cite{yonetani2021neuralastar}, and
+privileged expert or critic supervision \cite{loquercio,cao2024largescale}.
+We adopt this pattern for high-rate route selection on an online
+route-memory skeleton, using edge-weighted convolution with global
+topology pooling and a recurrent direction state; labels are computed
+by A* on global environment maps, while the deployed policy observes
+only the partial online skeleton.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{METHOD}
+\section{TOPOLOGICAL MAPPING AND ROUTING}
 \label{sec:method}
-\subsection{Problem Formulation and System Overview}
 Let the vehicle state at time $t$ be
 $\vect{x}_t=(\vect{p}_t,\vect{v}_t,\vect{a}_t,\vect{R}_t)$.
 The sensors provide an RGB image $I_t$, a depth image $D_t$, and odometry.
 The mission specifies a world-frame goal $\vect{g}$ and a text query $q$
 describing regions to avoid.  No prior geometric map is available.
 
-The planner must output a dynamically feasible local trajectory $\tau_t$.
-Following the layered organization, mapping, route selection, and execution
-compose as
+TopoGuide resolves the mission into a three-level goal hierarchy.  The
+\emph{mission goal} $\vect{g}$ is the global task input and may lie far
+beyond the sensing range.  The \emph{frontier goal}
+$\vect{g}^{\mathrm{front}}_t$ is a route anchor selected on the topology
+graph: it commits to a branch before that branch is fully observed.  The
+\emph{local goal} $\vect{g}^{\mathrm{loc}}_t$ is sampled ahead on the
+accepted witness, within the executor's depth envelope, and is the only
+signal that crosses the planner boundary.  The planner must output a
+dynamically feasible local trajectory $\tau_t$.  Formally, mapping, route
+selection, and execution compose as
 \begin{align}
   \mathcal{G}_t
     &= \Pi_{\mathrm{map}}(\mathcal{G}_{t-1},D_t,\vect{x}_t), \\
@@ -275,58 +291,51 @@ compose as
   \tau_t
     &= \Pi_{\mathrm{exec}}(D_t,\vect{o}_t).
 \end{align}
-Each layer has a deliberately narrow interface.  $\Pi_{\mathrm{map}}$ consumes
-depth, odometry, and its previous graph state; neither the semantic model nor
-the local planner appears in its update.  The slower $\Pi_{\mathrm{route}}$
-produces an accepted world-frame witness $\mathcal{W}_t$, an internal route
-anchor $\vect{g}^{\mathrm{front}}_t$, and a moving execution goal
-$\vect{g}^{\mathrm{loc}}_t$ sampled ahead on that witness.  When enabled, the
-topology-graph policy additionally publishes a frontier index $\hat c_t$:
-$\hat c_t\in\{0,\ldots,4\}$ in planar mode and
-$\hat c_t\in\{0,\ldots,14\}$ in volumetric mode.  This is a ranking hint, not
-a trajectory or safety decision.  The plug-and-play boundary is the single standard goal
-$\vect{g}^{\mathrm{loc}}_t$.  For YOPO, the released policy receives its usual
-$160\times96$ depth channel, body-frame motion, and this goal expressed in the
-body frame:
+Each layer has a deliberately narrow interface.  $\Pi_{\mathrm{map}}$
+consumes depth, odometry, and its previous graph state; neither the semantic
+model nor the local planner appears in its update.  $\Pi_{\mathrm{route}}$
+produces the accepted witness $\mathcal{W}_t$ together with the frontier and
+local goals and, when enabled, a frontier index $\hat c_t$ from the learned
+policy; this index is a ranking hint, not a trajectory or safety decision.
+For YOPO, the released policy receives its unmodified depth channel,
+body-frame motion, and the local goal expressed in the body frame:
 \begin{equation}
  \vect{o}_t = [\vect{v}^{B}_t,\vect{a}^{B}_t,
                 (\vect{g}^{\mathrm{loc}}_t-\vect{p}_t)^{B}] \in \R^9.
 \end{equation}
-EGO-Planner and SUPER receive the same world-frame goal through a thin ROS
-topic adapter.  This division mirrors hierarchical topological control
-\cite{ving}, but no graph tensor, semantic feature, witness polyline, or
-corridor representation crosses the executor boundary.
+EGO-Planner and SUPER receive the same goal through a relay node.  No graph
+tensor, semantic feature, or route representation crosses the executor
+boundary; this division mirrors hierarchical topological control
+\cite{ving}.
 
-Bubble centers, checked witnesses, route progress, and moving goals are all
-represented in $\R^3$.  The implementation can optionally project the derived
-topology onto one navigation height for controlled planar comparisons.  With
-that projection disabled, graph construction and A* preserve node altitude,
-and the same witness interface commands vertical as well as horizontal motion.
-Semantic cost is evaluated on the complete 3-D witness in either mode.
+Bubble centers, checked witnesses, and moving goals are represented in
+$\R^3$.  An optional projection onto one navigation height supports
+controlled planar comparisons; with the projection disabled, graph
+construction and route search preserve altitude, and the same witness
+interface commands vertical as well as horizontal motion.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \subsection{Topology Graph Construction and Maintenance}
 \label{sec:topology}
-The mapper receives depth and odometry and publishes an atomic skeleton graph.
-It is independent of the semantic model, GCN, and local executor.  The current
-depth frame is voxel-filtered into obstacle points and free-ray evidence; no
-occupancy grid or ESDF is retained.  Collision-free bubbles are clustered into
-vertices
+The route layer maintains a sparse topological skeleton of verified free
+space.  Collision-free bubbles are clustered into vertices
 \begin{equation}
  v_i=(\vect{c}_i,\rho_i,z_i,h_i),
 \end{equation}
-where $\vect{c}_i$ is center, $\rho_i$ is clearance, $z_i$ is semantic state,
-and $h_i$ is a persistent identity.  Each edge stores a checked witness
-polyline $\pi_{ij}$ and length $L_{ij}$.  The witness, rather than the chord
-between endpoints, is the geometric object used by both collision checking
-and later semantic fusion.
+where $\vect{c}_i$ is the center, $\rho_i$ the clearance, $z_i$ the semantic
+state, and $h_i$ a persistent identity.  Each edge stores a checked witness
+polyline $\pi_{ij}$ and its length $L_{ij}$; the witness, rather than the
+chord between endpoints, is the geometric object used by both collision
+checking and semantic fusion.
 
-Graph construction runs asynchronously.  A background worker builds bubbles,
-clusters regions, connects candidate edges, and atomically swaps a complete
-snapshot into the planner.  The point buffer, local radius, and virtual-node
-cap bound transient memory; persistent identities survive graph replacement,
-while stale bubbles receive a grace period and are then deleted.  The minimum
-witness clearance $\bar\rho_{ij}$ contributes a soft preference
+Construction runs asynchronously and independently of the semantic model,
+the learned policy, and the local executor: depth frames are voxel-filtered
+into obstacle points, a background worker rebuilds bubbles, regions, and
+candidate edges, and a complete snapshot is atomically swapped into the
+planner.  No occupancy grid or ESDF is retained.  Persistent identities
+survive graph replacement, while stale bubbles are deleted after two
+consecutive rebuild misses.  The minimum witness clearance $\bar\rho_{ij}$
+contributes a soft preference
 \begin{equation}
  C_{\mathrm{clr}}(e_{ij})=
  \lambda_{\mathrm{clr}}L_{ij}
@@ -334,29 +343,30 @@ witness clearance $\bar\rho_{ij}$ contributes a soft preference
 \label{eq:clearance}
 \end{equation}
 but never turns a geometrically valid edge into an invalid one.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsection{Semantic Heatmap--Topology Fusion}
+\subsection{Semantic Heatmap Fusion}
 \label{sec:semantics}
-The frozen PEARL model maps $(I_t,q)$ to a patch heatmap.  We mean-pool it on
-a $5\times3$ grid and project each retained patch at fixed optical-axis depth
-$\ell_s$:
+A frozen PEARL model maps $(I_t,q)$ to a patch heatmap.  The heatmap is
+mean-pooled on a coarse grid, and each retained patch is projected at a
+fixed optical-axis depth $\ell_s$:
 \begin{equation}
  \vect{y}_{u,t}=\vect{p}_t+\mat{R}_t
  \left(\vect{t}_{\mathrm{cam}}+\ell_s\widetilde{\vect{d}}_u\right).
 \label{eq:projection}
 \end{equation}
-The projection does not consult measured depth, so an empty far-field return
-cannot erase semantic evidence.  A patch-mean score and confidence tuple
-$(s_i,c_i)$ is associated with a persistent graph identity; stale observations
-are rejected by timestamp gates and graph replacement restores the tuple.
+Because the projection does not consult measured depth, an empty far-field
+return cannot erase semantic evidence.  Each projection carries a
+score--confidence tuple $(s_i,c_i)$ associated with a persistent graph
+identity.
 
 High-scoring, spatially separated projections become provisional semantic
-frontiers.  An unknown frontier may attach to at most two nearby verified
-backbone nodes, but its witness is checked against all currently known
-obstacles and cannot connect two verified corridors through unknown space.
+frontiers.  A provisional frontier may attach only to nearby verified
+backbone nodes, and its witness is checked against all currently known
+obstacles; it cannot connect two verified corridors through unknown space.
 When later geometry creates a bubble at the same position, the identity is
-promoted to a verified node.  Thus a frontier is a route hypothesis, never a
-free-space certificate.
+promoted to a verified node.  A frontier is therefore a route hypothesis,
+never a free-space certificate.
 
 Semantic evidence is fused with complete witness edges rather than only with
 endpoints.  For semantic node $k$ and edge witness $\pi_{ij}$,
@@ -370,110 +380,102 @@ endpoints.  For semantic node $k$ and edge witness $\pi_{ij}$,
 \end{aligned}
 \label{eq:semantic_fusion}
 \end{equation}
-The resulting preference cost is
+The resulting preference cost
 \begin{equation}
  C_{\mathrm{sem}}(e_{ij})=
  \lambda_{\mathrm{sem}}L_{ij}
- [-\log(\max(\epsilon,1-r_{ij}))].
+ [-\log(\max(\epsilon,1-r_{ij}))]
 \label{eq:semantic_cost}
 \end{equation}
-It reshapes route preference but never overrides geometric validity.
+reshapes route preference but never overrides geometric validity.
 
-The planner searches reachable graph vertices within radius $R_g$ using
-$C(e)=W_{ij}+C_{\mathrm{clr}}(e)+C_{\mathrm{sem}}(e)$.  It stores the selected
-witness in world coordinates and holds it until progress reaches a fixed
-fraction or its geometric check fails.  A fresh search then replaces the
-complete route; no graph-node pointers are retained across atomic replacement.
-The asynchronous contract uses timestamped snapshots, so graph, semantic, and
-control streams cannot expose a partially rebuilt topology.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsection{Planner-Agnostic Goal Interface}
+\subsection{Route Search and Goal Interface}
 \label{sec:interface}
+Reachable vertices within radius $R_g$ are searched with the edge cost
+$C(e)=W_{ij}+C_{\mathrm{clr}}(e)+C_{\mathrm{sem}}(e)$.  The selected witness
+is stored in world coordinates and held until progress reaches a fixed
+fraction or its geometric check fails; a fresh search then replaces the
+complete route, and no graph-node pointers are retained across atomic
+replacement.
+
 The accepted witness, rather than a modified local policy, carries the route
 decision.  Let $\mathcal{W}_t(s)$ be its arc-length parameterization and
-$s_t$ the closest forward progress to the vehicle.  TopoGuide publishes
+$s_t$ the closest forward progress to the vehicle.  The local goal is
 \begin{equation}
  \vect{g}^{\mathrm{loc}}_t=
  \mathcal{W}_t\!\left(\min(s_t+\ell_{\mathrm{loc}},L_{\mathcal W})\right),
  \qquad \ell_{\mathrm{loc}}=15~\mathrm{m}.
 \label{eq:local_goal}
 \end{equation}
-The farther $\vect{g}^{\mathrm{front}}_t$ identifies the selected route branch
-inside TopoGuide and is published for state inspection; the executor follows
-only $\vect{g}^{\mathrm{loc}}_t$.  When a witness is replaced, the vehicle is
-projected onto the new polyline before Eq.~\eqref{eq:local_goal} is evaluated.
-A short hold gate suppresses transient goal loss during an atomic graph swap.
+The farther $\vect{g}^{\mathrm{front}}_t$ identifies the selected branch but
+is not sent to the executor.  When a witness is replaced, the vehicle is
+projected onto the new polyline before Eq.~\eqref{eq:local_goal} is
+evaluated.
 
-The implementation exposes $\vect{g}^{\mathrm{loc}}_t$ as a world-frame
-\texttt{geometry\_msgs/PoseStamped}.  The original YOPO checkpoint consumes it
-through its ordinary relative-goal input.  For EGO-Planner and SUPER, a thin
-bridge rate-limits and republishes the same message on their native goal topic;
-separate point-cloud and command bridges adapt the shared simulator I/O.  These
-adapters do not alter either planner's search, optimization, or control law.
-Consequently, the transferable contract is precise: a local planner must
-accept a position goal and publish executable commands; it need not understand
-TopoGuide's graph, semantics, or route memory.
-
-The closed-loop experiments pass no corridor, bubble sequence, route mask, or
-graph feature into any planner and do not retrain planner weights.  TopoGuide
-instead preserves route intent by advancing the goal along the witness, while
-current depth and the local planner remain responsible for short-horizon
-motion.  A stale or invalid witness is rejected upstream and triggers new A*.
+The executor contract is correspondingly narrow: a local planner must accept
+a position goal and produce executable commands.  The original YOPO
+checkpoint consumes the goal through its ordinary relative-goal input;
+EGO-Planner and SUPER receive it through a relay node.  No adapter alters a
+planner's search, optimization, or control law, and no corridor, bubble
+sequence, or graph feature crosses the interface.  A stale or invalid
+witness is rejected upstream and triggers a new search.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsection{Topology-Graph GCN Frontier Policy}
+\section{FRONTIERGCN DIRECTION POLICY}
 \label{sec:gcn}
-The GCN is TopoGuide's learned long-range route-selection component.  In the
-planar configuration, it predicts which of five yaw directions should be
-considered first: left $40^\circ$, left $20^\circ$, forward, right $20^\circ$,
-or right $40^\circ$.  The 3-D configuration crosses these yaw angles with
-upward, level, and downward pitch rows, yielding 15 candidate directions.  In
-both cases, the output is only a frontier proposal: it neither creates a route
-nor publishes an executor command, leaving geometric acceptance to A*.
+The FrontierGCN is TopoGuide's learned route-selection component.  It ranks
+five yaw directions, left $40^\circ$ to right $40^\circ$ in $20^\circ$
+steps, or, in the volumetric configuration, 15 yaw--pitch directions formed
+with pitch rows of $+20^\circ$, $0^\circ$, and $-20^\circ$.  Its output is
+only a frontier proposal: it neither creates a route nor issues an executor
+command, leaving geometric acceptance to A*.
 
-At each inference tick, skeleton nodes and edges form the input graph.  In the
-planar configuration, five virtual candidates are inserted $10$~m from the
-vehicle and connected to their nearest skeleton node with inverse-distance
-edge weights.  Each node has a
-20-dimensional feature vector containing normalized world and body-frame
-position; bubble radius and degree; semantic score and confidence; candidate
-identity; origin and goal distance; odometry and forward-candidate flags; yaw;
-range; bearing; and body-frame mission-goal state.  The deployed
-\texttt{FrontierGCN(input\_dim=20)} uses two lightweight edge-weighted GCN
-message-passing layers following classical graph convolution
-\cite{kipf2017gcn}.  Global mean pooling supplies graph-level context, a GRU
-fuses the previous direction, and an MLP scores the five candidate nodes.  Its
-column is published on \texttt{/scalenav/gcn\_frontier\_column}; A* then tests
-reachability and collision validity exactly as it does for a hand-designed
-ranking.  Figure~\ref{fig:gcn_model} summarizes this deployed policy.
+At each inference tick, skeleton nodes and edges form the input graph,
+and virtual candidates are inserted $10$~m ahead of the vehicle at the
+candidate directions and connected to their nearest skeleton node with
+inverse-distance edge weights.  Each node carries a 20-dimensional feature
+vector (24 in the volumetric variant) encoding normalized world- and
+body-frame position, bubble clearance and degree, semantic score and
+confidence, candidate identity, and mission-goal terms.  Two edge-weighted
+graph-convolution layers \cite{kipf2017gcn} encode the graph, global mean
+pooling supplies graph-level context, a GRU fuses the previously selected
+direction, and an MLP scores the candidates.  A* then tests reachability and
+collision validity exactly as it does for a hand-designed ranking.
+Figure~\ref{fig:gcn_model} summarizes the deployed policy.  The volumetric
+variant preserves three-dimensional graph coordinates and adds one
+convolution layer.
 
 \begin{figure}[t]
 \centering
+\makebox[\columnwidth][l]{\footnotesize\textbf{(a)} Deployed FrontierGCN}
+\\[-1pt]
 \safefig[width=0.98\columnwidth]{pics/gcn_model_architecture.pdf}
-\vspace{-3pt}
-\caption{Compact architecture of the deployed \texttt{FrontierGCN}.  Two weighted
-graph-convolution layers encode the online skeleton and five virtual
-candidates.  Candidate embeddings are scored with pooled recurrent graph
-context to produce a five-way route proposal; A* remains downstream.}
+\vspace{2pt}
+\makebox[\columnwidth][l]{\footnotesize\textbf{(b)} Privileged training-data generation}
+\\[-1pt]
+\safefig[width=0.98\columnwidth]{pics/gcn_training_data_log.pdf}
+\vspace{-2pt}
+\caption{FrontierGCN route-direction policy and its offline supervision.  (a)~Two
+weighted graph-convolution layers encode the online skeleton and five virtual
+candidates; pooled recurrent context produces a five-way route proposal, with
+A* downstream.  (b)~A synchronized RGB--depth frame and its logged online
+skeleton are paired with the privileged expert direction label ($c=2$, the
+central column) generated by the 35-m A* look-ahead.  The privileged label is
+used only during training and is unavailable at deployment.}
 \label{fig:gcn_model}
 \end{figure}
 
-The volumetric checkpoint inserts all 15 yaw--pitch candidates, preserves
-three-dimensional graph coordinates, and uses 24 node features and three
-weighted GCN layers.  Its pitch rows are $+20^\circ$, $0^\circ$, and
-$-20^\circ$; the output remains subject to the same downstream A* and witness
-checks as the planar policy.
-
-Planar training labels use the complete static ground-truth point cloud, projected
-onto a $0.75$~m grid and inflated by the $1.2$~m vehicle radius.  Eight-neighbor A*
-provides the direction of the first path point at least $35$~m ahead;
-out-of-view and incomplete paths are discarded.  Session-level splits and
-class-weighted cross-entropy prevent adjacent frames from crossing splits.
-For the 3-D checkpoint, a 26-connected A* instead searches the inflated Unreal
-mesh volume and labels the yaw--pitch direction of the 35-m look-ahead point.
-The ground-truth geometry is used only to construct offline labels and is not
-available to the deployed policy.
-The resulting planar classifier is evaluated separately in
+Training labels are privileged.  For the planar policy, the complete
+static ground-truth cloud is rasterized at $0.75$~m and inflated by the
+$1.2$~m vehicle radius; eight-neighbor A* returns the direction of the
+first path point at least $35$~m ahead.  The volumetric policy is labeled
+by 26-connected A* in the inflated mesh volume.  Out-of-view and incomplete
+paths are discarded, training minimizes class-weighted cross-entropy, and
+session-level splits keep adjacent frames out of both the training and test
+sets.  The ground-truth geometry is used only to
+construct offline labels and is not available to the deployed policy.  The
+resulting classifier is evaluated separately in
 Sec.~\ref{sec:heuristic_eval}; its accuracy is not a safety claim.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -517,8 +519,8 @@ failures therefore characterize these deployments, not universal planner
 capability.  The plug-in claim concerns the narrow goal interface and absence
 of planner-core changes, not strict experimental interchangeability.  The
 no-graph rows are direct-goal executor controls rather than competitive global
-planning baselines; Table~\ref{tab:graph_collision_comparison} therefore tests
-the route-interface deployment, not superiority over map-based global A* or
+planning baselines; Fig.~\ref{fig:integrated_results} therefore summarizes the
+route-interface deployment, not superiority over map-based global A* or
 sampling-based planners.
 
 \subsection{Cross-Planner Closed-Loop Evaluation}
@@ -526,7 +528,7 @@ sampling-based planners.
 The primary comparison pairs each standalone executor with a TopoGuide-guided
 variant.  All TopoGuide variants run the same graph-node implementation,
 semantic route formulation, A* acceptance, witness memory, and local-goal
-publisher.  YOPO consumes the goal directly; EGO-Planner and SUPER use the
+interface.  YOPO consumes the goal directly; EGO-Planner and SUPER use the
 adapter described in Sec.~\ref{sec:interface}.  Their internal planners do not
 consume TopoGuide data structures.  Each row in the plug-in comparison contains
 ten valid trials.  Table~\ref{tab:params} lists route-layer parameters shared
@@ -558,7 +560,8 @@ Semantic candidates/edge & 8 & Semantic grid & $5\times3$ \\
 \end{table}
 
 \subsubsection{Environment and Task}
-All methods traverse the same ordered obstacle course (Fig.~1(b)).  Along the
+All methods traverse the same ordered obstacle course
+(Fig.~\ref{fig:integrated_results}).  Along the
 $+y$ mission direction, the first approximately 25~m contain a dense field of
 small obstacles.  The latter half is dominated by a single approximately
 60-m-scale block, spanning roughly $y=68$--$122$~m and
@@ -572,59 +575,39 @@ is used only for environment characterization and is not available to any method
 online.  Matched language trials use the query ``blocks, wall.''
 
 \subsubsection{Results}
-Figure~\ref{fig:long_range_speed_trajectories} is a qualitative visualization of
-representative current-scene trajectories.  It contrasts frontier-only runs
-with graph-guided TopoGuide runs for YOPO, EGO-Planner, and SUPER; the
-TopoGuide (YOPO) panel uses the shortest successful trajectory from its
-ten-trial evaluation.  Aggregate results are reported in
-Table~\ref{tab:graph_collision_comparison}.
+Figure~\ref{fig:integrated_results} combines representative trajectory
+overlays, closed-loop outcome rates, and online-resource time series.  Each
+upper panel overlays one standalone executor with its TopoGuide-guided
+counterpart in a common Map2 frame.  The aligned lower panel reports the
+incremental route-layer wall time for that column's representative TopoGuide
+run.
 
 \begin{figure*}[!ht]
 \centering
-\safefig[width=0.90\textwidth]{pics/experiments/map2_0_140_1p6/trajectory_speed_comparison_topoguide.pdf}
+\safefig[width=0.98\textwidth]{pics/experiments/map2_0_140_1p6/figure4_integrated_topoguide.pdf}
 \vspace{-2pt}
-\caption{Representative trajectories with and without the topology graph.
-Rows compare YOPO-Simple,
-EGO-Planner, and SUPER; the left column uses each standalone planner with its
-direct mission goal and the right column uses the TopoGuide route layer.  The
-three TopoGuide panels use the shortest successful trajectory from their
-respective evaluations.  Color denotes executed speed; circles, stars, and
-crosses mark starts, completed goals, and incomplete collision endpoints.}
-\label{fig:long_range_speed_trajectories}
+\caption{Integrated cross-executor evaluation.  The upper row overlays each
+standalone executor (blue, orange, or green) with its TopoGuide counterpart
+(red) on the same Map2 obstacle backdrop; colors identify methods and do not
+encode speed, and upper-panel annotations report aggregate success.  The lower
+row shows the online route-layer wall-time profile for the corresponding guided
+run.  All curves are wall time in ms, binned over normalized mission time, and
+trace point processing, graph construction, the complete planning tick, and
+A* search latency.  Standalone logs do not expose comparable internal timing,
+so the lower row isolates TopoGuide's added route-layer workload rather than
+total executor compute.  Stars mark completed goals and crosses mark incomplete
+baseline flights.}
+\label{fig:integrated_results}
 \end{figure*}
-
-\begin{table*}[t]
-\caption{Plug-in evaluation on the fixed 140-m mission ($n=10$ per
-row).  Every row uses the same map, start, goal, and obstacle sequence.  Each
-pair contrasts the executor's standalone goal with TopoGuide's moving local
-goal.  TopoGuide rows share the same topology-layer implementation;
-executor-specific adapters only relay goals, point clouds, and commands.}
-\label{tab:graph_collision_comparison}
-\centering
-\small
-\resizebox{0.98\textwidth}{!}{%
-\begin{tabular}{lccccccc}
-\toprule
-Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
-\midrule
-YOPO-Simple (no graph) & 0 & 100 & 0 & $129.79\pm0.58^\dagger$ & $61.46\pm0.36^\dagger$ & $2.11\pm0.01^\dagger$ & $6.46\pm0.02^\dagger$ \\
-TopoGuide (YOPO) & 100 & 0 & 0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ \\
-EGO-Planner (no graph) & 0 & 100 & 0 & $73.24\pm0.69^\dagger$ & $54.32\pm1.05^\dagger$ & $1.35\pm0.02^\dagger$ & $2.43\pm0.25^\dagger$ \\
-TopoGuide (EGO) & 70 & 30 & 0 & $181.59\pm11.33$ & $114.05\pm7.82$ & $1.593\pm0.017$ & $2.852\pm0.292$ \\
-SUPER (no graph) & 0 & 100 & 0 & $47.07\pm28.27^\dagger$ & $10.25\pm4.99^\dagger$ & $4.30\pm0.68^\dagger$ & $5.60\pm0.23^\dagger$ \\
-TopoGuide (SUPER) & 90 & 10 & 0 & $179.76\pm10.00$ & $39.32\pm2.62$ & $4.577\pm0.159$ & $5.829\pm0.043$ \\
-\bottomrule
-\end{tabular}
-}
-\end{table*}
 
 All three standalone configurations terminated without a successful mission,
 whereas
 the TopoGuide-guided YOPO, EGO-Planner, and SUPER variants completed 10/10,
 7/10, and 9/10 trials.  This demonstrates that the same topological goal
 contract is executable by three different planner cores.  Values marked
-$\dagger$ are means over truncated failed flights, not completion metrics;
-unmarked continuous values use successful flights only.  The TopoGuide (EGO)
+in the upper panels are aggregate ten-run outcomes, while the trajectories are
+representative; failed-flight path and time are not treated as completion
+metrics.  The TopoGuide (EGO)
 deployment uses a 200-s mission timeout, while the other rows use 90~s.
 
 The TopoGuide (YOPO) run produced no collision or timeout events: all ten trials
@@ -682,7 +665,8 @@ whereas the semantic-off condition had four early collisions near
 $y\approx10$~m.  The
 successful-flight path and speed differences are secondary to this outcome
 gap.  Together with the
-depth-clipped projection visualized in Fig.~1, this behavior is consistent
+depth-clipped projection visualized in Fig.~\ref{fig:teaser}, this behavior
+is consistent
 with semantic evidence affecting a route before the corresponding obstacle is
 measured by depth.
 The irrelevant-query condition (prompt ``trees'') completes 8/10 trials,
@@ -821,8 +805,9 @@ The online search is restricted to a local working set even when the verified
 topology persists outside the current sensing window.  The current
 configuration keeps at most 100,000 point samples, rebuilds the skeleton every
 100~ms, searches within 45~m, and caps virtual semantic nodes at 512.
-Figure~\ref{fig:graph_resource_scaling} compares the persistent-geometry mode
-with a sliding-geometry ablation.  The persistent mode uses 214/249 local
+The lower row of Fig.~\ref{fig:integrated_results} shows time-binned wall-time
+traces for the representative TopoGuide run paired with each executor.  The
+persistent mode uses 214/249 local
 nodes at P50/P95 and expands 185/215 nodes per active A* search, compared with
 197/231 and 173/194 when persistence is disabled.  Thus retaining the explored
 backbone does not make every retained node part of each planning tick.  Over
@@ -830,18 +815,10 @@ normalized session time, the observed local-node P95 remains below 279 with
 persistence and 248 without it.  At approximately 500 nodes and 3,200 directed
 edges, GCN inference on an NVIDIA GeForce RTX 3090 adds 0.83~ms mean latency
 to the online workload, with 0.60~ms at P50 and 1.97~ms at P95.
-
-\begin{figure}[t]
-\centering
-\safefig[width=\columnwidth]{pics/experiments/map2_0_140_1p6/graph_resource_scaling.pdf}
-\vspace{-3pt}
-\caption{Online resources for persistent and 40-m sliding geometry.
-(a)~Local nodes over normalized time. (b)~Module wall time.  Lines/bars show
-P50/mean and dashed lines/caps show P95.  The profiles aggregate 27
-persistent-geometry and 10 sliding-geometry runs of the same fixed mission;
-global nodes are excluded from the local search.}
-\label{fig:graph_resource_scaling}
-\end{figure}
+The traces separate point processing, graph construction, the complete
+planning tick, and active A*.  Because the standalone logs lack the same
+internal timing instrumentation, these panels characterize the incremental
+TopoGuide layer and are not a comparison of total executor compute.
 
 A route holds its accepted witness until a progress gate is reached or a
 geometric check fails; this makes route switching observable and prevents a
@@ -860,210 +837,166 @@ events to the graph--planner--executor interface rather than to an offline GCN
 classification score alone.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{DISCUSSION AND LIMITATIONS}
+\section{CONCLUSION AND DISCUSSION}
 \label{sec:discussion}
-The contribution is the topology route layer and its narrow goal contract, not
-a modified local policy.  The current YOPO checkpoint receives only depth,
-state, and the moving local goal.  EGO-Planner and SUPER require simulator and
-topic adapters, but their planner cores do not receive graph features or
-semantic scores.  Thus ``plug-and-play'' means no
-planner retraining or algorithm modification after the goal and command
-interfaces are adapted; it does not mean arbitrary planners can be connected
-without integration code.
+TopoGuide is a topological route layer rather than another local planner:
+it turns depth and odometry into persistent witness-verified structure,
+combines language-conditioned route preference with a learned frontier
+policy, and exposes only a moving local goal.  The same implementation
+drove three heterogeneous executors without retraining, supporting the
+central claim: long-horizon memory and language-conditioned route choice
+can be added above interchangeable short-horizon executors.
 
-The single-goal interface defines a clear responsibility boundary.  TopoGuide
-advances the goal along the accepted witness, while each executor retains
-responsibility for feasible short-horizon motion rather than receiving a
-corridor constraint or bubble sequence.  The 10/10, 7/10, and 9/10 TopoGuide
-outcomes demonstrate portability across three executor architectures in the
-fixed mission.
+Several limitations remain.  ``Plug-and-play'' means no planner retraining
+once the goal and command interfaces are adapted; it does not remove
+integration code.  The cross-executor study fixes one altitude layer and
+one mission layout, and the volumetric evaluation covers a single
+line-obstacle mission; randomized layouts, dynamic obstacles, and real
+sensors remain untested.  Semantic projections remain hypotheses checked
+only against known obstacles, and offline GCN accuracy measures direction
+prediction, not online safety.  Future graph policies can incorporate
+clearance and braking margin directly and mask invalid directions before
+learned ranking.
 
-The offline GCN accuracy measures direction prediction, while online route
-validity remains enforced by A* reachability and witness collision checks.
-Future graph policies can incorporate reachable clearance, braking margin,
-and A* cost directly and mask invalid columns before learned ranking.
-
-The primary Map2 comparison uses a common fixed-height layer to control the
-cross-executor study, while the Map4 line-obstacle evaluation exercises the
-volumetric graph, 15-direction GCN, and vertical executor motion.  Across its
-successful flights, the latter produces a mean vertical span of
-$2.225\pm0.477$~m.  Evaluation across randomized layouts, dynamic obstacles,
-and real sensor and appearance variation will test the same 3-D pipeline more
-broadly.  Fixed-depth projections remain hypotheses: known-obstacle checks
-constrain their witnesses, and future work can quantify projection consistency
-and rejection.  Longer missions and process-RSS measurements will further
-characterize the persistent backbone.
-
-Logged route state separates graph acceptance from execution; synchronized
-command and tracking traces can refine failure attribution.  The GCN uses
-privileged static-map A* labels in training but only the partial online
-skeleton at deployment, where A* and witness checks validate each proposal.
-Thus offline accuracy measures direction prediction, while closed-loop trials
-measure the complete system.
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{CONCLUSION}
-TopoGuide is a topological route layer rather than another local planner.  It
-turns depth and odometry into persistent witness-verified structure, combines
-language risk with a topology-graph GCN frontier policy upstream, and exports only
-a moving world-frame local goal.  The original YOPO policy consumes that goal
-directly, while goal adapters connect the same topology implementation to
-EGO-Planner and SUPER without planner retraining.  Closed-loop results across
-three heterogeneous executors validate the shared route layer and moving-goal
-contract; a separate 3-D line-obstacle evaluation demonstrates height-changing
-graph construction and route execution.  The observed local search remains a
-few hundred nodes.  These results support the central systems claim:
-long-horizon memory and language-conditioned route choice can be added above
-interchangeable short-horizon executors in planar and volumetric missions.
-
-\addtolength{\textheight}{-12cm}   % Balance the column lengths on the last
-                                   % page, as in the official ieeeconf template.
 
 \begin{thebibliography}{99}
-
-\bibitem{yopo}
-J. Lu, X. Zhang, H. Shen, L. Xu, and B. Tian,
-``You Only Plan Once: A Learning-Based One-Stage Planner With Guidance
-Learning,'' \emph{IEEE Robot. Autom. Lett.}, vol. 9, no. 7,
-pp. 6083--6090, 2024.
 
 \bibitem{rappids}
 N. Bucki, J. Lee, and M. W. Mueller,
 ``Rectangular Pyramid Partitioning Using Integrated Depth Sensors (RAPPIDS):
 A Fast Planner for Multicopter Navigation,'' \emph{IEEE Robot. Autom. Lett.},
 vol. 5, no. 3, pp. 4626--4633, 2020.
-
-\bibitem{nanomap}
-P. R. Florence, J. Carter, J. Ware, and R. Tedrake,
-``NanoMap: Fast, Uncertainty-Aware Proximity Queries With Lazy Search of
-Local 3-D Data,'' in \emph{Proc. IEEE Int. Conf. Robot. Autom.}, 2018,
-pp. 7631--7638.
-
-\bibitem{egoplanner}
-X. Zhou, Z. Wang, H. Ye, C. Xu, and F. Gao,
-``EGO-Planner: An ESDF-Free Gradient-Based Local Planner for Quadrotors,''
-\emph{IEEE Robot. Autom. Lett.}, vol. 6, no. 2, pp. 478--485, 2021.
-
+\bibitem{yopo}
+J. Lu, X. Zhang, H. Shen, L. Xu, and B. Tian,
+``You Only Plan Once: A Learning-Based One-Stage Planner With Guidance
+Learning,'' \emph{IEEE Robot. Autom. Lett.}, vol. 9, no. 7,
+pp. 6083--6090, 2024.
 \bibitem{loquercio}
 A. Loquercio, E. Kaufmann, R. Ranftl, M. M\"uller, V. Koltun, and
 D. Scaramuzza,
 ``Learning High-Speed Flight in the Wild,''
 \emph{Sci. Robot.}, vol. 6, no. 59, 2021.
-
-\bibitem{bubble}
-Y. Ren, F. Zhu, W. Liu, Z. Wang, Y. Lin, F. Gao, and F. Zhang,
-``Bubble Planner: Planning High-Speed Smooth Quadrotor Trajectories Using
-Receding Corridors,'' in \emph{Proc. IEEE/RSJ Int. Conf. Intell. Robots
-Syst.}, 2022, pp. 6332--6339.
-
-\bibitem{epic}
-S. Geng, Z. Ning, F. Zhang, and B. Zhou,
-``EPIC: A Lightweight LiDAR-Based AAV Exploration Framework for Large-Scale
-Scenarios,'' \emph{IEEE Robot. Autom. Lett.}, vol. 10, no. 5,
-pp. 5090--5097, 2025.
-
+\bibitem{egoplanner}
+X. Zhou, Z. Wang, H. Ye, C. Xu, and F. Gao,
+``EGO-Planner: An ESDF-Free Gradient-Based Local Planner for Quadrotors,''
+\emph{IEEE Robot. Autom. Lett.}, vol. 6, no. 2, pp. 478--485, 2021.
 \bibitem{fastplanner}
-X. Zhou, J. Gao, C. Wang, Z. Wang, H. Ye, and F. Gao,
-``Fast-Planner: A Robust and Efficient Trajectory Planner for Autonomous
-Quadrotor Flight,'' in \emph{Proc. IEEE/RSJ Int. Conf. Intell. Robots Syst.},
-2019, pp. 8455--8461.
-
-\bibitem{faster}
-J. Tordesillas, B. T. Lopez, J. P. How, and L. Carlone,
-``FASTER: A Robust Fast-Planner for Safe Autonomous Navigation in Unknown
-Environments,'' \emph{IEEE Trans. Robot.}, vol. 38, no. 2, pp. 1112--1131,
-2022.
-
+B. Zhou, F. Gao, L. Wang, C. Liu, and S. Shen,
+``Robust and Efficient Quadrotor Trajectory Generation for Fast
+Autonomous Flight,'' \emph{IEEE Robot. Autom. Lett.}, vol. 4, no. 4,
+pp. 3529--3536, 2019.
 \bibitem{super}
 Y. Ren, F. Zhu, G. Lu, Y. Cai, L. Yin, F. Kong, J. Lin, N. Chen, and
 F. Zhang,
 ``Safety-Assured High-Speed Navigation for MAVs,''
 \emph{Sci. Robot.}, vol. 10, no. 98, p. eado6187, 2025.
-
-\bibitem{yamauchi}
-B. Yamauchi,
-``A Frontier-Based Approach for Autonomous Exploration,'' in \emph{Proc.
-IEEE Int. Symp. Comput. Intell. Robot. Autom.}, 1997, pp. 146--151.
-
-\bibitem{tare}
-C. Cao, H. Zhu, H. Choset, and J. Zhang,
-``TARE: A Hierarchical Framework for Efficiently Exploring Complex 3D
-Environments,'' in \emph{Proc. Robot.: Sci. Syst.}, 2021.
-
 \bibitem{voxblox}
 H. Oleynikova, Z. Taylor, M. Fehr, R. Siegwart, and J. Nieto,
 ``Voxblox: Incremental 3D Euclidean Signed Distance Fields for On-Board MAV
 Planning,'' \emph{IEEE/RSJ Int. Conf. Intell. Robots Syst. (IROS)}, 2017.
-
+\bibitem{yamauchi}
+B. Yamauchi,
+``A Frontier-Based Approach for Autonomous Exploration,'' in \emph{Proc.
+IEEE Int. Symp. Comput. Intell. Robot. Autom.}, 1997, pp. 146--151.
 \bibitem{sptm}
 N. Savinov, A. Dosovitskiy, and V. Koltun,
 ``Semi-Parametric Topological Memory for Navigation,'' in \emph{Proc. Int.
 Conf. Learn. Represent.}, 2018.
-
 \bibitem{ving}
 D. Shah, B. Eysenbach, G. Kahn, N. Rhinehart, and S. Levine,
 ``ViNG: Learning Open-World Navigation With Visual Goals,'' in \emph{Proc.
 IEEE Int. Conf. Robot. Autom.}, 2021, pp. 13215--13222.
-
-\bibitem{kipf2017gcn}
-T. N. Kipf and M. Welling,
-``Semi-Supervised Classification with Graph Convolutional Networks,''
-in \emph{Proc. Int. Conf. Learn. Represent.}, 2017.
-
-\bibitem{schutz2026gnnpolicy}
-A. Schutz and V.-A. Darvariu,
-``Using Graph Neural Networks in Reinforcement Learning: A Practical Guide,''
-\emph{ICLR Blogposts}, 2026. [Online]. Available:
-\texttt{https://iclr-blogposts.github.io/2026/blog/2026/}\\
-\texttt{rl-with-gnns/}
-
+\bibitem{epic}
+S. Geng, Z. Ning, F. Zhang, and B. Zhou,
+``EPIC: A Lightweight LiDAR-Based AAV Exploration Framework for Large-Scale
+Scenarios,'' \emph{IEEE Robot. Autom. Lett.}, vol. 10, no. 5,
+pp. 5090--5097, 2025.
+\bibitem{bubble}
+Y. Ren, F. Zhu, W. Liu, Z. Wang, Y. Lin, F. Gao, and F. Zhang,
+``Bubble Planner: Planning High-Speed Smooth Quadrotor Trajectories Using
+Receding Corridors,'' in \emph{Proc. IEEE/RSJ Int. Conf. Intell. Robots
+Syst.}, 2022, pp. 6332--6339.
 \bibitem{clip}
 A. Radford et al.,
 ``Learning Transferable Visual Models From Natural Language Supervision,''
 in \emph{Proc. Int. Conf. Mach. Learn.}, 2021, pp. 8748--8763.
-
-\bibitem{lseg}
-B. Li, K. Q. Weinberger, S. Belongie, V. Koltun, and R. Ranftl,
-``Language-Driven Semantic Segmentation,'' in \emph{Proc. Int. Conf. Learn.
-Represent.}, 2022.
-
 \bibitem{openseg}
 G. Ghiasi, X. Gu, Y. Cui, and T.-Y. Lin,
 ``Scaling Open-Vocabulary Image Segmentation With Image-Level Labels,'' in
 \emph{Proc. Eur. Conf. Comput. Vis.}, 2022.
-
 \bibitem{pearl}
 G. Pei, X. Jiang, X. Cai, T. Chen, Y. Yao, and B. Jeon,
 ``PEARL: Geometry Aligns Semantics for Training-Free Open-Vocabulary Semantic
-Segmentation,'' \emph{arXiv preprint arXiv:2603.21528}, 2026.
-
+Segmentation,'' in \emph{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit.},
+2026, pp. 17927--17937.
 \bibitem{vlfm}
 N. Yokoyama, S. Ha, D. Batra, J. Wang, and B. Bucher,
 ``VLFM: Vision-Language Frontier Maps for Zero-Shot Semantic Navigation,''
 in \emph{Proc. IEEE Int. Conf. Robot. Autom.}, 2024, pp. 42--48.
-
 \bibitem{rayfronts}
 O. Alama, A. Bhattacharya, H. He, S. Kim, Y. Qiu, W. Wang, C. Ho, N. Keetha,
 and S. Scherer,
 ``RayFronts: Open-Set Semantic Ray Frontiers for Online Scene Understanding
 and Exploration,'' in \emph{Proc. IEEE/RSJ Int. Conf. Intell. Robots Syst.},
 2025, pp. 5930--5937.
-
+\bibitem{kipf2017gcn}
+T. N. Kipf and M. Welling,
+``Semi-Supervised Classification with Graph Convolutional Networks,''
+in \emph{Proc. Int. Conf. Learn. Represent.}, 2017.
+\bibitem{farplanner}
+F. Yang, C. Cao, H. Zhu, J. Oh, and J. Zhang,
+``FAR Planner: Fast, Attemptable Route Planner Using Dynamic Visibility
+Update,'' in \emph{Proc. IEEE/RSJ Int. Conf. Intell. Robots Syst.
+(IROS)}, 2022, pp. 9--16.
+\bibitem{vlmaps}
+C. Huang, O. Mees, A. Zeng, and W. Burgard,
+``Visual Language Maps for Robot Navigation,'' in \emph{Proc. IEEE Int.
+Conf. Robot. Autom.}, 2023, pp. 10608--10615.
 \bibitem{blackmore}
 L. Blackmore, M. Ono, and B. C. Williams,
 ``Chance-Constrained Optimal Path Planning With Obstacles,'' \emph{IEEE
 Trans. Robot.}, vol. 27, no. 6, pp. 1080--1094, 2011.
-
+\bibitem{chaplot2020ntslam}
+D. S. Chaplot, R. Salakhutdinov, A. Gupta, and S. Gupta,
+``Neural Topological SLAM for Visual Navigation,'' in \emph{Proc.
+IEEE/CVF Conf. Comput. Vis. Pattern Recognit.}, 2020.
+\bibitem{chen2020gnnexplore}
+F. Chen, J. D. Martin, Y. Huang, J. Wang, and B. Englot,
+``Autonomous Exploration Under Uncertainty via Deep Reinforcement
+Learning on Graphs,'' in \emph{Proc. IEEE/RSJ Int. Conf. Intell.
+Robots Syst. (IROS)}, 2020, pp. 6140--6147.
+\bibitem{cao2023ariadne}
+Y. Cao, T. Hou, Y. Wang, X. Yi, and G. Sartoretti,
+``ARiADNE: A Reinforcement Learning Approach Using Attention-Based
+Deep Networks for Exploration,'' in \emph{Proc. IEEE Int. Conf.
+Robot. Autom.}, 2023, pp. 10219--10225.
+\bibitem{herrera2023gnnexplore}
+E. P. Herrera-Alarc\'on, G. Baris, M. Satler, C. A. Avizzano, and
+G. Loianno,
+``Learning Heuristics for Efficient Environment Exploration Using
+Graph Neural Networks,'' in \emph{Proc. Int. Conf. Adv. Robot.},
+2023, pp. 86--93.
+\bibitem{bhardwaj2017imitation}
+M. Bhardwaj, S. Choudhury, and S. Scherer,
+``Learning Heuristic Search via Imitation,'' in \emph{Proc. Conf.
+Robot Learn. (CoRL)}, ser. PMLR, vol. 78, 2017, pp. 271--280.
+\bibitem{yonetani2021neuralastar}
+R. Yonetani, T. Taniai, M. Barekatain, M. Nishimura, and A. Kanezaki,
+``Path Planning Using Neural A* Search,'' in \emph{Proc. Int. Conf.
+Mach. Learn. (ICML)}, ser. PMLR, vol. 139, 2021, pp. 12029--12039.
+\bibitem{cao2024largescale}
+Y. Cao, R. Zhao, Y. Wang, B. Xiang, and G. Sartoretti,
+``Deep Reinforcement Learning-Based Large-Scale Robot Exploration,''
+\emph{IEEE Robot. Autom. Lett.}, vol. 9, no. 5, pp. 4631--4638, 2024.
+\bibitem{airsim}
+S. Shah, D. Dey, C. Lovett, and A. Kapoor,
+``AirSim: High-Fidelity Visual and Physical Simulation for Autonomous
+Vehicles,'' in \emph{Field and Service Robotics}, 2018, pp. 621--635.
 \bibitem{flightbench}
 S.-A. Yu, C. Yu, F. Gao, Y. Wu, and Y. Wang,
 ``FlightBench: Benchmarking Learning-Based Methods for Ego-Vision-Based
 Quadrotors Navigation,'' in \emph{Proc. IEEE Int. Conf. Robot. Autom.},
 2025.
-
-\bibitem{airsim}
-S. Shah, D. Dey, C. Lovett, and A. Kapoor,
-``AirSim: High-Fidelity Visual and Physical Simulation for Autonomous
-Vehicles,'' in \emph{Field and Service Robotics}, 2018, pp. 621--635.
 
 \end{thebibliography}
 
