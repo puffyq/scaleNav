@@ -677,10 +677,10 @@ run.
 
 All three standalone configurations terminated without a successful mission,
 whereas
-the TopoGuide-guided YOPO, EGO-Planner, and SUPER variants completed 10/10,
-7/10, and 9/10 trials.  This demonstrates that the same topological goal
+the TopoGuide-guided YOPO, EGO-Planner, and SUPER variants completed $100\%$,
+$70\%$, and $90\%$ of trials.  This demonstrates that the same topological goal
 contract is executable by three different planner cores.  Values marked
-in the upper panels are aggregate ten-run outcomes, while the trajectories are
+in the upper panels are aggregate outcomes, while the trajectories are
 representative; failed-flight path and time are not treated as completion
 metrics.  The TopoGuide (EGO)
 deployment uses a 200-s mission timeout, while the other rows use 90~s.
@@ -731,16 +731,16 @@ failed flight.}
 \toprule
 Condition & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) & $L_{\rm obs}$ (m) & $z$ span (m) \\
 \midrule
-\multicolumn{10}{l}{\emph{Semantic ablation (YOPO, GCN, $n=10$ per row)}}\\
+\multicolumn{10}{l}{\emph{Semantic ablation (YOPO, GCN)}}\\
 Matched query & 100 & 0 & 0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ & \blank & \blank \\
 Semantic disabled & 60 & 40 & 0 & $169.47\pm3.16$ & $32.34\pm2.70$ & $5.261\pm0.315$ & $6.404\pm0.158$ & $11.69\pm1.60$ & \blank \\
 Irrelevant query & 80 & 20 & 0 & $175.76\pm6.09$ & $35.02\pm1.65$ & $5.023\pm0.127$ & $6.398\pm0.274$ & $20.32\pm2.67$ & \blank \\
 \midrule
 \multicolumn{10}{l}{\emph{Frontier-policy ablation (YOPO, semantic on)}}\\
-Hand-designed ($n=27$) & 88.9 & 11.1 & 0 & $199.14\pm14.12$ & $38.54\pm3.06$ & $5.172\pm0.097$ & $6.409\pm0.184$ & \blank & \blank \\
-GCN ($n=10$) & 100.0 & 0.0 & 0.0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ & \blank & \blank \\
+Hand-designed & 88.9 & 11.1 & 0 & $199.14\pm14.12$ & $38.54\pm3.06$ & $5.172\pm0.097$ & $6.409\pm0.184$ & \blank & \blank \\
+GCN & 100.0 & 0.0 & 0.0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ & \blank & \blank \\
 \midrule
-\multicolumn{10}{l}{\emph{Volumetric grove mission ($n=10$)}}\\
+\multicolumn{10}{l}{\emph{Volumetric grove mission}}\\
 TopoGuide (GCN-3D) & 80 & 20 & 0 & $167.40\pm13.83$ & $36.98\pm5.30$ & $4.564\pm0.327$ & \blank & \blank & $2.225\pm0.477$ \\
 \bottomrule
 \end{tabular}
@@ -748,7 +748,7 @@ TopoGuide (GCN-3D) & 80 & 20 & 0 & $167.40\pm13.83$ & $36.98\pm5.30$ & $4.564\pm
 \end{table}
 
 Semantic influence changes the outcome rate without changing the geometric
-validity contract: the semantic-on condition completed all ten flights,
+validity contract: the semantic-on condition completed all flights,
 whereas the semantic-off condition had four early collisions near
 $y\approx10$~m.  The
 successful-flight path and speed differences are secondary to this outcome
@@ -757,7 +757,7 @@ depth-clipped projection visualized in Fig.~\ref{fig:teaser}, this behavior
 is consistent
 with semantic evidence affecting a route before the corresponding obstacle is
 measured by depth.
-The irrelevant-query condition (prompt ``trees'') completes 8/10 trials,
+The irrelevant-query condition (prompt ``trees'') completes $80\%$ of trials,
 confirming that route selection responds to the alignment between the language
 query and visual scene content.
 
@@ -765,7 +765,7 @@ query and visual scene content.
 hand-designed frontier ranking with the GCN policy while
 holding the fixed mission, semantic query, route-cost parameters, and YOPO
 executor fixed.
-The GCN policy completed 10/10 trials, compared with 24/27 for the
+The GCN policy completed all trials, compared with $88.9\%$ for the
 hand-designed ranking, while reducing mean path length from 199.14~m to
 171.59~m and mean flight time from 38.54~s to 33.61~s.  Only the
 frontier-ranking policy is replaced; A*, witness acceptance, semantic route

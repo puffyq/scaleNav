@@ -191,6 +191,9 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     // Compatibility-only parameters. Route planning is always fresh A* from
     // the current odometry node; no previous-route mode is supported.
     (void)declare_parameter<bool>("reuse_previous_route", false);
+    // The rolling map must not be clipped by the start-to-mission-goal box.
+    // Keep the box only as a grid origin/region coordinate frame.
+    map_bounds_enabled_ = declare_parameter<bool>("map_bounds_enabled", false);
     map_margin_ = declare_parameter<double>("map_margin", 20.0);
     map_voxel_size_ = declare_parameter<double>("map_voxel_size", 0.1);
     map_history_radius_m_ = declare_parameter<double>("map_history_radius_m", 0.0);
@@ -381,6 +384,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     declare_parameter<int>("bubble_astar/allocate_num", 100000);
     declare_parameter<bool>("bubble_astar/debug", false);
 
+    map_->setBoundsEnabled(map_bounds_enabled_);
     map_->configureStorage(
       static_cast<float>(map_voxel_size_), static_cast<float>(map_history_radius_m_),
       static_cast<std::size_t>(std::max(map_max_points_, 1000)),
@@ -401,7 +405,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     RCLCPP_INFO(
       get_logger(),
       "ScaleNav config: clearance_target=%.2f m clearance_weight=%.2f "
-      "geometry_map=%s route_mode=SEGMENT_HOLD_REPLAN frontier_goal_distance_weight=%.2f "
+      "geometry_map=%s map_bounds=%s route_mode=SEGMENT_HOLD_REPLAN "
+      "frontier_goal_distance_weight=%.2f "
       "frontier_direction_loss_weight=%.2f "
       "semantic_detour_budget=%.1f m semantic_frame_budget=%.1f m semantic_noise_floor=%.3f "
       "semantic_opportunity=%d frames/%.1f m/%.1f s "
@@ -412,6 +417,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       "semantic_edge_candidate_limit=%d diagnostic_period=%d ms",
       clearance_target_m_, clearance_cost_weight_,
       map_history_radius_m_ <= 0.0 ? "CURRENT_FRAME" : "SLIDING_WINDOW",
+      map_bounds_enabled_ ? "ENABLED" : "DISABLED",
       frontier_goal_distance_weight_,
       frontier_direction_loss_weight_,
       frontier_semantic_detour_budget_m_, frontier_semantic_frame_budget_m_,
@@ -1423,7 +1429,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       const bool can_reuse = reuse_graph_on_goal_ && graph_initialized_.load() &&
         skeleton_initialized_.load() && topo_ && astar_ &&
         topo_->lidar_map_interface_;
-      if (can_reuse) {
+      if (can_reuse && map_bounds_enabled_) {
         // TopoGraph creates regions lazily, but Bubble A* still rejects samples
         // outside LIOInterface::IsInMap(). Grow that search domain with every
         // mission goal while retaining all existing nodes, edges and semantics.
@@ -1715,6 +1721,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
           // with Bubble generation means one update can query two different
           // KD-tree states and reject its own freshly generated nodes.
           auto next_map = std::make_shared<fast_planner::LIOInterface>();
+          next_map->setBoundsEnabled(map_bounds_enabled_);
           next_map->configureBounds(
             source_map->lp_->global_box_min_boundary_,
             source_map->lp_->global_box_max_boundary_);
@@ -1732,8 +1739,18 @@ class ScaleNavGraphNode final : public rclcpp::Node {
           }
           if (!incremental_update) {
             // Bubble generation remains 3D; only the derived topology is planar.
-            configureMapBounds(
-              next_map, position, goal, std::max(map_margin_, map_history_radius_m_));
+            if (map_bounds_enabled_) {
+              configureMapBounds(
+                next_map, position, goal, std::max(map_margin_, map_history_radius_m_));
+            } else {
+              // Keep a finite, mission-independent origin for grid/region
+              // indexing. With bounds disabled this is not a planning wall;
+              // new rolling-map regions are created lazily as the vehicle
+              // advances.
+              const double seed_radius = std::max(
+                1.0, std::max(local_graph_radius_m_, map_history_radius_m_));
+              configureMapBounds(next_map, position, position, seed_radius);
+            }
           }
           const auto snapshot_start = std::chrono::steady_clock::now();
           next_map->loadSnapshot(
@@ -5278,6 +5295,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   double trajectory_speed_color_max_mps_ = 6.0;
   std::size_t trajectory_max_points_ = 50000;
   double map_margin_ = 20.0;
+  bool map_bounds_enabled_ = false;
   bool graph_fixed_layer_ = true;
   bool reuse_graph_on_goal_ = true;
   bool graph_layer_initialized_ = false;
