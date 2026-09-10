@@ -39,6 +39,7 @@ def generate_launch_description():
         DeclareLaunchArgument("graph_layer_z", default_value="1.6"),
         DeclareLaunchArgument("reuse_graph_on_goal", default_value="true"),
         DeclareLaunchArgument("reuse_previous_route", default_value="false"),
+        DeclareLaunchArgument("map_bounds_enabled", default_value="false"),
         DeclareLaunchArgument("map_margin", default_value="50.0"),
         DeclareLaunchArgument("map_voxel_size", default_value="0.1"),
         # Keep observed static obstacles while semantic frontier edges remain
@@ -160,6 +161,7 @@ def generate_launch_description():
                 "graph_layer_z": LaunchConfiguration("graph_layer_z"),
                 "reuse_graph_on_goal": LaunchConfiguration("reuse_graph_on_goal"),
                 "reuse_previous_route": LaunchConfiguration("reuse_previous_route"),
+                "map_bounds_enabled": LaunchConfiguration("map_bounds_enabled"),
                 "map_margin": LaunchConfiguration("map_margin"),
                 "map_voxel_size": LaunchConfiguration("map_voxel_size"),
                 "map_history_radius_m": LaunchConfiguration("map_history_radius_m"),

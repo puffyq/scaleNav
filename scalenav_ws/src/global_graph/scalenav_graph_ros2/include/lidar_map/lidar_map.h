@@ -86,6 +86,19 @@ class LIOInterface {
     lp_->box_num_ = 1;
   }
 
+  // ScaleNav uses a rolling local map. Keep the coordinate box as the
+  // region/grid origin, but allow the online planner to disable it as a
+  // hard planning boundary.
+  void setBoundsEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bounds_enabled_ = enabled;
+  }
+
+  bool boundsEnabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return bounds_enabled_;
+  }
+
   bool expandBounds(const Eigen::Vector3f &min_bound,
                     const Eigen::Vector3f &max_bound) {
     const Eigen::Vector3f expanded_min =
@@ -227,6 +240,8 @@ class LIOInterface {
   }
 
   bool IsInBox(const Eigen::Vector3f &pos) const {
+    if (!pos.allFinite()) return false;
+    if (!bounds_enabled_) return true;
     return (pos.array() >= lp_->global_box_min_boundary_.array()).all() &&
            (pos.array() <= lp_->global_box_max_boundary_.array()).all();
   }
@@ -434,6 +449,7 @@ class LIOInterface {
   float graph_obstacle_min_z_ = std::numeric_limits<float>::quiet_NaN();
   bool have_layer_points_ = false;
   std::size_t max_points_ = 20000;
+  bool bounds_enabled_ = true;
   Eigen::Vector3f last_prune_pose_ = Eigen::Vector3f::Zero();
   bool have_prune_pose_ = false;
   std::size_t last_hit_voxels_ = 0;
