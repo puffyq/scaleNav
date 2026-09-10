@@ -16,7 +16,7 @@ STACK="${STACK:-gcn}"
 GCN_MODEL="${GCN_2D_MODEL:-$PROJECT_ROOT/train_gcn/frontier_gcn_map2_35m.pt}"
 START_Z="${START_Z_2D:-1.6}"
 GOAL_Z="${GOAL_Z_2D:-1.6}"
-PROMPT="${PROMPT_2D:-blocks, wall}"
+PROMPT="${PROMPT_2D:-blocks, walls, box}"
 GRAPH_FIXED_LAYER=true
 FIXED_ALTITUDE=true
 

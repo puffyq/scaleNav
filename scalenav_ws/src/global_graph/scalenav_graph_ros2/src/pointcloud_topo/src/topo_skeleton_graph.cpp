@@ -10,6 +10,7 @@
 #include "pointcloud_topo/graph.h"
 
 #include <chrono>
+#include <utility>
 
 namespace {
 
@@ -2477,6 +2478,10 @@ size_t TopoGraph::insertSemanticNodes(
     const bool is_virtual = semantic_virtual_flags.empty() ||
       (center_index < semantic_virtual_flags.size() &&
        semantic_virtual_flags[center_index] != 0U);
+    // Measured heatmap evidence annotates verified nodes by projecting those
+    // nodes back into the image. These 3D patch centers are not assignment
+    // sources and must not create Unknown endpoints.
+    if (!is_virtual) continue;
     TopoNode::Ptr match;
     float match_distance = min_separation;
     for (const auto &entry : reg_map_idx2ptr_) {
@@ -2486,18 +2491,15 @@ size_t TopoGraph::insertSemanticNodes(
         const float distance = (node->center_ - center).norm();
         if (distance >= match_distance) continue;
         // A fixed-depth virtual anchor must remain an Unknown semantic
-        // frontier even when it overlaps a measured backbone node. Measured
-        // projections may still annotate an existing Verified node.
-        if (is_virtual ? isVirtualSemanticEndpoint(node) :
-            (node->geometry_state_ == TopoGeometryState::Verified &&
-             !node->is_virtual_semantic_)) {
+        // frontier even when it overlaps a measured backbone node.
+        if (isVirtualSemanticEndpoint(node)) {
           match = node;
           match_distance = distance;
         }
       }
     }
     if (match) {
-      match->is_virtual_semantic_ = is_virtual;
+      match->is_virtual_semantic_ = true;
       updateNodeSemantic(match, score, 1.0F, stamp_ns, confidence);
       match->semantic_frame_stamp_ns_ = stamp_ns;
       match->semantic_column_ = center_index < semantic_columns.size() ?
@@ -2540,6 +2542,7 @@ size_t TopoGraph::insertSemanticNodes(
     }
     created.emplace_back(std::move(node));
   }
+
   // A current semantic endpoint is provisional geometry: attach it to the
   // nearest measured graph backbone so the next normal frontier search can
   // reach the configured virtual depth. Unknown-to-Unknown links are forbidden
@@ -2633,6 +2636,163 @@ size_t TopoGraph::insertSemanticNodes(
 
   revalidateSemanticEdges();
   return accepted + influenced_existing + updated_semantic;
+}
+
+size_t TopoGraph::annotateVerifiedNodesFromHeatmap(
+    const SemanticHeatmapAnnotation &view, std::int64_t stamp_ns) {
+  if (!view.heatmap || view.width <= 1 || view.height <= 1) return 0;
+  const int width = view.width;
+  const int height = view.height;
+  const float min_score = std::clamp(view.min_heatmap_score, 0.0F, 1.0F);
+  // Sample a physical Gaussian footprint in the 2D heatmap. Keep it modest so
+  // compact trees stay local, while a building still paints every node whose
+  // camera ray hits its large image region.
+  const float sigma_m = std::clamp(std::max(0.5F, view.min_radius_m), 0.5F,
+                                   std::max(0.5F, view.max_radius_m));
+  constexpr float kPi = 3.14159265358979323846F;
+  const float horizontal_tangent = std::tan(
+    std::clamp(view.horizontal_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
+  const float vertical_tangent = std::tan(
+    std::clamp(view.vertical_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
+  const float pixel_focal_u = (0.5F * static_cast<float>(width)) /
+    std::max(1e-4F, horizontal_tangent);
+  const float pixel_focal_v = (0.5F * static_cast<float>(height)) /
+    std::max(1e-4F, vertical_tangent);
+
+  const auto heatmapAt = [&](int u, int v) -> float {
+    if (u < 0 || v < 0 || u >= width || v >= height) return 0.0F;
+    const float value = view.heatmap[static_cast<std::size_t>(v) * static_cast<std::size_t>(width) +
+      static_cast<std::size_t>(u)];
+    return std::isfinite(value) ? std::clamp(value, 0.0F, 1.0F) : 0.0F;
+  };
+  std::vector<TopoNode::Ptr> verified_nodes;
+  for (const auto &entry : reg_map_idx2ptr_) {
+    if (!entry.second) continue;
+    for (const auto &node : entry.second->topo_nodes_) {
+      if (!node || node->is_viewpoint_ || node->role_ == TopoNodeRole::Odom ||
+          node->geometry_state_ != TopoGeometryState::Verified ||
+          node->is_virtual_semantic_) {
+        continue;
+      }
+      verified_nodes.push_back(node);
+    }
+  }
+
+  size_t annotated = 0;
+  for (const auto &node : verified_nodes) {
+    float normalized_u = 0.0F;
+    float normalized_v = 0.0F;
+    float optical_depth_m = 0.0F;
+    Eigen::Vector3f ground_point = node->center_;
+    ground_point.z() = view.ground_z_m;
+    if (!worldPointToSemanticImage(
+          ground_point, view.body_world, view.world_from_body, view.camera_translation_flu,
+          view.horizontal_fov_deg, view.vertical_fov_deg,
+          normalized_u, normalized_v, optical_depth_m) ||
+        normalized_u < 0.0F || normalized_u > 1.0F ||
+        normalized_v < 0.0F || normalized_v > 1.0F ||
+        optical_depth_m < 0.5F) {
+      continue;
+    }
+
+    const float depth = std::max(optical_depth_m, 0.5F);
+
+    // Optical depth is the camera-ray distance to the ground-plane point and
+    // only scales the image-plane Gaussian. A nearer depth return on the same
+    // ray does not skip or zero this node: blocked edges are disconnected by
+    // collision checks. Estimate object support from the heatmap around this
+    // projection. Broad coherent image regions receive a broad Gaussian
+    // (e.g. a wall), while compact regions stay local (e.g. a tree).
+    float object_radius_m = sigma_m;
+    const int center_px_u = std::clamp(
+      static_cast<int>(normalized_u * static_cast<float>(width)), 0, width - 1);
+    const int center_px_v = std::clamp(
+      static_cast<int>(normalized_v * static_cast<float>(height)), 0, height - 1);
+    const int max_probe = std::max(2, std::min(width, height) / 3);
+    int extent_u = 0;
+    int extent_v = 0;
+    const int directions[8][2] = {
+      {1, 0}, {-1, 0}, {0, 1}, {0, -1},
+      {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+    for (const auto &direction : directions) {
+      int extent = 0;
+      for (int step = 1; step <= max_probe; ++step) {
+        const int u = center_px_u + direction[0] * step;
+        const int v = center_px_v + direction[1] * step;
+        if (u < 0 || v < 0 || u >= width || v >= height) break;
+        const float value = heatmapAt(u, v);
+        if (value < min_score) break;
+        ++extent;
+      }
+      if (direction[0] != 0) extent_u = std::max(extent_u, extent);
+      if (direction[1] != 0) extent_v = std::max(extent_v, extent);
+    }
+    const float radius_u_m = depth * horizontal_tangent *
+      static_cast<float>(extent_u + 1) / static_cast<float>(width);
+    const float radius_v_m = depth * vertical_tangent *
+      static_cast<float>(extent_v + 1) / static_cast<float>(height);
+    object_radius_m = std::clamp(
+      std::max(object_radius_m, std::max(radius_u_m, radius_v_m)),
+      std::max(0.5F, view.min_radius_m), std::max(0.5F, view.max_radius_m));
+    const float sigma_u = std::clamp(pixel_focal_u * object_radius_m / depth, 1.25F, 32.0F);
+    const float sigma_v = std::clamp(pixel_focal_v * object_radius_m / depth, 1.25F, 32.0F);
+    const float center_u = normalized_u * static_cast<float>(width) - 0.5F;
+    const float center_v = normalized_v * static_cast<float>(height) - 0.5F;
+    const int radius_u = std::max(1, static_cast<int>(std::ceil(3.0F * sigma_u)));
+    const int radius_v = std::max(1, static_cast<int>(std::ceil(3.0F * sigma_v)));
+    const int u0 = std::max(0, static_cast<int>(std::floor(center_u)) - radius_u);
+    const int u1 = std::min(width - 1, static_cast<int>(std::ceil(center_u)) + radius_u);
+    const int v0 = std::max(0, static_cast<int>(std::floor(center_v)) - radius_v);
+    const int v1 = std::min(height - 1, static_cast<int>(std::ceil(center_v)) + radius_v);
+    const float inv_sigma_u2 = 1.0F / (sigma_u * sigma_u);
+    const float inv_sigma_v2 = 1.0F / (sigma_v * sigma_v);
+
+    float local_score = 0.0F;
+    float local_weight = 0.0F;
+    float signal_score = 0.0F;
+    float signal_weight = 0.0F;
+    for (int v = v0; v <= v1; ++v) {
+      const float dv = static_cast<float>(v) - center_v;
+      for (int u = u0; u <= u1; ++u) {
+        const float du = static_cast<float>(u) - center_u;
+        const float weight = std::exp(
+          -0.5F * (du * du * inv_sigma_u2 + dv * dv * inv_sigma_v2));
+        if (weight <= 1e-4F) continue;
+        const float value = heatmapAt(u, v);
+        local_score += weight * value;
+        local_weight += weight;
+        if (value >= min_score) {
+          signal_score += weight * value;
+          signal_weight += weight;
+        }
+      }
+    }
+    if (local_weight <= 1e-4F) continue;
+
+    // This is still purely image evidence. A nearer depth return on the same
+    // ray is intentionally not consulted here: it cannot identify the
+    // unknown object behind the return. Unsafe ordinary-to-semantic edges
+    // are disconnected by the independent edge collision check.
+    if (signal_weight > 1e-4F) local_score = signal_score / signal_weight;
+    else local_score /= local_weight;
+    const float score = std::clamp(local_score, 0.0F, 1.0F);
+    const float fov_radius = std::clamp(std::max(
+      std::abs(2.0F * normalized_u - 1.0F),
+      std::abs(2.0F * normalized_v - 1.0F)), 0.0F, 1.0F);
+    const float confidence =
+      std::clamp(1.0F - 0.35F * fov_radius * fov_radius, 0.05F, 1.0F);
+    updateNodeSemantic(node, score, 1.0F, stamp_ns, confidence);
+    node->semantic_column_ = static_cast<std::int8_t>(std::clamp(
+      static_cast<int>(normalized_u * 5.0F), 0, 4));
+    {
+      std::lock_guard<std::mutex> lock(semantic_memory_mutex_);
+      semantic_memory_[node->persistent_id_].frame_stamp_ns = stamp_ns;
+      semantic_memory_[node->persistent_id_].column = node->semantic_column_;
+      semantic_memory_[node->persistent_id_].is_virtual = false;
+    }
+    ++annotated;
+  }
+  return annotated;
 }
 
 size_t TopoGraph::revalidateSemanticEdges() {

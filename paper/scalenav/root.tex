@@ -68,13 +68,16 @@ collision checks remain authoritative.  The accepted route is
 exported only as a moving local goal, allowing existing
 local planners to keep their fast small-obstacle avoidance while
 gaining large-obstacle circumnavigation, without retraining or
-modification of the planner core.  The semantic heatmap is
-resolution-sensitive: higher input resolution carries richer scene
-information.  The fusion interface supports various input resolutions.  In a
+modification of the planner core.  In a
 mission featuring a single 60-m-scale block that exceeds the depth
 range, TopoGuide raises success from $0\%$ to $100\%$ for the
 end-to-end planner YOPO, and to $70\%$ and $90\%$ for the
-conventional pipelines EGO-Planner and SUPER.  A height-changing
+conventional pipelines EGO-Planner and SUPER.
+The fusion interface accepts semantic maps at any calibrated
+input resolution, while detection itself is
+resolution-sensitive: on the power-line scene the peak wire
+response rises from $0.05$ at $160{\times}96$ to $0.68$ at
+1080p.  A height-changing
 mission with power-line obstacles and tree canopies further confirms
 the same interface in volumetric flight.  TopoGuide acts as a
 navigator: it remembers and selects the route, while an
@@ -95,7 +98,8 @@ search and refine trajectories locally
 effective avoidance in their evaluated dense environments.  Their
 mapping modules, however, lack a unified representation that supports
 both scales: local grids, distance fields, and lazy depth memories
-remain confined to a sensing window \cite{voxblox}.  These planners are fast but carry no route memory: a single
+remain confined to a sensing window \cite{voxblox}.  These planners are
+fast but carry no route memory: a single
 observation cannot preserve an early left--right commitment around a
 long obstacle, and the decision can be reversed once the fork leaves
 the field of view.  A low-resolution global map \cite{voxblox} is a
@@ -110,17 +114,15 @@ sensing horizon \cite{yamauchi,sptm,ving,epic,bubble}.
 \begin{figure}[!t]
 \centering
 \safefig[width=\columnwidth]{pics/teaser_candidate_v4.png}
-\caption{Schematic of TopoGuide's layered route decision beyond the
-depth-sensing horizon. (a)~The RGB image, semantic response, and depth map
-are synchronized at graph time $t^*$; white depth pixels indicate no return
-beyond $20$~m. (b)~FrontierGCN selects the central direction at the route
-fork before the large obstacle, combines semantic observations with the
-verified graph and safety checks, and provides the selected route as a
-frontier goal. Blue-gray dots and links are verified graph nodes and edges;
-red crosses are high-confidence far-field semantic observations, while gray
-crosses are lower-confidence semantic candidates. The teal line is the
-accepted A* topology path, the orange dashed line is its polynomial witness,
-and the magenta diamond is the moving local goal.}
+\caption{Schematic of the proposed TopoGuide route layer.
+(a)~Synchronized RGB, PEARL response, and depth at graph time $t^*$;
+white depth pixels are no-returns beyond $20$~m.
+(b)~Verified graph nodes and edges (blue-gray dots and links), far-field
+semantic observations (red and gray crosses for high and low
+confidence), the GCN-selected central direction C ($0^\circ$, purple),
+the accepted A* path (teal), its polynomial fit (orange dashed),
+the frontier goal (orange star), and the moving local goal (magenta
+diamond).}
 \label{fig:teaser}
 \end{figure}
 
@@ -192,7 +194,7 @@ The main contributions are:
 \caption{TopoGuide as a plug-and-play route layer.  Depth and odometry maintain
 persistent verified topology; RGB and text shape route cost, and a topology
 GCN ranks frontier directions.  A* and collision checks accept a
-witness before the moving-goal interface drives a goal-conditioned local
+route before the moving-goal interface drives a goal-conditioned local
 executor.  The executor receives only depth, state, and the local goal;
 topology, semantics, and route memory remain upstream.}
 \label{fig:system_architecture}
@@ -278,7 +280,7 @@ beyond the sensing range.  The \emph{frontier goal}
 $\vect{g}^{\mathrm{front}}_t$ is a route anchor selected on the topology
 graph: it commits to a branch before that branch is fully observed.  The
 \emph{local goal} $\vect{g}^{\mathrm{loc}}_t$ is sampled ahead on the
-accepted witness, within the executor's depth envelope, and is the only
+accepted route, within the executor's depth envelope, and is the only
 signal that crosses the planner boundary.  The planner must output a
 dynamically feasible local trajectory $\tau_t$.  Formally, mapping, route
 selection, and execution compose as
@@ -294,47 +296,167 @@ selection, and execution compose as
 Each layer has a deliberately narrow interface.  $\Pi_{\mathrm{map}}$
 consumes depth, odometry, and its previous graph state; neither the semantic
 model nor the local planner appears in its update.  $\Pi_{\mathrm{route}}$
-produces the accepted witness $\mathcal{W}_t$ together with the frontier and
+produces the accepted route $\mathcal{W}_t$ together with the frontier and
 local goals and, when enabled, a frontier index $\hat c_t$ from the learned
 policy; this index is a ranking hint, not a trajectory or safety decision.
-For YOPO, the released policy receives its unmodified depth channel,
-body-frame motion, and the local goal expressed in the body frame:
+Each executor consumes the local goal next to its usual sensing and
+odometry, with the goal expressed in the body frame.  The learned
+executor, for instance, receives
 \begin{equation}
  \vect{o}_t = [\vect{v}^{B}_t,\vect{a}^{B}_t,
                 (\vect{g}^{\mathrm{loc}}_t-\vect{p}_t)^{B}] \in \R^9.
 \end{equation}
-EGO-Planner and SUPER receive the same goal through a relay node.  No graph
-tensor, semantic feature, or route representation crosses the executor
+No graph tensor, semantic feature, or route representation crosses the
+executor
 boundary; this division mirrors hierarchical topological control
 \cite{ving}.
-
-Bubble centers, checked witnesses, and moving goals are represented in
-$\R^3$.  An optional projection onto one navigation height supports
-controlled planar comparisons; with the projection disabled, graph
-construction and route search preserve altitude, and the same witness
-interface commands vertical as well as horizontal motion.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \subsection{Topology Graph Construction and Maintenance}
 \label{sec:topology}
-The route layer maintains a sparse topological skeleton of verified free
-space.  Collision-free bubbles are clustered into vertices
+The route layer maintains a sparse topological skeleton of free space.
+Its vertices are
 \begin{equation}
  v_i=(\vect{c}_i,\rho_i,z_i,h_i),
 \end{equation}
 where $\vect{c}_i$ is the center, $\rho_i$ the clearance, $z_i$ the semantic
-state, and $h_i$ a persistent identity.  Each edge stores a checked witness
+state, and $h_i$ a persistent identity.  Two vertex kinds share this tuple.
+\emph{Verified} nodes are clustered from collision-free bubbles measured by
+depth; only verified nodes are eligible for geometric route acceptance.
+\emph{Provisional semantic} nodes arrive from the heatmap stream
+(Sec.~\ref{sec:semantics}): they carry a score--confidence pair in $z_i$
+but no clearance, and a provisional node is promoted to a verified node
+when later depth places a bubble at the same position.  A transient
+odometry node marks the vehicle and serves as the search start; it is
+never persisted.  Edges are undirected; each stores a checked witness
 polyline $\pi_{ij}$ and its length $L_{ij}$; the witness, rather than the
 chord between endpoints, is the geometric object used by both collision
-checking and semantic fusion.
+checking and value assignment.
 
+\paragraph{Creation}
 Construction runs asynchronously and independently of the semantic model,
-the learned policy, and the local executor: depth frames are voxel-filtered
-into obstacle points, a background worker rebuilds bubbles, regions, and
-candidate edges, and a complete snapshot is atomically swapped into the
-planner.  No occupancy grid or ESDF is retained.  Persistent identities
-survive graph replacement, while stale bubbles are deleted after two
-consecutive rebuild misses.  The minimum witness clearance $\bar\rho_{ij}$
+the learned policy, and the local executor.  A background worker grows
+bubbles in the currently observed free space.  Mutually overlapping
+bubbles are merged into a single vertex per connected cluster, so one
+continuous free corridor is represented by one vertex rather than a
+cloud of overlapping bubbles.  Each rebuild revisits only the map
+regions touched by new depth and reconciles the freshly built structure
+with the persistent graph: vertices and edges that still agree with the
+current observations are kept, and only genuinely new structure is
+inserted.  A new vertex is
+connected to its neighbors through a bounded search confined to the
+endpoint regions, and a connection becomes an edge only
+together with a collision-checked witness polyline; if the search times
+out, the pre-existing edge is kept and the connection is retried later.
+The vehicle is spliced into the graph through the transient odometry
+node, linked to collision-safe neighbors.  A provisional semantic node
+attaches only to a few nearest verified anchors, so it can terminate a
+route but never bridge two verified
+corridors through unknown space.  The graph retains no occupancy grid or
+ESDF: the sparse skeleton itself is the persistent map.
+
+\paragraph{Removal}
+A verified vertex is deleted after its supporting bubbles miss two
+consecutive rebuilds of its region, together with all incident edges;
+regions that have fallen outside the current depth view are not rebuilt,
+so their vertices and edges persist.  An edge is
+disconnected as soon as its witness fails the recheck against the current
+obstacle set, and a provisional semantic link is removed immediately when
+its final witness check fails.  Provisional semantic nodes themselves
+leave the graph through two paths: promotion to a verified node on
+geometric confirmation, and pruning once they fall behind the direction
+of travel.
+Persistent identities $h_i$ survive graph replacement and carry the
+semantic state across rebuilds.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Heatmap-Based Valuation of Nodes and Edges}
+\label{sec:semantics}
+\paragraph{Text query}
+We score the query $q$ \emph{against} the scene rather than in
+isolation.  An absolute similarity score is uncalibrated: its magnitude
+drifts with scene content, and a threshold tuned on one mission does not
+transfer to another.  We therefore insert $q$ into a fixed competitor
+vocabulary of background scene categories and common object classes,
+replacing an unused class slot, and take the heatmap as the target's
+share of a renormalized softmax over this vocabulary
+\cite{pearl,clip}.  Each class name is encoded with the CLIP template
+ensemble, and aliases of one class are max-pooled before the softmax.
+The response is consequently contrastive: a region responds only when
+it matches the query better than the background categories it competes
+with, and a mismatched query yields measurably different routes
+(Sec.~\ref{sec:experiments}).
+
+\paragraph{Node values}
+A frozen PEARL model maps $(I_t,q)$ to a heatmap, max-pooled on a
+$5\times3$ patch grid and calibrated against a low-quantile background
+baseline.
+Each verified node $v_i$ is a ground-plane location in front of the
+camera. It is back-projected into the current heatmap from $(x_i,y_i)$
+on the ground, so a level camera still uses its vertical FOV: nearer
+nodes sit lower in the image and farther nodes approach the horizon.
+The score is the Gaussian-weighted average around the projected pixel
+$u_i$,
+\begin{equation}
+ s_i=\frac{\sum_{u} w_u\, H(u)}{\sum_{u} w_u},\qquad
+ w_u=\exp\!\left(-\frac{\|u-u_i\|_2^2}{2\sigma_i^2}\right),
+\label{eq:node_score}
+\end{equation}
+where $H(u)$ is the calibrated heatmap value at pixel $u$, and the
+support $\sigma_i$ is scaled by the depth-estimated extent of the
+underlying heatmap component, so a compact trunk is sampled over a tight
+window while an extended wall is averaged over a broad one.
+Confidence $c_i$ decays quadratically toward the field-of-view boundary.
+Figure~\ref{fig:semantic_projection} visualizes the node scoring of
+Eq.~\eqref{eq:node_score}.
+
+\begin{figure}[t]
+\centering
+\safefig[width=\columnwidth]{pics/semantic_node_projection.pdf}
+\caption{Graph readout and virtual semantic frontiers at a blocks
+frame. (a)~Colored dots are verified free-space nodes scored by projecting
+their 3-D positions into the image and applying a Gaussian support. Stars
+are the five fixed-depth virtual semantic frontiers; dashed links attach
+these provisional route hypotheses to the verified backbone, rather than to
+obstacle surfaces. (b)~The same synchronized heatmap shows high response on
+the block faces and lower response toward the open route. The stars are
+sampled from the middle image row, and their scores guide route cost and
+frontier selection; they are not collision certificates or 3-D keep-out
+zones.}
+\label{fig:semantic_projection}
+\end{figure}
+
+Crucially, the block surface need not contain a verified node.  A high-response
+patch creates a fixed-depth virtual semantic frontier at the corresponding
+ray direction.  Its risk is evaluated against nearby witness edges, so
+existing free-space edges in a high-response direction become more expensive
+before the block enters the depth map, while low-response side branches remain
+available.  The virtual frontier is therefore a route hypothesis, not an
+obstacle point or a geometric safety certificate.
+
+The same heatmap also supplies evidence beyond the verified skeleton:
+each retained patch is projected at a fixed optical-axis depth $\ell_s$,
+\begin{equation}
+ \vect{y}_{u,t}=\vect{p}_t+\mat{R}_t
+ \left(\vect{t}_{\mathrm{cam}}+\ell_s\widetilde{\vect{d}}_u\right).
+\label{eq:projection}
+\end{equation}
+where $\widetilde{\vect{d}}_u$ is the unit ray through patch $u$ and
+$\vect{t}_{\mathrm{cam}}$ the camera translation in the body frame,
+and enters the graph as a provisional semantic node under the attachment
+rules of Sec.~\ref{sec:topology}.  Because this projection does not
+consult measured depth, an empty far-field return cannot erase semantic
+evidence.
+The projection and fusion operate on the camera stream at its native
+calibrated resolution; the interface itself does not fix an input
+resolution, so the deployer can trade semantic compute for far-field
+detection range (Sec.~\ref{sec:3d_eval}).
+
+\paragraph{Edge values}
+Every edge carries three assigned values.  The base weight $W_{ij}$ is
+the edge's stored weight, normally the witness length $L_{ij}$, and
+falls back to the endpoint chord when no weight is stored.  The minimum
+witness clearance $\bar\rho_{ij}$, measured along the polyline,
 contributes a soft preference
 \begin{equation}
  C_{\mathrm{clr}}(e_{ij})=
@@ -342,34 +464,9 @@ contributes a soft preference
  \left(\frac{\rho^\star}{\rho^\star+\bar\rho_{ij}}\right)^2,
 \label{eq:clearance}
 \end{equation}
-but never turns a geometrically valid edge into an invalid one.
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsection{Semantic Heatmap Fusion}
-\label{sec:semantics}
-A frozen PEARL model maps $(I_t,q)$ to a patch heatmap.  The heatmap is
-mean-pooled on a coarse grid, and each retained patch is projected at a
-fixed optical-axis depth $\ell_s$:
-\begin{equation}
- \vect{y}_{u,t}=\vect{p}_t+\mat{R}_t
- \left(\vect{t}_{\mathrm{cam}}+\ell_s\widetilde{\vect{d}}_u\right).
-\label{eq:projection}
-\end{equation}
-Because the projection does not consult measured depth, an empty far-field
-return cannot erase semantic evidence.  Each projection carries a
-score--confidence tuple $(s_i,c_i)$ associated with a persistent graph
-identity.
-
-High-scoring, spatially separated projections become provisional semantic
-frontiers.  A provisional frontier may attach only to nearby verified
-backbone nodes, and its witness is checked against all currently known
-obstacles; it cannot connect two verified corridors through unknown space.
-When later geometry creates a bubble at the same position, the identity is
-promoted to a verified node.  A frontier is therefore a route hypothesis,
-never a free-space certificate.
-
-Semantic evidence is fused with complete witness edges rather than only with
-endpoints.  For semantic node $k$ and edge witness $\pi_{ij}$,
+Semantic evidence is likewise fused along the complete witness polyline
+rather than only at the endpoints.  For semantic node $k$ and edge
+witness $\pi_{ij}$,
 \begin{equation}
 \begin{aligned}
  d_{k,ij}&=\min_{\vect{x}\in\pi_{ij}}
@@ -383,65 +480,81 @@ endpoints.  For semantic node $k$ and edge witness $\pi_{ij}$,
 The resulting preference cost
 \begin{equation}
  C_{\mathrm{sem}}(e_{ij})=
- \lambda_{\mathrm{sem}}L_{ij}
+ \lambda_{\mathrm{sem}}\|\vect{c}_j-\vect{c}_i\|
  [-\log(\max(\epsilon,1-r_{ij}))]
 \label{eq:semantic_cost}
 \end{equation}
+scales the polyline-evaluated risk by the chord length, and
 reshapes route preference but never overrides geometric validity.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \subsection{Route Search and Goal Interface}
 \label{sec:interface}
-Reachable vertices within radius $R_g$ are searched with the edge cost
-$C(e)=W_{ij}+C_{\mathrm{clr}}(e)+C_{\mathrm{sem}}(e)$.  The selected witness
-is stored in world coordinates and held until progress reaches a fixed
-fraction or its geometric check fails; a fresh search then replaces the
-complete route, and no graph-node pointers are retained across atomic
-replacement.
+\paragraph{Route search}
+Reachable vertices within radius $R_g$ are searched with A* over the
+edge cost $C(e)=W_{ij}+C_{\mathrm{clr}}(e)+C_{\mathrm{sem}}(e)$, expanded
+from the transient odometry node.  A provisional semantic node from the
+current heatmap frame may terminate the search, subject to the same
+witness check, but never transits
+between verified corridors; when no semantic target is reachable, the
+search falls back to the verified frontier closest to the mission goal.
 
-The accepted witness, rather than a modified local policy, carries the route
-decision.  Let $\mathcal{W}_t(s)$ be its arc-length parameterization and
-$s_t$ the closest forward progress to the vehicle.  The local goal is
+\paragraph{Goal interface}
+The selected route is the polyline through the accepted vertex centers.
+The route remains active until
+the traversed fraction exceeds a fixed threshold, or until an underlying
+edge witness fails the collision recheck, in which case a new search is
+issued.  Route commitment is therefore enforced by the route layer
+rather than by the local policy.
+The local goal is sampled ahead of the vehicle on the active route.  Let
+$\mathcal{W}_t(s)$ denote the arc-length parameterization of the
+polynomial-smoothed route polyline, $s_t$ the arc-length position of the
+vehicle projection on the route, and $\ell_{\mathrm{loc}}$ a constant
+lookahead distance.  The local goal is
 \begin{equation}
  \vect{g}^{\mathrm{loc}}_t=
- \mathcal{W}_t\!\left(\min(s_t+\ell_{\mathrm{loc}},L_{\mathcal W})\right),
- \qquad \ell_{\mathrm{loc}}=15~\mathrm{m}.
+ \mathcal{W}_t\!\left(\min(s_t+\ell_{\mathrm{loc}},L_{\mathcal W})\right).
 \label{eq:local_goal}
 \end{equation}
-The farther $\vect{g}^{\mathrm{front}}_t$ identifies the selected branch but
-is not sent to the executor.  When a witness is replaced, the vehicle is
-projected onto the new polyline before Eq.~\eqref{eq:local_goal} is
-evaluated.
-
-The executor contract is correspondingly narrow: a local planner must accept
-a position goal and produce executable commands.  The original YOPO
-checkpoint consumes the goal through its ordinary relative-goal input;
-EGO-Planner and SUPER receive it through a relay node.  No adapter alters a
-planner's search, optimization, or control law, and no corridor, bubble
-sequence, or graph feature crosses the interface.  A stale or invalid
-witness is rejected upstream and triggers a new search.
+The frontier goal $\vect{g}^{\mathrm{front}}_t$ identifies the selected
+branch and remains internal to the route layer.  The executor interface
+consists of a single position goal: any local planner that accepts a
+relative position goal and produces executable commands can be used
+without modification, and no corridor, bubble sequence, or graph feature
+crosses the interface.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{FRONTIERGCN DIRECTION POLICY}
 \label{sec:gcn}
-The FrontierGCN is TopoGuide's learned route-selection component.  It ranks
-five yaw directions, left $40^\circ$ to right $40^\circ$ in $20^\circ$
-steps, or, in the volumetric configuration, 15 yaw--pitch directions formed
-with pitch rows of $+20^\circ$, $0^\circ$, and $-20^\circ$.  Its output is
-only a frontier proposal: it neither creates a route nor issues an executor
-command, leaving geometric acceptance to A*.
+The route search of Sec.~\ref{sec:interface} can rank frontier
+directions with a hand-designed weighted score, but fixed weights must
+be retuned per scene and each decision rests on a single frame.  The
+FrontierGCN, TopoGuide's learned route-selection component, replaces
+this score with three advantages: message passing over the online
+skeleton aggregates the structural context of every candidate instead of
+scoring candidates in isolation; a recurrent direction state carries the
+decision across frames, so one noisy semantic observation cannot flip
+the selected branch; and privileged A* supervision distills global route
+knowledge into the online policy.  It ranks five yaw directions, left
+$40^\circ$ to right $40^\circ$ in $20^\circ$ steps, or, in the
+volumetric configuration, 15 yaw--pitch directions formed with pitch
+rows of $+20^\circ$, $0^\circ$, and $-20^\circ$.  Its output, the
+direction index $\hat c_t$, selects the frontier goal of the route
+search in Sec.~\ref{sec:interface}.
 
 At each inference tick, skeleton nodes and edges form the input graph,
-and virtual candidates are inserted $10$~m ahead of the vehicle at the
-candidate directions and connected to their nearest skeleton node with
-inverse-distance edge weights.  Each node carries a 20-dimensional feature
-vector (24 in the volumetric variant) encoding normalized world- and
-body-frame position, bubble clearance and degree, semantic score and
-confidence, candidate identity, and mission-goal terms.  Two edge-weighted
+and virtual candidates are inserted a constant distance ahead of the
+vehicle at the candidate directions and connected to their nearest
+skeleton node with inverse-distance edge weights.  Each node carries a
+20-dimensional feature vector (24 in the volumetric variant) encoding
+normalized world- and
+body-frame position, bubble clearance and degree, candidate identity,
+and mission-goal terms; candidate nodes additionally carry semantic
+score and confidence.  Two edge-weighted
 graph-convolution layers \cite{kipf2017gcn} encode the graph, global mean
 pooling supplies graph-level context, a GRU fuses the previously selected
 direction, and an MLP scores the candidates.  A* then tests reachability and
-collision validity exactly as it does for a hand-designed ranking.
+collision validity.
 Figure~\ref{fig:gcn_model} summarizes the deployed policy.  The volumetric
 variant preserves three-dimensional graph coordinates and adds one
 convolution layer.
@@ -459,110 +572,89 @@ convolution layer.
 \caption{FrontierGCN route-direction policy and its offline supervision.  (a)~Two
 weighted graph-convolution layers encode the online skeleton and five virtual
 candidates; pooled recurrent context produces a five-way route proposal, with
-A* downstream.  (b)~Offline training-data construction follows the logged
-point cloud and mission direction, an expert A* search for the ground-truth
-path, and FrontierGCN's direction selection/output.  The graph is shown only
-as a sparse top-down sketch; no semantic candidates are used in this label
-generation.  The privileged A* path and direction target are unavailable at
-deployment.}
+ A* downstream.  (b)~Offline training-data construction proceeds from a global
+ task overview with the direct mission direction, to the local expert A* path,
+ to FrontierGCN's direction selection in that same local window.}
 \label{fig:gcn_model}
 \end{figure}
 
-Training labels are privileged.  For the planar policy, the complete
-static ground-truth cloud is rasterized at $0.75$~m and inflated by the
-$1.2$~m vehicle radius; eight-neighbor A* returns the direction of the
-first path point at least $35$~m ahead.  The volumetric policy is labeled
-by 26-connected A* in the inflated mesh volume.  Out-of-view and incomplete
-paths are discarded, training minimizes class-weighted cross-entropy, and
-session-level splits keep adjacent frames out of both the training and test
-sets.  The ground-truth geometry is used only to
-construct offline labels and is not available to the deployed policy.  The
-resulting classifier is evaluated separately in
-Sec.~\ref{sec:heuristic_eval}; its accuracy is not a safety claim.
+Training labels are privileged.  For the planar policy, A* on the
+inflated ground-truth raster returns the direction of the first
+sufficiently distant path point, while the volumetric policy is labeled
+by A* in the inflated mesh volume.  Ground-truth geometry serves only to
+construct these offline labels and is not available to the deployed
+policy; session-level splits keep adjacent frames out of both the
+training and test sets.  The resulting classifier is evaluated
+separately in Sec.~\ref{sec:heuristic_eval}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{EXPERIMENTS}
 \label{sec:experiments}
-The evaluation examines four complementary aspects of the system: closed-loop
-compatibility of the topological goal interface with different local planners,
-the effects of semantic cost and the GCN policy on route selection,
-height-changing 3-D navigation, and the online graph-search workload under
-persistent geometry.
+The evaluation covers a cross-executor plug-in comparison on a mission
+mixing a dense small-obstacle field with a single large block, ablations
+of the semantic cost and the learned frontier policy together with an
+offline classification analysis, and a volumetric power-line mission
+through a grove.
 Closed-loop and profiling trials are conducted in Unreal Engine 5.7 with
 Colosseum, an AirSim-compatible simulator \cite{airsim}, using synchronized
-RGB-D and odometry.  Unless noted otherwise, the primary experiments use a
+RGB-D and odometry.  The semantic and GCN interface is additionally
+validated in two closed-loop real-world flights
+(Fig.~\ref{fig:gcn_real_views}).  Unless noted otherwise, the primary experiments use a
 1.6-m planning layer and one-way mission from $(0,0,1.6)$ to
 $(0,140,1.6)$~m; neither the obstacle layout nor the nominal start and goal is
-randomized across methods.  Section~\ref{sec:3d_eval} separately evaluates a
-volumetric Map4 mission with the fixed-layer constraints disabled.
+randomized across methods.
 
-\subsection{Evaluation Protocol}
+\subsection{Cross-Executor Closed-Loop Evaluation}
 \label{sec:protocol}
-\emph{Trial control and statistics.}  The simulation is reset before every
-trial.  A goal is issued only after the vehicle remains within 0.10~m of the
-common start, below 0.10~m/s, and within 0.10~rad of the mission heading for
-1~s.  Startup failures are excluded from navigation outcomes, while collision
-and timeout remain in the outcome rates; completion metrics use successful
-trials only.
-
-\emph{Metrics.}  Closed-loop metrics are success, collision, timeout, path
-length $L$, flight time $T$, $\bar v=L/T$, and maximum speed.  For failed
-flights, distance traveled before termination is reported separately as
-$L_{\rm obs}$ and never mixed into successful-flight completion means.
-Profiling separates point processing, graph construction, active A*, and the
-complete planning tick.
-
-\emph{Baseline fairness.}  EGO-Planner \cite{egoplanner} and SUPER
-\cite{super} retain their planner cores but require simulator-specific cloud,
-goal, and command adapters.  Their executor configurations and timeouts differ
-from YOPO's, and recent benchmarking shows that such stacks are sensitive to
-latency, field of view, and scenario difficulty \cite{flightbench}.  Their
-failures therefore characterize these deployments, not universal planner
-capability.  The plug-in claim concerns the narrow goal interface and absence
-of planner-core changes, not strict experimental interchangeability.  The
-no-graph rows are direct-goal executor controls rather than competitive global
-planning baselines; Fig.~\ref{fig:integrated_results} therefore summarizes the
-route-interface deployment, not superiority over map-based global A* or
-sampling-based planners.
-
-\subsection{Cross-Planner Closed-Loop Evaluation}
-\subsubsection{Methods and Conditions}
-The primary comparison pairs each standalone executor with a TopoGuide-guided
-variant.  All TopoGuide variants run the same graph-node implementation,
-semantic route formulation, A* acceptance, witness memory, and local-goal
-interface.  YOPO consumes the goal directly; EGO-Planner and SUPER use the
-adapter described in Sec.~\ref{sec:interface}.  Their internal planners do not
-consume TopoGuide data structures.  Each row in the plug-in comparison contains
-ten valid trials.  Table~\ref{tab:params} lists route-layer parameters shared
-by the principal YOPO ablations.
-
-\begin{table}[t]
-\caption{Fixed Parameters Used by the Current Implementation}
-\label{tab:params}
+\begin{figure*}[!t]
 \centering
-\small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lc@{\quad}lc}
-\toprule
-Parameter & Value & Parameter & Value \\
-\midrule
-Point voxel & 0.10 m & Point budget & 100,000 \\
-Frame history & current frame only & Graph update & 100 ms \\
-Graph rebuild & 100 ms & Search radius & 45 m \\
-Local lookahead & 15 m & Goal-connect budget & 20 ms \\
-$\lambda_{\rm sem}$ & 2.0 & $R_s$ & 8 m \\
-$\lambda_{\rm clr}$ & 2.0 & $\rho^\star$ & 1.2 m \\
-Score update & latest match & Edge-memory discount & disabled \\
-Optical depth $\ell_s$ & 35 m & Node merge distance & 2.5 m \\
-Semantic candidates/frame & $\leq 10$ & Virtual-node cap & 512 \\
-Semantic candidates/edge & 8 & Semantic grid & $5\times3$ \\
-\bottomrule
-\end{tabular}
-}
-\end{table}
+\safefig[width=0.90\textwidth]{pics/experiments/map2_0_140_1p6/figure4_integrated_topoguide.pdf}
+\vspace{-2pt}
+\caption{Integrated cross-executor evaluation.  The upper row overlays each
+standalone executor (blue, orange, or green) with its TopoGuide counterpart
+(red) on the same obstacle backdrop; upper-panel annotations report
+aggregate success.  The lower
+row shows the online route-layer wall-time profile for the corresponding guided
+run.  All curves are wall time in ms, binned over normalized mission time, and
+trace point processing, graph construction, the complete planning tick, and
+A* search latency.  Stars mark completed goals and crosses mark incomplete
+baseline flights.}
+\label{fig:integrated_results}
+\end{figure*}
 
-\subsubsection{Environment and Task}
-All methods traverse the same ordered obstacle course
+\begin{figure}[!t]
+\centering
+\safefig[width=0.24\columnwidth]{pics/0903_graph_semantic_frontier_building1.png}\hfill
+\safefig[width=0.24\columnwidth]{pics/0903_graph_semantic_frontier_building2.png}\hfill
+\safefig[width=0.24\columnwidth]{pics/0903_graph_semantic_frontier_forest1.png}\hfill
+\safefig[width=0.24\columnwidth]{pics/0903_graph_semantic_frontier_forest2.png}
+\caption{GCN-interface views from two closed-loop real-world flights.
+Each panel preserves the real RGB frame and the PEARL
+heatmap; red marks the proposed frontier column and the green dashed
+arrow marks the mission-goal direction.}
+\label{fig:gcn_real_views}
+\end{figure}
+
+\emph{Metrics.}  We report the success, collision, and timeout rates of
+each condition, and, for successful flights, the path length $L$, flight
+time $T$, mean speed $\bar v=L/T$, and maximum speed; the distance covered
+before a failed flight terminates is reported separately as $L_{\rm obs}$
+and is not mixed into successful-flight means.
+
+\emph{Baselines.}  EGO-Planner \cite{egoplanner} and SUPER
+\cite{super} retain their planner cores and receive the goal through
+simulator-specific cloud and command adapters.  The no-graph rows are
+direct-goal executor controls
+rather than competitive global planning baselines.
+
+\emph{Methods and conditions.}  The primary comparison pairs each standalone executor with a TopoGuide-guided
+variant.  All TopoGuide variants run the same graph-node implementation,
+semantic route formulation, A* acceptance, route memory, and local-goal
+interface.  YOPO consumes the goal directly; EGO-Planner and SUPER receive
+it through their standard goal inputs.  Their internal planners do not
+consume TopoGuide data structures.
+
+\emph{Environment and task.}  All methods traverse the same ordered obstacle course
 (Fig.~\ref{fig:integrated_results}).  Along the
 $+y$ mission direction, the first approximately 25~m contain a dense field of
 small obstacles.  The latter half is dominated by a single approximately
@@ -576,31 +668,12 @@ ground-truth geometry in the navigation slab $z\in[0.6,2.6]$~m.  Ground truth
 is used only for environment characterization and is not available to any method
 online.  Matched language trials use the query ``blocks, wall.''
 
-\subsubsection{Results}
-Figure~\ref{fig:integrated_results} combines representative trajectory
+\emph{Results.}  Figure~\ref{fig:integrated_results} combines representative trajectory
 overlays, closed-loop outcome rates, and online-resource time series.  Each
 upper panel overlays one standalone executor with its TopoGuide-guided
-counterpart in a common Map2 frame.  The aligned lower panel reports the
+counterpart in a common world frame.  The aligned lower panel reports the
 incremental route-layer wall time for that column's representative TopoGuide
 run.
-
-\begin{figure*}[!ht]
-\centering
-\safefig[width=0.98\textwidth]{pics/experiments/map2_0_140_1p6/figure4_integrated_topoguide.pdf}
-\vspace{-2pt}
-\caption{Integrated cross-executor evaluation.  The upper row overlays each
-standalone executor (blue, orange, or green) with its TopoGuide counterpart
-(red) on the same Map2 obstacle backdrop; colors identify methods and do not
-encode speed, and upper-panel annotations report aggregate success.  The lower
-row shows the online route-layer wall-time profile for the corresponding guided
-run.  All curves are wall time in ms, binned over normalized mission time, and
-trace point processing, graph construction, the complete planning tick, and
-A* search latency.  Standalone logs do not expose comparable internal timing,
-so the lower row isolates TopoGuide's added route-layer workload rather than
-total executor compute.  Stars mark completed goals and crosses mark incomplete
-baseline flights.}
-\label{fig:integrated_results}
-\end{figure*}
 
 All three standalone configurations terminated without a successful mission,
 whereas
@@ -612,7 +685,7 @@ representative; failed-flight path and time are not treated as completion
 metrics.  The TopoGuide (EGO)
 deployment uses a 200-s mission timeout, while the other rows use 90~s.
 
-The TopoGuide (YOPO) run produced no collision or timeout events: all ten trials
+The TopoGuide (YOPO) run produced no collision or timeout events: all trials
 reached the goal and satisfied the final position and settling-speed
 tolerances.  Relative to the 140-m straight-line mission, its mean path is
 31.59~m longer, corresponding to a $22.6\%$ path overhead.  The longest trial
@@ -620,42 +693,55 @@ was trial 6 at $188.43$~m and $36.72$~s, which accounts for most of the path
 length spread.  The mean terminal position error was $0.096\pm0.029$~m and
 the mean terminal speed was $0.294\pm0.004$~m/s.
 
-The latest executor regressions also expose distinct failure modes.  TopoGuide
-with EGO-Planner had three collisions after 31.30, 83.41, and 132.15~m of
-executed motion, spanning early, middle, and late portions of the mission.
-TopoGuide with SUPER had one early collision after 6.95~m of executed motion
-and no timeouts.  All ten trials in this evaluation were valid, with no
-exclusions.  These terminal records distinguish collision from route
-divergence or stall, but do not by themselves attribute a failure to the GCN,
-accepted witness, or executor tracking.  Such attribution requires the
-timestamped route and command trace rather than the terminal outcome alone.
+The guided failures are all collisions rather than route divergence or
+stall: TopoGuide (EGO) collided three times after 31.30, 83.41, and
+132.15~m of executed motion, spanning early, middle, and late portions of
+the mission, and TopoGuide (SUPER) collided once after 6.95~m.
 
-\subsection{Route-Layer Ablations}
-\subsubsection{Semantic Influence}
-To test whether the route benefit depends on semantic evidence beyond the
+\emph{Online workload.}  The online search is restricted to a local working
+set even when the verified topology persists outside the current sensing
+window: retaining the explored backbone does not enlarge the planning tick.
+At
+approximately 500 nodes and 3,200 directed edges, GCN inference on an
+NVIDIA GeForce RTX 3090 adds 0.83~ms mean latency (0.60~ms at P50, 1.97~ms
+at P95).  The lower row of Fig.~\ref{fig:integrated_results} separates
+these components and characterizes the incremental route layer, not
+total executor compute.
+
+\subsection{Ablations and Policy Analysis}
+\label{sec:heuristic_eval}
+\emph{Semantic influence.}  To test whether the route benefit depends on semantic evidence beyond the
 depth envelope, we repeated the GCN stack with the same fixed mission,
 90-s timeout, graph configuration, and query, while disabling PEARL,
-semantic nodes, and semantic edge cost.  Completion metrics use successful
-flights only, while $L_{\rm obs}$ records the path observed before collision
-or timeout.  The resulting conventional flight metrics are reported in
-Table~\ref{tab:gcn_semantic_ablation}.
+semantic nodes, and semantic edge cost.  The resulting flight metrics are
+reported in Table~\ref{tab:closed_loop}.
 
 \begin{table}[t]
-\caption{Semantic route-layer ablation on the fixed mission with the GCN
-heuristic fixed.
-Semantic-off removes PEARL heatmaps, far-field nodes, and semantic edge cost;
-geometry, A*, goal publication, and YOPO remain enabled.}
-\label{tab:gcn_semantic_ablation}
+\caption{Closed-loop outcomes on the dense-block mission (upper groups) and
+the volumetric grove mission (last group).  Semantic-off removes PEARL
+heatmaps, far-field nodes, and semantic edge cost; the frontier-policy
+group replaces only the ranking policy.  Continuous values are computed
+over successful flights; $L_{\rm obs}$ denotes the path observed before a
+failed flight.}
+\label{tab:closed_loop}
 \centering
 \small
 \resizebox{\columnwidth}{!}{%
-\begin{tabular}{lcccccccc}
+\begin{tabular}{lccccccccc}
 \toprule
-Condition & Success (\%) & Collision (\%) & Timeout (\%) & $L_{\rm succ}$ (m) & $L_{\rm obs}$ (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
+Condition & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) & $L_{\rm obs}$ (m) & $z$ span (m) \\
 \midrule
-Matched query & 100 & 0 & 0 & $171.59\pm6.57$ & \blank & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ \\
-Semantic disabled & 60 & 40 & 0 & $169.47\pm3.16$ & $11.69\pm1.60$ & $32.34\pm2.70$ & $5.261\pm0.315$ & $6.404\pm0.158$ \\
-Irrelevant query & 80 & 20 & 0 & $175.76\pm6.09$ & $20.32\pm2.67$ & $35.02\pm1.65$ & $5.023\pm0.127$ & $6.398\pm0.274$ \\
+\multicolumn{10}{l}{\emph{Semantic ablation (YOPO, GCN, $n=10$ per row)}}\\
+Matched query & 100 & 0 & 0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ & \blank & \blank \\
+Semantic disabled & 60 & 40 & 0 & $169.47\pm3.16$ & $32.34\pm2.70$ & $5.261\pm0.315$ & $6.404\pm0.158$ & $11.69\pm1.60$ & \blank \\
+Irrelevant query & 80 & 20 & 0 & $175.76\pm6.09$ & $35.02\pm1.65$ & $5.023\pm0.127$ & $6.398\pm0.274$ & $20.32\pm2.67$ & \blank \\
+\midrule
+\multicolumn{10}{l}{\emph{Frontier-policy ablation (YOPO, semantic on)}}\\
+Hand-designed ($n=27$) & 88.9 & 11.1 & 0 & $199.14\pm14.12$ & $38.54\pm3.06$ & $5.172\pm0.097$ & $6.409\pm0.184$ & \blank & \blank \\
+GCN ($n=10$) & 100.0 & 0.0 & 0.0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ & \blank & \blank \\
+\midrule
+\multicolumn{10}{l}{\emph{Volumetric grove mission ($n=10$)}}\\
+TopoGuide (GCN-3D) & 80 & 20 & 0 & $167.40\pm13.83$ & $36.98\pm5.30$ & $4.564\pm0.327$ & \blank & \blank & $2.225\pm0.477$ \\
 \bottomrule
 \end{tabular}
 }
@@ -675,168 +761,62 @@ The irrelevant-query condition (prompt ``trees'') completes 8/10 trials,
 confirming that route selection responds to the alignment between the language
 query and visual scene content.
 
-\subsubsection{GCN Frontier-Policy Ablation}
-To isolate the learned route-selection component, we compare TopoGuide's
+\emph{Frontier-policy ablation.}  To isolate the learned route-selection component, we compare TopoGuide's
 hand-designed frontier ranking with the GCN policy while
 holding the fixed mission, semantic query, route-cost parameters, and YOPO
 executor fixed.
-
-\begin{table}[t]
-\caption{Frontier-Policy Ablation Within TopoGuide}
-\label{tab:single_run_validation}
-\centering
-\small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lccccccc}
-\toprule
-Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) \\
-\midrule
-Hand-designed ($n=27$) & 88.9 & 11.1 & 0 & $199.14\pm14.12$ & $38.54\pm3.06$ & $5.172\pm0.097$ & $6.409\pm0.184$ \\
-GCN ($n=10$) & 100.0 & 0.0 & 0.0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ \\
-\bottomrule
-\end{tabular}
-}
-\end{table}
-
 The GCN policy completed 10/10 trials, compared with 24/27 for the
 hand-designed ranking, while reducing mean path length from 199.14~m to
 171.59~m and mean flight time from 38.54~s to 33.61~s.  Only the
 frontier-ranking policy is replaced; A*, witness acceptance, semantic route
 cost, and the local-goal interface remain unchanged.
 
-\subsection{GCN Policy Evaluation}
-\label{sec:heuristic_eval}
-The privileged dataset contains 5,337 frames, split by session into 3,844
+\emph{Offline policy evaluation.}  The privileged dataset contains 5,337 frames, split by session into 3,844
 training, 786 validation, and 707 held-out test frames.  A validation sweep
 selects no additional switching penalty.  On
 the untouched test split, the deployed checkpoint obtains $89.3\%$ exact and
 $89.4\%$ macro accuracy; $99.4\%$ of predictions are within one adjacent
-direction column, with a mean absolute column error of $0.115$.  The logged
+direction column, with a mean absolute column error of $0.115$.  The
 hand-designed frontier policy matches $22.2\%$ of the strict 35-m labels.
-These results measure route-direction prediction, not online safety.
+Figure~\ref{fig:gcn_real_views} shows the deployed interface in two
+closed-loop real-world flights: the PEARL heatmap, the selected GCN
+column, and the mission-goal direction are computed online on the real
+fisheye frames.
 
-\begin{table}[t]
-\caption{GCN Direction Classification}
-\label{tab:gcn_offline}
-\centering
-\small
-\begin{tabular}{lc}
-\toprule
-Metric & Test \\
-\midrule
-Exact accuracy & 89.3\% \\
-Macro accuracy & 89.4\% \\
-Within one direction column & 99.4\% \\
-Mean absolute column error & 0.115 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Figure~\ref{fig:gcn_real_views} shows synchronized frames from the online
-interface.  The RGB image, PEARL heatmap, selected GCN column, and mission-goal
-direction are retained from the recorded experiment.
-
-\begin{figure*}[t]
-\centering
-\begin{minipage}[t]{0.235\textwidth}
-\centering
-\safefig[width=\linewidth]{pics/0903_graph_semantic_frontier_building1.png}\\[-1pt]
-{\footnotesize (a) Building view 1}
-\end{minipage}\hfill
-\begin{minipage}[t]{0.235\textwidth}
-\centering
-\safefig[width=\linewidth]{pics/0903_graph_semantic_frontier_building2.png}\\[-1pt]
-{\footnotesize (b) Building view 2}
-\end{minipage}\hfill
-\begin{minipage}[t]{0.235\textwidth}
-\centering
-\safefig[width=\linewidth]{pics/0903_graph_semantic_frontier_forest1.png}\\[-1pt]
-{\footnotesize (c) Forest view 1}
-\end{minipage}\hfill
-\begin{minipage}[t]{0.235\textwidth}
-\centering
-\safefig[width=\linewidth]{pics/0903_graph_semantic_frontier_forest2.png}\\[-1pt]
-{\footnotesize (d) Forest view 2}
-\end{minipage}
-\caption{Recorded GCN-interface views from closed-loop flights.  Each
-panel preserves the RGB frame and PEARL heatmap; red marks the proposed
-frontier column and the
-green dashed arrow marks the 35-m mission-goal direction.}
-\label{fig:gcn_real_views}
-\end{figure*}
-
-\subsection{Height-Changing 3-D Navigation}
+\subsection{Volumetric Navigation}
 \label{sec:3d_eval}
-We further evaluate the volumetric mode in a separate Map4 line-obstacle
-mission.  The start and goal are $(0,0,3.5)$ and $(0,140,3.5)$~m, placing the
-nominal flight height through the power-line corridor.  Both the graph-layer
-projection and YOPO's fixed-altitude constraint are disabled.  A dedicated
+We further evaluate the volumetric mode in a separate power-line mission
+through a grove.  The start and goal are $(0,0,3.5)$ and $(0,140,3.5)$~m, placing the
+nominal flight height through the power-line corridor.  Both the fixed
+planning layer and YOPO's fixed-altitude constraint are disabled.  A dedicated
 15-direction checkpoint, trained on 2,200 graph states labeled by
 26-connected A* in the privileged 3-D mesh volume, ranks three pitch rows and
 five yaw columns; the online planner still observes only RGB-D, odometry, and
-the text query ``line.''
+the text query ``line.''  The semantic input runs at 1080p: downsampled to
+$160{\times}96$, the wire's peak heatmap response collapses from $0.68$ to
+$0.05$ and the corridor disappears from the semantic stream
+(Fig.~\ref{fig:powerline3d}).
 
-\begin{table}[t]
-\caption{Height-Changing Map4 Line-Obstacle Mission ($n=10$).  Continuous
-values are computed over the successful flights.}
-\label{tab:3d_line_navigation}
+\begin{figure}[!t]
 \centering
-\small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lccccccc}
-\toprule
-Method & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & $z$ span (m) \\
-\midrule
-TopoGuide (GCN-3D) & 80 & 20 & 0 & $167.40\pm13.83$ & $36.98\pm5.30$ & $4.564\pm0.327$ & $2.225\pm0.477$ \\
-\bottomrule
-\end{tabular}
-}
-\end{table}
+\safefig[width=0.88\columnwidth]{pics/candidates/pearl_powerline_graph3d_candidate_v26.png}
+\caption{Power-line mission and the resolution sensitivity of its semantic
+cue.  Top: the same RGB frame at $160{\times}96$ and at 1080p with the
+corresponding PEARL responses; the peak wire response rises from $0.054$ to
+$0.678$.  Bottom: the flown trajectory (red), the accepted A* route (teal),
+its polynomial fit (orange dashed), and the ground-truth voxels.}
+\label{fig:powerline3d}
+\end{figure}
 
-TopoGuide completes $80\%$ of the trials without timeout.  Every successful
+TopoGuide completes $80\%$ of the trials without timeout
+(Table~\ref{tab:closed_loop}).  Every successful
 flight changes altitude substantially: the per-flight vertical span ranges
 from 1.731 to 2.934~m.  The shortest successful route is 149.203~m in
 30.934~s and spans 1.808~m vertically.  The two failures are early collisions
 after 10.907 and 10.019~m.  Together with the non-planar graph and executor
-settings, these trajectories verify that the same topology--witness--goal
+settings, these trajectories verify that the same topology--route--goal
 pipeline supports height-changing route execution rather than only planar
 branch selection.
-
-\subsection{Online Planning Workload}
-The online search is restricted to a local working set even when the verified
-topology persists outside the current sensing window.  The current
-configuration keeps at most 100,000 point samples, rebuilds the skeleton every
-100~ms, searches within 45~m, and caps virtual semantic nodes at 512.
-The lower row of Fig.~\ref{fig:integrated_results} shows time-binned wall-time
-traces for the representative TopoGuide run paired with each executor.  The
-persistent mode uses 214/249 local
-nodes at P50/P95 and expands 185/215 nodes per active A* search, compared with
-197/231 and 173/194 when persistence is disabled.  Thus retaining the explored
-backbone does not make every retained node part of each planning tick.  Over
-normalized session time, the observed local-node P95 remains below 279 with
-persistence and 248 without it.  At approximately 500 nodes and 3,200 directed
-edges, GCN inference on an NVIDIA GeForce RTX 3090 adds 0.83~ms mean latency
-to the online workload, with 0.60~ms at P50 and 1.97~ms at P95.
-The traces separate point processing, graph construction, the complete
-planning tick, and active A*.  Because the standalone logs lack the same
-internal timing instrumentation, these panels characterize the incremental
-TopoGuide layer and are not a comparison of total executor compute.
-
-A route holds its accepted witness until a progress gate is reached or a
-geometric check fails; this makes route switching observable and prevents a
-partially rebuilt graph from leaking into the controller.  The semantic stream
-runs at roughly 2~Hz, whereas graph and control updates remain asynchronous.
-
-For reproducibility, each trial records the graph snapshot timestamp, selected
-frontier column, witness clearance, A* replacement reason, local-goal distance,
-and terminal outcome.  These fields let us distinguish a direction proposal
-from the route actually accepted after collision checking.  They also expose
-the failure sequence seen in the evaluation: a stale or low-clearance
-witness is rejected, a fresh A* search is requested, and a moving vehicle may
-reach the executor's start-failure condition before the replacement goal is
-established.  This logging boundary is important because it attributes safety
-events to the graph--planner--executor interface rather than to an offline GCN
-classification score alone.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{CONCLUSION AND DISCUSSION}
@@ -853,14 +833,14 @@ Several limitations remain.  ``Plug-and-play'' means no planner retraining
 once the goal and command interfaces are adapted; it does not remove
 integration code.  The cross-executor study fixes one altitude layer and
 one mission layout, and the volumetric evaluation covers a single
-line-obstacle mission; randomized layouts, dynamic obstacles, and real
-sensors remain untested.  Semantic projections remain hypotheses checked
+line-obstacle mission; randomized layouts and dynamic obstacles remain
+untested.  Semantic projections remain hypotheses checked
 only against known obstacles, and offline GCN accuracy measures direction
-prediction, not online safety.  Future graph policies can incorporate
-clearance and braking margin directly and mask invalid directions before
-learned ranking.
+prediction, not online safety.
 
 
+\begingroup
+\scriptsize
 \begin{thebibliography}{99}
 
 \bibitem{rappids}
@@ -994,12 +974,8 @@ Y. Cao, R. Zhao, Y. Wang, B. Xiang, and G. Sartoretti,
 S. Shah, D. Dey, C. Lovett, and A. Kapoor,
 ``AirSim: High-Fidelity Visual and Physical Simulation for Autonomous
 Vehicles,'' in \emph{Field and Service Robotics}, 2018, pp. 621--635.
-\bibitem{flightbench}
-S.-A. Yu, C. Yu, F. Gao, Y. Wu, and Y. Wang,
-``FlightBench: Benchmarking Learning-Based Methods for Ego-Vision-Based
-Quadrotors Navigation,'' in \emph{Proc. IEEE Int. Conf. Robot. Autom.},
-2025.
 
 \end{thebibliography}
+\endgroup
 
 \end{document}

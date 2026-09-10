@@ -198,6 +198,47 @@ inline Eigen::Vector3f virtualSemanticPointFlu(
   return camera_translation + std::max(0.0F, distance_m) * direction;
 }
 
+inline bool worldPointToSemanticImage(
+    const Eigen::Vector3f &point_world,
+    const Eigen::Vector3f &body_world,
+    const Eigen::Quaternionf &world_from_body,
+    const Eigen::Vector3f &camera_translation_flu,
+    float horizontal_fov_deg, float vertical_fov_deg,
+    float &normalized_u, float &normalized_v, float &optical_depth_m) {
+  const Eigen::Vector3f body_flu =
+    world_from_body.conjugate() * (point_world - body_world);
+  const Eigen::Vector3f cam = body_flu - camera_translation_flu;
+  optical_depth_m = cam.x();
+  if (!(optical_depth_m > 1e-4F) || !cam.allFinite()) return false;
+  constexpr float kPi = 3.14159265358979323846F;
+  const float horizontal_tangent = std::tan(
+    std::clamp(horizontal_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
+  const float vertical_tangent = std::tan(
+    std::clamp(vertical_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
+  if (horizontal_tangent <= 1e-6F || vertical_tangent <= 1e-6F) return false;
+  normalized_u = 0.5F - 0.5F * cam.y() / (optical_depth_m * horizontal_tangent);
+  normalized_v = 0.5F - 0.5F * cam.z() / (optical_depth_m * vertical_tangent);
+  return std::isfinite(normalized_u) && std::isfinite(normalized_v);
+}
+
+struct SemanticHeatmapAnnotation {
+  const float *heatmap = nullptr;
+  int width = 0;
+  int height = 0;
+  Eigen::Vector3f body_world = Eigen::Vector3f::Zero();
+  Eigen::Quaternionf world_from_body = Eigen::Quaternionf::Identity();
+  Eigen::Vector3f camera_translation_flu = Eigen::Vector3f(0.5F, 0.0F, -0.1F);
+  float horizontal_fov_deg = 90.0F;
+  float vertical_fov_deg = 60.0F;
+  float min_heatmap_score = 0.20F;
+  float min_radius_m = 1.0F;
+  float max_radius_m = 20.0F;
+  // Verified nodes are a ground-plane map in front of the camera. Project
+  // (x, y, ground_z) rather than the flight-layer z, otherwise a level
+  // camera collapses every node onto the horizon line.
+  float ground_z_m = 0.0F;
+};
+
 inline bool retainGeometryAfterMiss(
     std::uint8_t miss_count, std::uint8_t grace = 2U) {
   return miss_count <= grace;
@@ -668,6 +709,18 @@ public:
       const vector<float> &semantic_confidences = {},
       const vector<std::uint8_t> &semantic_virtual_flags = {},
       const vector<std::int8_t> &semantic_columns = {});
+  // Project verified free-space nodes back into the current 2D heatmap and
+  // take a Gaussian-weighted average around the projected pixel. Nodes are
+  // treated as a ground-plane map: the image uses (x, y, ground_z), so a
+  // level camera with vertical FOV places nearer nodes lower and farther
+  // nodes toward the horizon. This copies only image evidence onto existing
+  // graph nodes. No depth-occlusion test is performed here: a nearer return
+  // cannot identify the unknown object behind it and therefore must not zero
+  // or reject this node. Unsafe ordinary-to-semantic edges are handled by
+  // the independent edge collision check. Virtual fixed-depth frontiers are
+  // not annotated here.
+  size_t annotateVerifiedNodesFromHeatmap(
+      const SemanticHeatmapAnnotation &view, std::int64_t stamp_ns);
 
   // Re-check every ordinary-to-semantic edge against the current obstacle
   // map.  This must run independently of semantic-frame updates because the
