@@ -137,7 +137,10 @@ def parse_args() -> argparse.Namespace:
         help="pause between trials in seconds (default: 3)",
     )
     parser.add_argument("--goal-x", type=float, default=0.0)
-    parser.add_argument("--goal-y", type=float, default=140.0)
+    # argparse applies ``type`` only to values supplied on the command line;
+    # defaults are kept as-is.  ROS2 geometry messages require native Python
+    # floats, so an integer default here fails when publishing the goal.
+    parser.add_argument("--goal-y", type=float, default=190.0)
     parser.add_argument("--goal-z", type=float, default=1.6)
     parser.add_argument("--start-x", type=float, default=0.0)
     parser.add_argument("--start-y", type=float, default=0.0)

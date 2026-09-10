@@ -320,6 +320,11 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     semantic_point_separation_m_ = declare_parameter<double>(
       "semantic_point_separation_m", 1.5);
     semantic_point_radius_m_ = declare_parameter<double>("semantic_point_radius_m", 0.75);
+    semantic_annotation_min_radius_m_ = std::max(0.5, declare_parameter<double>(
+      "semantic_annotation_min_radius_m", 1.0));
+    semantic_annotation_max_radius_m_ = std::max(
+      semantic_annotation_min_radius_m_, declare_parameter<double>(
+        "semantic_annotation_max_radius_m", 20.0));
     semantic_point_max_nodes_ = declare_parameter<int>("semantic_point_max_nodes", 16);
     virtual_semantic_prune_enabled_ = declare_parameter<bool>(
       "virtual_semantic_prune_enabled", true);
@@ -528,6 +533,17 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   {
     std::int64_t stamp_ns = 0;
     Eigen::Vector3f origin = Eigen::Vector3f::Zero();
+    Eigen::Quaternionf orientation = Eigen::Quaternionf::Identity();
+    // Full synchronized image products.  Virtual frontier candidates remain
+    // five forward-projected columns, while measured backbone nodes are scored
+    // by projecting the 3-D node back into this image and sampling a local
+    // Gaussian support there.
+    std::uint32_t heatmap_width = 0;
+    std::uint32_t heatmap_height = 0;
+    std::vector<float> heatmap;
+    std::uint32_t depth_width = 0;
+    std::uint32_t depth_height = 0;
+    std::vector<float> depth_m;
     std::vector<Eigen::Vector3f> points_world;
     std::vector<float> scores;
     std::vector<float> confidences;
@@ -1137,11 +1153,15 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     std::vector<std::uint8_t> patch_valid(patch_count, 0U);
     std::vector<std::uint32_t> patch_center_u(patch_count, 0U);
     std::vector<std::uint32_t> patch_center_v(patch_count, 0U);
+    std::vector<float> packed_heatmap(
+      static_cast<std::size_t>(message->width) * static_cast<std::size_t>(message->height), 0.0F);
     for (std::uint32_t v = 0; v < message->height; ++v) {
       const auto *heatmap_row = reinterpret_cast<const float *>(
         message->data.data() + static_cast<std::size_t>(v) * message->step);
       for (std::uint32_t u = 0; u < message->width; ++u) {
         const float semantic = std::clamp(heatmap_row[u], 0.0F, 1.0F);
+        packed_heatmap[static_cast<std::size_t>(v) * static_cast<std::size_t>(message->width) + u] =
+          std::isfinite(semantic) ? semantic : 0.0F;
         if (!std::isfinite(semantic)) continue;
         const std::size_t patch_u = std::min(
           patch_cols - 1,
@@ -1162,6 +1182,15 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       SemanticFrame frame;
       frame.stamp_ns = stamp_ns;
       frame.origin = capture_pose.position;
+      frame.orientation = capture_pose.orientation;
+      frame.heatmap_width = message->width;
+      frame.heatmap_height = message->height;
+      frame.heatmap = packed_heatmap;
+      if (depth_frame) {
+        frame.depth_width = depth_frame->width;
+        frame.depth_height = depth_frame->height;
+        frame.depth_m = depth_frame->depth_m;
+      }
       // Keep both projections for every patch.  A measured surface point is
       // useful to the ordinary topology, while the fixed-depth counterpart
       // remains the semantic frontier anchor even when depth is valid.
@@ -4071,6 +4100,10 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     std::size_t semantic_box_rejected = 0;
     std::size_t semantic_duplicate_rejected = 0;
     std::size_t semantic_connected_nodes = 0;
+    std::size_t semantic_reverse_annotated = 0;
+    float semantic_reverse_score_min = std::numeric_limits<float>::infinity();
+    float semantic_reverse_score_max = 0.0F;
+    float semantic_reverse_score_sum = 0.0F;
     float semantic_min_range_m = std::numeric_limits<float>::infinity();
     float semantic_max_range_m = 0.0F;
     if (semantic_points_enabled_ && frame->points_world.size() == frame->scores.size() &&
@@ -4127,16 +4160,16 @@ class ScaleNavGraphNode final : public rclcpp::Node {
             ++semantic_duplicate_rejected;
             continue;
           }
+          if (!is_virtual) {
+            ++semantic_measured_candidates;
+            continue;
+          }
           semantic_centers.push_back(planning_point);
           semantic_scores.push_back(std::clamp(score, 0.0F, 1.0F));
           semantic_confidences.push_back(std::clamp(confidence, 0.0F, 1.0F));
-          semantic_virtual_flags.push_back(is_virtual ? 1U : 0U);
+          semantic_virtual_flags.push_back(1U);
           semantic_columns.push_back(column);
-          if (is_virtual) {
-            ++semantic_virtual_candidates;
-          } else {
-            ++semantic_measured_candidates;
-          }
+          ++semantic_virtual_candidates;
           const float range = (planning_point - origin).norm();
           semantic_min_range_m = std::min(semantic_min_range_m, range);
           semantic_max_range_m = std::max(semantic_max_range_m, range);
@@ -4146,6 +4179,41 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         static_cast<float>(std::max(0.45, semantic_point_radius_m_)),
         origin, frame->stamp_ns, semantic_confidences, semantic_virtual_flags,
         semantic_columns);
+      if (!frame->heatmap.empty() && frame->heatmap_width > 0 && frame->heatmap_height > 0) {
+        SemanticHeatmapAnnotation view;
+        view.heatmap = frame->heatmap.data();
+        view.width = static_cast<int>(frame->heatmap_width);
+        view.height = static_cast<int>(frame->heatmap_height);
+        view.body_world = frame->origin;
+        view.world_from_body = frame->orientation;
+        view.camera_translation_flu = Eigen::Vector3f(
+          static_cast<float>(semantic_camera_tx_), static_cast<float>(semantic_camera_ty_),
+          static_cast<float>(semantic_camera_tz_));
+        view.horizontal_fov_deg = static_cast<float>(semantic_horizontal_fov_deg_);
+        view.vertical_fov_deg = static_cast<float>(semantic_vertical_fov_deg_);
+        view.min_heatmap_score = static_cast<float>(semantic_point_min_score_);
+        view.min_radius_m = static_cast<float>(semantic_annotation_min_radius_m_);
+        view.max_radius_m = static_cast<float>(semantic_annotation_max_radius_m_);
+        semantic_reverse_annotated = topo->annotateVerifiedNodesFromHeatmap(
+          view, frame->stamp_ns);
+        semantic_nodes_updated += semantic_reverse_annotated;
+        if (semantic_reverse_annotated > 0) {
+          std::unordered_set<TopoNode::Ptr> reverse_seen;
+          for (const auto &entry : topo->reg_map_idx2ptr_) {
+            if (!entry.second) continue;
+            for (const auto &node : entry.second->topo_nodes_) {
+              if (!node || !reverse_seen.insert(node).second ||
+                  node->is_virtual_semantic_ ||
+                  node->geometry_state_ != TopoGeometryState::Verified ||
+                  node->semantic_stamp_ns_ != frame->stamp_ns) continue;
+              const float score = std::clamp(node->semantic_score_, 0.0F, 1.0F);
+              semantic_reverse_score_min = std::min(semantic_reverse_score_min, score);
+              semantic_reverse_score_max = std::max(semantic_reverse_score_max, score);
+              semantic_reverse_score_sum += score;
+            }
+          }
+        }
+      }
       semantic_candidates = semantic_centers.size();
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), diagnostic_log_period_ms_,
@@ -4204,12 +4272,15 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), diagnostic_log_period_ms_,
         "[ScaleNav semantic graph] virtual_depth=%.2f m candidates=%zu (virtual=%zu measured=%zu) "
         "height_rejected=%zu "
-        "inserted_or_updated=%zu connected=%zu range=%.2f..%.2f m "
+        "inserted_or_updated=%zu reverse_annotated=%zu reverse_score=%.3f..%.3f "
+        "reverse_score_sum=%.3f connected=%zu range=%.2f..%.2f m "
         "mode=REPULSION",
         semantic_virtual_depth_m_, semantic_candidates,
         semantic_virtual_candidates, semantic_measured_candidates,
         semantic_height_rejected,
-        semantic_nodes_updated,
+        semantic_nodes_updated, semantic_reverse_annotated,
+        std::isfinite(semantic_reverse_score_min) ? semantic_reverse_score_min : 0.0F,
+        semantic_reverse_score_max, semantic_reverse_score_sum,
         semantic_connected_nodes,
         std::isfinite(semantic_min_range_m) ? semantic_min_range_m : 0.0F,
         semantic_max_range_m);
@@ -4448,6 +4519,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     std::vector<bool> semantic_associated;
     std::vector<TopoNode::Ptr> semantic_label_candidates;
     std::size_t lowest_semantic_marker = std::numeric_limits<std::size_t>::max();
+    std::size_t lowest_current_semantic_marker = std::numeric_limits<std::size_t>::max();
     float lowest_semantic_risk = std::numeric_limits<float>::infinity();
 
     visualization_msgs::msg::Marker edges_marker = skeleton_nodes;
@@ -4480,12 +4552,12 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         const bool virtual_semantic_point = isVirtualSemanticEndpoint(node);
         if (virtual_semantic_point) {
           semantic_nodes_marker.points.push_back(toPoint(node->center_));
-          const bool risk_anchor = isSemanticRiskAnchor(
-            node->semantic_score_, node->semantic_confidence_,
-            static_cast<float>(semantic_point_min_score_));
-          const Rgb marker_rgb = risk_anchor ? kRiskHigh : kCandidate;
-          std_msgs::msg::ColorRGBA marker_color;
-          setColor(marker_color, marker_rgb);
+          const float normalized = std::clamp(
+            node->semantic_score_ /
+            static_cast<float>(std::max(semantic_visualization_max_score_, 1e-5)),
+            0.0F, 1.0F);
+          std_msgs::msg::ColorRGBA marker_color =
+            semanticColor(normalized, true);
           semantic_nodes_marker.colors.push_back(marker_color);
           if (semanticNodeActiveForPlanning(*node, active_semantic_stamp_ns) &&
               node->semantic_frame_stamp_ns_ == latest_semantic_frame_stamp_ns) {
@@ -4504,6 +4576,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
               semantic_risk < lowest_semantic_risk) {
             lowest_semantic_risk = semantic_risk;
             lowest_semantic_marker = semantic_nodes_marker.colors.size() - 1;
+            lowest_current_semantic_marker = current_semantic_nodes_marker.colors.size() - 1;
           }
           semantic_label_candidates.push_back(node);
           ++stats.virtual_semantic_nodes;
@@ -4539,6 +4612,9 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     if (lowest_semantic_marker < semantic_nodes_marker.colors.size()) {
       setColor(semantic_nodes_marker.colors[lowest_semantic_marker], kSemanticBest);
     }
+    if (lowest_current_semantic_marker < current_semantic_nodes_marker.colors.size()) {
+      setColor(current_semantic_nodes_marker.colors[lowest_current_semantic_marker], kSemanticBest);
+    }
     std::sort(semantic_label_candidates.begin(), semantic_label_candidates.end(),
       [](const TopoNode::Ptr &left, const TopoNode::Ptr &right) {
         const float left_risk = left ? left->semantic_score_ * left->semantic_confidence_ : 0.0F;
@@ -4564,8 +4640,16 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       const bool risk_anchor = isSemanticRiskAnchor(
         node->semantic_score_, node->semantic_confidence_,
         static_cast<float>(semantic_point_min_score_));
-      setColor(label.color, risk_anchor ? kRiskHigh : kCandidate);
-      label.text = risk_anchor ? "SEM-RISK" : "SEM-UNKNOWN";
+      const float normalized = std::clamp(
+        node->semantic_score_ /
+        static_cast<float>(std::max(semantic_visualization_max_score_, 1e-5)),
+        0.0F, 1.0F);
+      label.color = semanticColor(normalized, true);
+      std::ostringstream label_text;
+      label_text << (risk_anchor ? "SEM-RISK " : "SEM ") <<
+        std::fixed << std::setprecision(2) <<
+        std::clamp(node->semantic_score_, 0.0F, 1.0F);
+      label.text = label_text.str();
       semantic_labels.markers.push_back(std::move(label));
     }
     for (std::size_t index = semantic_label_count;
@@ -5249,6 +5333,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   double semantic_point_min_score_ = 0.20;
   double semantic_point_separation_m_ = 1.5;
   double semantic_point_radius_m_ = 0.75;
+  double semantic_annotation_min_radius_m_ = 1.0;
+  double semantic_annotation_max_radius_m_ = 20.0;
   int semantic_point_max_nodes_ = 16;
   bool virtual_semantic_prune_enabled_ = true;
   double virtual_semantic_backtrack_margin_m_ = 12.0;

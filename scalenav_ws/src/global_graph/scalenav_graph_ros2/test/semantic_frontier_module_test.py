@@ -254,6 +254,52 @@ def simulate() -> dict[str, Any]:
                    [None] * 5),
     ]
     select_frames(frames)
+    for frame in frames:
+        selected = frame.get("selected") or {}
+        selected_point = [selected.get("x"), selected.get("y")]
+        selected_valid = (
+            selected_point[0] is not None and selected_point[1] is not None and
+            finite(selected_point[0]) and finite(selected_point[1]))
+        route_bubbles = []
+        if selected_valid:
+            route_bubbles.append({"center": [float(selected_point[0]), float(selected_point[1])],
+                                  "radius": 2.5})
+            if selected.get("source_frame") is not None:
+                source = frames[int(selected["source_frame"])]
+                source_selected = source.get("selected") or {}
+                if source_selected.get("x") is not None and source_selected.get("y") is not None:
+                    route_bubbles.append({
+                        "center": [float(source_selected["x"]), float(source_selected["y"])],
+                        "radius": 2.0,
+                    })
+        graph = {
+            "skeleton": [[0.0, 0.0], [0.0, 30.0], [0.0, 60.0], [0.0, 90.0], [0.0, 120.0]],
+            "semantic": [[float(c["x"]), float(c["y"])] for c in frame["candidates"]],
+            "edges": [[[0.0, 0.0], [0.0, 30.0]], [[0.0, 30.0], [0.0, 60.0]],
+                      [[0.0, 60.0], [0.0, 90.0]], [[0.0, 90.0], [0.0, 120.0]]],
+            "astar": ([[float(frame["odom"]["x"]), float(frame["odom"]["y"])]]
+                      + ([[float(selected_point[0]), float(selected_point[1])]]
+                         if selected_valid else [])
+                      + [[float(goal[0]), float(goal[1])]]),
+            "route_bubbles": route_bubbles,
+            "frontier": None,
+            "global_goal": [float(goal[0]), float(goal[1])],
+            "local_goal": [float(goal[0]), float(goal[1])],
+        }
+        frame["graph"] = graph
+        frame["measured_projections"] = (
+            [{"x": float(selected_point[0]), "y": float(selected_point[1]),
+              "column": selected.get("column")}]
+            if selected_valid and selected.get("column") is not None else [])
+        frame["measured_projection_debug"] = [
+            {"column": selected.get("column"),
+             "point": [float(selected_point[0]), float(selected_point[1])],
+             "nearest_anchor": {"kind": "route_bubble", "index": 0,
+                                "center": [float(selected_point[0]), float(selected_point[1])],
+                                "radius": 2.5},
+             "anchor_distance": 0.0,
+             "inside_anchor": True}
+        ] if selected_valid and selected.get("column") is not None else []
     checks = {
         "middle_row_only": all(
             abs(candidate["score"] - frame["patch_means"][1][candidate["column"]]) < 1.0e-5
@@ -431,14 +477,26 @@ def extract_graph(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
-    result: dict[str, Any] = {"skeleton": [], "semantic": [], "edges": [], "semantic_links": [], "astar": [],
-                              "frontier": None, "global_goal": None, "local_goal": None}
+    result: dict[str, Any] = {"skeleton": [], "skeleton_colors": [], "semantic": [],
+                              "semantic_colors": [], "edges": [], "semantic_links": [], "astar": [],
+                              "route_bubbles": [], "frontier": None, "global_goal": None,
+                              "local_goal": None}
     for marker in data.get("markers", []):
         namespace = marker.get("ns", "")
         if namespace == "scalenav_skeleton_nodes":
             result["skeleton"] = marker.get("points", [])
+            result["skeleton_colors"] = marker.get("colors", [])
         elif namespace == "scalenav_semantic_points":
             result["semantic"] = marker.get("points", [])
+            result["semantic_colors"] = marker.get("colors", [])
+        elif namespace == "scalenav_route_bubble_radius" and int(marker.get("action", 0)) == 0:
+            pose = marker.get("pose", {}).get("position")
+            scale = marker.get("scale", [])
+            if pose and scale:
+                result["route_bubbles"].append({
+                    "center": pose,
+                    "radius": float(scale[0]) * 0.5,
+                })
         elif namespace == "scalenav_skeleton_edges":
             points = marker.get("points", [])
             result["edges"] = [points[i:i + 2] for i in range(0, len(points) - 1, 2)]
@@ -454,6 +512,198 @@ def extract_graph(path: Path) -> dict[str, Any]:
                 result[{"scalenav_frontier_goal": "frontier", "scalenav_global_goal": "global_goal",
                        "scalenav_local_goal": "local_goal"}[namespace]] = pose
     return result
+
+
+def world_to_semantic_image(point: list[float], odom: dict[str, Any],
+                            camera_translation: list[float] | None = None,
+                            horizontal_fov_deg: float = 90.0,
+                            vertical_fov_deg: float = 60.0) -> tuple[float, float, float] | None:
+    """Mirror worldPointToSemanticImage() from graph.h."""
+    body_world = odom.get("position", [0.0, 0.0, 0.0])
+    q = odom.get("orientation", [0.0, 0.0, 0.0, 1.0])
+    delta = [float(point[i]) - float(body_world[i]) for i in range(3)]
+    # q^-1 * delta.  The logged quaternion is world_from_body.
+    # quat_rotate() applies q, so use the conjugate explicitly for q^-1.
+    q_conjugate = [-float(q[0]), -float(q[1]), -float(q[2]), float(q[3])]
+    body = quat_rotate(q_conjugate, delta)
+    camera_translation = camera_translation or [0.5, 0.0, -0.1]
+    cam = [body[i] - float(camera_translation[i]) for i in range(3)]
+    optical_depth = cam[0]
+    if not all(math.isfinite(v) for v in cam) or optical_depth <= 1.0e-4:
+        return None
+    htan = math.tan(math.radians(max(1.0, min(179.0, horizontal_fov_deg))) / 2.0)
+    vtan = math.tan(math.radians(max(1.0, min(179.0, vertical_fov_deg))) / 2.0)
+    if htan <= 1.0e-6 or vtan <= 1.0e-6:
+        return None
+    u = 0.5 - 0.5 * cam[1] / (optical_depth * htan)
+    v = 0.5 - 0.5 * cam[2] / (optical_depth * vtan)
+    if not (math.isfinite(u) and math.isfinite(v)):
+        return None
+    return u, v, optical_depth
+
+
+def offline_heatmap_score(
+        heatmap: list[float], width: int, height: int,
+        normalized_u: float, normalized_v: float, optical_depth: float,
+        min_score: float = 0.20, min_radius_m: float = 1.0,
+        max_radius_m: float = 20.0,
+        horizontal_fov_deg: float = 90.0,
+        vertical_fov_deg: float = 60.0) -> dict[str, Any] | None:
+    """Replay annotateVerifiedNodesFromHeatmap() numerically.
+
+    Nodes are projected at ground z=0 so a level camera still spreads them
+    over the lower FOV. Optical depth only sizes the Gaussian.
+    """
+    if width <= 1 or height <= 1 or not (0.0 <= normalized_u <= 1.0 and
+                                          0.0 <= normalized_v <= 1.0 and
+                                          optical_depth >= 0.5):
+        return None
+    def heat_at(u: int, v: int) -> float:
+        if u < 0 or v < 0 or u >= width or v >= height:
+            return 0.0
+        value = float(heatmap[v * width + u])
+        return max(0.0, min(1.0, value)) if math.isfinite(value) else 0.0
+
+    htan = math.tan(math.radians(max(1.0, min(179.0, horizontal_fov_deg))) / 2.0)
+    vtan = math.tan(math.radians(max(1.0, min(179.0, vertical_fov_deg))) / 2.0)
+    sigma_m = max(0.5, min(max_radius_m, max(min_radius_m, 1.0)))
+    center_px_u = max(0, min(width - 1, int(normalized_u * width)))
+    center_px_v = max(0, min(height - 1, int(normalized_v * height)))
+    max_probe = max(2, min(width, height) // 3)
+    extent_u = extent_v = 0
+    directions = ((1, 0), (-1, 0), (0, 1), (0, -1),
+                  (1, 1), (1, -1), (-1, 1), (-1, -1))
+    for du_dir, dv_dir in directions:
+        extent = 0
+        for step in range(1, max_probe + 1):
+            u = center_px_u + du_dir * step
+            v = center_px_v + dv_dir * step
+            if u < 0 or v < 0 or u >= width or v >= height:
+                break
+            value = heat_at(u, v)
+            if value < min_score:
+                break
+            extent += 1
+        if du_dir != 0:
+            extent_u = max(extent_u, extent)
+        if dv_dir != 0:
+            extent_v = max(extent_v, extent)
+    radius_u = node_depth * htan * (extent_u + 1) / width
+    radius_v = node_depth * vtan * (extent_v + 1) / height
+    object_radius = max(sigma_m, radius_u, radius_v)
+    object_radius = max(min_radius_m, min(max_radius_m, object_radius))
+    pixel_focal_u = (0.5 * width) / max(1.0e-4, htan)
+    pixel_focal_v = (0.5 * height) / max(1.0e-4, vtan)
+    sigma_u = max(1.25, min(32.0, pixel_focal_u * object_radius / node_depth))
+    sigma_v = max(1.25, min(32.0, pixel_focal_v * object_radius / node_depth))
+    center_u = normalized_u * width - 0.5
+    center_v = normalized_v * height - 0.5
+    radius_u_px = max(1, math.ceil(3.0 * sigma_u))
+    radius_v_px = max(1, math.ceil(3.0 * sigma_v))
+    u0 = max(0, math.floor(center_u) - radius_u_px)
+    u1 = min(width - 1, math.ceil(center_u) + radius_u_px)
+    v0 = max(0, math.floor(center_v) - radius_v_px)
+    v1 = min(height - 1, math.ceil(center_v) + radius_v_px)
+    inv_u2 = 1.0 / (sigma_u * sigma_u)
+    inv_v2 = 1.0 / (sigma_v * sigma_v)
+    local_score = local_weight = signal_score = signal_weight = 0.0
+    for v in range(int(v0), int(v1) + 1):
+        dv = v - center_v
+        for u in range(int(u0), int(u1) + 1):
+            du = u - center_u
+            weight = math.exp(-0.5 * (du * du * inv_u2 + dv * dv * inv_v2))
+            if weight <= 1.0e-4:
+                continue
+            value = heat_at(u, v)
+            local_score += weight * value
+            local_weight += weight
+            if value >= min_score:
+                signal_score += weight * value
+                signal_weight += weight
+    if local_weight <= 1.0e-4:
+        return None
+    score = (signal_score / signal_weight if signal_weight > 1.0e-4
+             else local_score / local_weight)
+    score = max(0.0, min(1.0, score))
+    fov_radius = max(abs(2.0 * normalized_u - 1.0),
+                     abs(2.0 * normalized_v - 1.0))
+    confidence = max(0.05, min(1.0, 1.0 - 0.35 * fov_radius * fov_radius))
+    return {
+        "score": score,
+        "confidence": confidence,
+        "object_radius_m": object_radius,
+        "sigma_u_px": sigma_u,
+        "sigma_v_px": sigma_v,
+        "support_pixels": int(signal_weight > 1.0e-4),
+        "projection_u": normalized_u,
+        "projection_v": normalized_v,
+        "projection_depth_m": optical_depth,
+        "pixel_u": normalized_u * width - 0.5,
+        "pixel_v": normalized_v * height - 0.5,
+    }
+
+
+def annotate_verified_nodes_offline(
+        graph: dict[str, Any], odom: dict[str, Any],
+        heatmap: list[float], width: int, height: int,
+        horizontal_fov_deg: float = 90.0,
+        vertical_fov_deg: float = 60.0,
+        camera_translation: list[float] | None = None) -> dict[str, Any]:
+    """Assign each logged ordinary skeleton node a replayed semantic score."""
+    annotations: list[dict[str, Any]] = []
+    for node_index, point in enumerate(graph.get("skeleton", [])):
+        if not point or len(point) < 3:
+            continue
+        # The live graph is planar, but its nodes are stored on the flight
+        # layer.  Use the configured ground plane for image association so a
+        # level camera distinguishes nearby ground from distant ground.
+        ground_z = float(odom.get("position", [0.0, 0.0, 0.0])[2]) - 1.6
+        projection = world_to_semantic_image(
+            [float(point[0]), float(point[1]), ground_z], odom,
+            camera_translation, horizontal_fov_deg, vertical_fov_deg)
+        item: dict[str, Any] = {
+            "node_index": node_index,
+            "world": [float(point[0]), float(point[1]), float(point[2])],
+            "visible": projection is not None,
+            "logged_color": (graph.get("skeleton_colors", [])[node_index]
+                            if node_index < len(graph.get("skeleton_colors", []))
+                            else None),
+        }
+        if projection is None:
+            item["score"] = None
+            annotations.append(item)
+            continue
+        u, v, optical_depth = projection
+        item.update({"projection_u": u, "projection_v": v,
+                     "projection_depth_m": optical_depth,
+                     "pixel_u": u * width - 0.5,
+                     "pixel_v": v * height - 0.5})
+        sampled = offline_heatmap_score(
+            heatmap, width, height, u, v, optical_depth, min_score=0.20,
+            min_radius_m=1.0, max_radius_m=20.0,
+            horizontal_fov_deg=horizontal_fov_deg,
+            vertical_fov_deg=vertical_fov_deg)
+        if sampled is None:
+            item["score"] = None
+        else:
+            item.update(sampled)
+        annotations.append(item)
+    valid = [a for a in annotations if finite(a.get("score"))]
+    scores = [float(a["score"]) for a in valid]
+    top = max(valid, key=lambda a: a["score"]) if valid else None
+    return {
+        "nodes": annotations,
+        "stats": {
+            "visible_nodes": sum(bool(a.get("visible")) for a in annotations),
+            "annotated_nodes": len(valid),
+            "score_min": min(scores) if scores else None,
+            "score_max": max(scores) if scores else None,
+            "score_mean": sum(scores) / len(scores) if scores else None,
+            "score_p90": (sorted(scores)[max(0, math.ceil(0.9 * len(scores)) - 1)]
+                          if scores else None),
+            "top_node_index": top["node_index"] if top else None,
+        },
+    }
 
 
 def endpoint_diagnosis(graph: dict[str, Any], candidates: list[dict[str, Any]],
@@ -652,7 +902,10 @@ def build_log_result(session: Path) -> dict[str, Any]:
             score = means[PATCH_ROWS // 2][column]
             calibrated_score = calibrated_middle[column]
             projected.update({"column": column, "score": score, "risk": "continuous",
-                              "raw_score": score, "calibrated_score": calibrated_score,
+                              "raw_score": score, "runtime_score": score,
+                              "diagnostic_contrast_score": calibrated_score,
+                              # Compatibility alias; all rendering uses runtime_score.
+                              "calibrated_score": score,
                               "x": projected["x"], "y": projected["y"], "z": projected["z"],
                               "surface_depth_m": sampled})
             candidates.append(projected)
@@ -663,7 +916,60 @@ def build_log_result(session: Path) -> dict[str, Any]:
                 measured_projections.append(measured)
         graph = extract_graph(session / graph_record["file"]) if graph_record and graph_record.get("file") else {}
         planner = (timing_record or {}).get("data", {})
+        # Offline replay of reverse projection: ordinary 3-D graph nodes are
+        # projected into the synchronized heatmap and scored there. Depth is
+        # not used to suppress occluded nodes.
+        reverse_annotation = annotate_verified_nodes_offline(
+            graph, odom, semantic_values, semantic_width, semantic_height,
+            horizontal_fov_deg=90.0, vertical_fov_deg=60.0,
+            camera_translation=[0.5, 0.0, -0.1])
         diagnosis = endpoint_diagnosis(graph, candidates, measured_projections, planner)
+        projection_debug = []
+        route_bubbles = graph.get("route_bubbles", [])
+        graph_anchors = []
+        for kind in ("skeleton", "semantic", "astar"):
+            for point in graph.get(kind, []):
+                if point and len(point) >= 2:
+                    graph_anchors.append((kind, [float(point[0]), float(point[1])]))
+        for measured in measured_projections:
+            nearest_anchor = None
+            nearest_distance = math.inf
+            for bubble_index, bubble in enumerate(route_bubbles):
+                center = bubble.get("center")
+                if not center or len(center) < 2:
+                    continue
+                distance = math.hypot(
+                    float(measured["x"]) - float(center[0]),
+                    float(measured["y"]) - float(center[1]))
+                if distance < nearest_distance:
+                    nearest_distance = distance
+                    nearest_anchor = {
+                        "kind": "route_bubble",
+                        "index": bubble_index,
+                        "center": [float(center[0]), float(center[1])],
+                        "radius": float(bubble.get("radius", 0.0)),
+                    }
+            if nearest_anchor is None:
+                for anchor_index, (kind, center) in enumerate(graph_anchors):
+                    distance = math.hypot(
+                        float(measured["x"]) - float(center[0]),
+                        float(measured["y"]) - float(center[1]))
+                    if distance < nearest_distance:
+                        nearest_distance = distance
+                        nearest_anchor = {
+                            "kind": kind,
+                            "index": anchor_index,
+                            "center": center,
+                            "radius": 0.75,
+                        }
+            projection_debug.append({
+                "column": measured.get("column"),
+                "point": [float(measured["x"]), float(measured["y"])],
+                "nearest_anchor": nearest_anchor,
+                "anchor_distance": None if not math.isfinite(nearest_distance) else nearest_distance,
+                "inside_anchor": bool(
+                    nearest_anchor and nearest_distance <= float(nearest_anchor["radius"])),
+            })
         selected = diagnosis["endpoint"] or (graph.get("frontier") if graph else None)
         recomputed = offline_astar(graph, odom, candidates, goal)
         frames.append({
@@ -678,7 +984,10 @@ def build_log_result(session: Path) -> dict[str, Any]:
             "image_size": {"width": semantic_width, "height": semantic_height},
             "patch_means": means, "calibrated_middle": calibrated_middle,
             "frame_baseline": frame_baseline, "candidates": candidates,
-            "measured_projections": measured_projections, "graph": graph,
+            "measured_projections": measured_projections,
+            "measured_projection_debug": projection_debug,
+            "reverse_projection": reverse_annotation,
+            "graph": graph,
             "recomputed_astar": recomputed,
             "planner": planner, "selected_frontier": selected,
             "endpoint_diagnosis": diagnosis, "planner_timing_match": timing_match,
@@ -777,6 +1086,22 @@ def build_log_result(session: Path) -> dict[str, Any]:
                 "final_route_decision": last_planner.get("route_decision", ""),
                 "final_frontier_id": int(last_planner.get("committed_frontier_id", 0)),
             },
+            "reverse_projection_summary": {
+                "frames_with_annotations": sum(
+                    1 for frame in frames
+                    if (frame.get("reverse_projection", {}).get("stats", {})
+                        .get("annotated_nodes", 0) > 0)),
+                "total_annotated_nodes": sum(
+                    int(frame.get("reverse_projection", {}).get("stats", {})
+                        .get("annotated_nodes", 0))
+                    for frame in frames),
+                "max_score": max(
+                    (float(frame["reverse_projection"]["stats"]["score_max"])
+                     for frame in frames
+                     if frame.get("reverse_projection", {}).get("stats", {})
+                     .get("score_max") is not None),
+                    default=None),
+            },
             "record_counts": {kind: sum(1 for r in records if r.get("kind") == kind)
                               for kind in sorted({r.get("kind") for r in records})},
             "frames": frames}
@@ -787,29 +1112,32 @@ def render_log_html(result: dict[str, Any]) -> str:
     return r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ScaleNav semantic frontier log test</title><style>
 :root{--bg:#101820;--panel:#182632;--line:#304554;--text:#edf4f7;--muted:#9db0bb;--cyan:#55d6e8;--green:#56d58b;--red:#ff776f;--amber:#f4c95d}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.4 system-ui,sans-serif}.shell{max-width:1700px;margin:auto;padding:18px}.head{display:flex;justify-content:space-between;gap:16px;align-items:end;border-bottom:1px solid var(--line);padding-bottom:12px}h1{font-size:21px;margin:0}.muted{color:var(--muted)}.controls{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:12px 0}.controls button{background:#243948;color:var(--text);border:1px solid var(--line);padding:6px 9px;border-radius:3px;cursor:pointer}.controls button.active{background:var(--cyan);color:#071319}.grid{display:grid;grid-template-columns:repeat(3,minmax(230px,1fr)) minmax(410px,1.6fr);gap:10px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:10px;min-width:0}.panel h2{font-size:14px;margin:0 0 8px}.image{width:100%;background:#071016;border:1px solid var(--line);display:block;aspect-ratio:5/3}.wide{grid-column:1/-1}.world{width:100%;height:500px;background:#09131b;border:1px solid var(--line)}.facts{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:7px}.fact{border-left:2px solid var(--cyan);padding-left:6px}.fact b{display:block;font-size:14px}.fact small{color:var(--muted)}table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:5px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{color:var(--muted)}.low{color:var(--green)}.high{color:var(--red)}.none{color:var(--muted)}pre{white-space:pre-wrap;max-height:300px;overflow:auto;color:#c8d8df;background:#0c171f;padding:8px;font-size:11px}.legend{color:var(--muted);font-size:11px;margin-top:5px}.event-strip{display:flex;gap:6px;overflow-x:auto;padding-bottom:5px}.event{min-width:178px;text-align:left;background:#213440;border:1px solid var(--line);color:var(--text);padding:7px;border-radius:3px;cursor:pointer}.event.normal{border-left:3px solid var(--green)}.event.warning{border-left:3px solid var(--amber)}.event.error{border-left:3px solid var(--red)}.event.current{outline:2px solid var(--cyan)}.diagnostic-alert{border-left:3px solid var(--red);padding:8px 10px;background:#251e22}@media(max-width:1100px){.grid{grid-template-columns:repeat(2,minmax(230px,1fr))}.wide{grid-column:1/-1}}@media(max-width:680px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}.shell{padding:9px}.world{height:380px}}
-</style></head><body><main class="shell"><header class="head"><div><h1>Real log: semantic frontier frame test</h1><div class="muted" id="session"></div></div><div class="muted">RGB + depth + heatmap + 3x5 projection + graph/A*</div></header><div id="controls" class="controls"></div><section class="grid"><article class="panel"><h2>RGB (patch grid overlay)</h2><canvas id="rgb" class="image"></canvas></article><article class="panel"><h2>Depth (middle-row sample)</h2><canvas id="depth" class="image"></canvas></article><article class="panel"><h2>Heatmap (patch means)</h2><canvas id="heat" class="image"></canvas></article><article class="panel"><h2>Frame facts</h2><div id="facts" class="facts"></div><div id="sync" class="legend"></div><div id="planner"></div></article><article class="panel wide"><h2>Route lifecycle (click to jump)</h2><div id="timeline" class="event-strip"></div></article><article class="panel wide"><h2>Log diagnosis</h2><div id="diagnosis"></div></article><article class="panel wide"><h2>World XY: projected semantic nodes, graph nodes, A* path and selected frontier</h2><svg id="world" class="world" viewBox="0 0 1100 500"></svg><div class="legend">cyan = online A* topology path; orange = offline diagnostic A*; pale blue = flown trajectory; green = 35 m virtual candidates; dashed gray = measured surface projections; white ring = online A* endpoint; gray = skeleton nodes</div></article><article class="panel wide"><h2>Five planar candidates and actual frontier decision</h2><div id="decision"></div></article><article class="panel wide"><h2>Raw frame JSON</h2><pre id="raw"></pre></article></section></main><script>
+</style></head><body><main class="shell"><header class="head"><div><h1>Real log: semantic frontier frame test</h1><div class="muted" id="session"></div></div><div class="muted">RGB + depth + heatmap + 3x5 projection + graph/A*</div></header><div id="controls" class="controls"></div><section class="grid"><article class="panel"><h2>RGB (patch grid overlay)</h2><canvas id="rgb" class="image"></canvas></article><article class="panel"><h2>Depth (middle-row sample)</h2><canvas id="depth" class="image"></canvas></article><article class="panel"><h2>Heatmap (patch means)</h2><canvas id="heat" class="image"></canvas></article><article class="panel"><h2>Frame facts</h2><div id="facts" class="facts"></div><div id="sync" class="legend"></div><div id="planner"></div></article><article class="panel wide"><h2>Route lifecycle (click to jump)</h2><div id="timeline" class="event-strip"></div></article><article class="panel wide"><h2>Log diagnosis</h2><div id="diagnosis"></div></article><article class="panel wide"><h2>World XY: projected semantic nodes, graph nodes, A* path and selected frontier</h2><svg id="world" class="world" viewBox="0 0 1100 500"></svg><div class="legend">cyan = online A* topology path; orange = offline diagnostic A*; pale blue = flown trajectory; green = low offline reverse-projection score; red = high score; gray = unobserved skeleton node; white ring = offline top-score node</div></article><article class="panel wide"><h2>Measured projection debug</h2><svg id="backproj" class="world" viewBox="0 0 1100 500"></svg><div class="legend">N&lt;index&gt;:score in the heatmap/RGB/depth panels is an ordinary graph node projected back to the image and scored by depth-aware Gaussian sampling; this is an offline replay, not the historical Marker color</div></article><article class="panel wide"><h2>Five planar candidates and actual frontier decision</h2><div id="decision"></div><div id="reverse_stats"></div></article><article class="panel wide"><h2>Raw frame JSON</h2><pre id="raw"></pre></article></section></main><script>
 const DATA=__DATA__;let current=0;const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function b64(s){const raw=atob(s),a=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)a[i]=raw.charCodeAt(i);return a}
 function loadImage(obj){if(!obj)return Promise.resolve(null);return new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>{const out=document.createElement('canvas');out.width=img.naturalWidth;out.height=img.naturalHeight;const x=out.getContext('2d');x.drawImage(img,0,0);const data=x.getImageData(0,0,out.width,out.height).data,values=[];let maxValue=1;for(let i=0;i<data.length;i+=4){const v=data[i];values.push(v);if(v>maxValue)maxValue=v}resolve({canvas:out,meta:{w:out.width,h:out.height},values,maxValue});};img.onerror=()=>reject(new Error('image load failed'));img.src=`data:${obj.mime};base64,${obj.data}`;});}
 function heatColor(t){const stops=[[20,40,100],[25,155,215],[70,205,145],[245,210,65],[225,55,45]],q=Math.max(0,Math.min(1,t))*(stops.length-1),i=Math.min(stops.length-2,Math.floor(q)),f=q-i;return stops[i].map((v,k)=>Math.round(v+(stops[i+1][k]-v)*f))}
-function patchOverlay(target,means,heat){const c=$(target),x=c.getContext('2d');if(!heat)return;const w=c.width,h=c.height,im=x.createImageData(w,h),scale=Math.max(heat.maxValue||255,1);for(let i=0;i<w*h;i++){const col=heatColor((heat.values[i]||0)/scale);im.data[i*4]=col[0];im.data[i*4+1]=col[1];im.data[i*4+2]=col[2];im.data[i*4+3]=255}x.putImageData(im,0,0);x.lineWidth=Math.max(1,w/320);x.font=Math.max(8,w/36)+'px monospace';for(let r=0;r<3;r++)for(let col=0;col<5;col++){const x0=col*w/5,y0=r*h/3;x.strokeStyle=r===1?'#fff':'rgba(255,255,255,.45)';x.strokeRect(x0,y0,w/5,h/3);const v=means[r][col];x.fillStyle=r===1?'#fff':'rgba(255,255,255,.78)';x.fillText(v==null?'n/a':v.toFixed(3),x0+2,y0+13)}}
-function drawFrameImage(id,img,means,heat){const c=$(id),x=c.getContext('2d');if(!img){x.fillStyle='#0b151c';x.fillRect(0,0,c.width,c.height);x.fillStyle='#9db0bb';x.fillText('no record',8,18);return}c.width=img.meta.w;c.height=img.meta.h;if(id==='heat')patchOverlay(id,means,heat);else{x.drawImage(img.canvas,0,0,c.width,c.height);x.lineWidth=1;for(let r=0;r<=3;r++){x.strokeStyle=r===1||r===2?'#fff':'rgba(255,255,255,.5)';x.beginPath();x.moveTo(0,r*c.height/3);x.lineTo(c.width,r*c.height/3);x.stroke()}for(let col=0;col<=5;col++){x.strokeStyle='rgba(255,255,255,.5)';x.beginPath();x.moveTo(col*c.width/5,0);x.lineTo(col*c.width/5,c.height);x.stroke()}if(id==='depth'){x.fillStyle='#fff';x.font='9px monospace';for(let col=0;col<5;col++){const v=DATA.frames[current].candidates[col],d=v.surface_depth_m;x.fillText(d==null?'n/a':d.toFixed(2)+'m',col*c.width/5+2,c.height/2+12)}}}}
+function semanticColor(v){const t=Math.max(0,Math.min(1,Number.isFinite(+v)?+v:0)),a=[[237,243,240],[217,173,61],[209,78,70]],q=t*2,i=Math.min(1,Math.floor(q)),f=q-i;return a[i].map((x,k)=>Math.round(x*(1-f)+a[i+1][k]*f))}
+function rgbaColor(c,fallback){if(!Array.isArray(c)||c.length<3)return fallback;return `rgba(${Math.round(255*c[0])},${Math.round(255*c[1])},${Math.round(255*c[2])},${c.length>3?c[3]:1})`}
+function patchOverlay(target,means,heat){const c=$(target),x=c.getContext('2d');if(!heat)return;const w=c.width,h=c.height,im=x.createImageData(w,h),scale=Math.max(heat.maxValue||255,1);for(let i=0;i<w*h;i++){const col=heatColor((heat.values[i]||0)/scale);im.data[i*4]=col[0];im.data[i*4+1]=col[1];im.data[i*4+2]=col[2];im.data[i*4+3]=255}x.putImageData(im,0,0);x.lineWidth=Math.max(1,w/320);x.font=Math.max(8,w/36)+'px monospace';for(let r=0;r<3;r++)for(let col=0;col<5;col++){const x0=col*w/5,y0=r*h/3;x.strokeStyle=r===1?'#fff':'rgba(255,255,255,.45)';x.strokeRect(x0,y0,w/5,h/3);const v=means[r][col];x.fillStyle=r===1?'#fff':'rgba(255,255,255,.78)';x.fillText(v==null?'n/a':v.toFixed(3),x0+2,y0+13)}const nodes=DATA.frames[current]?.reverse_projection?.nodes||[];for(const n of nodes){if(!n.visible||!Number.isFinite(+n.pixel_u)||!Number.isFinite(+n.pixel_v)||!Number.isFinite(+n.score))continue;const px=(+n.pixel_u+0.5),py=(+n.pixel_v+0.5),col=semanticColor(+n.score);x.beginPath();x.arc(px,py,Math.max(2,w/80),0,Math.PI*2);x.fillStyle=`rgb(${col.join(',')})`;x.fill();x.strokeStyle='#fff';x.lineWidth=1;x.stroke();x.fillStyle='#fff';x.font='9px monospace';x.fillText(`N${n.node_index}:${(+n.score).toFixed(2)}`,px+4,py-3)}}
+function drawFrameImage(id,img,means,heat){const c=$(id),x=c.getContext('2d');if(!img){x.fillStyle='#0b151c';x.fillRect(0,0,c.width,c.height);x.fillStyle='#9db0bb';x.fillText('no record',8,18);return}c.width=img.meta.w;c.height=img.meta.h;if(id==='heat')patchOverlay(id,means,heat);else{x.drawImage(img.canvas,0,0,c.width,c.height);x.lineWidth=1;for(let r=0;r<=3;r++){x.strokeStyle=r===1||r===2?'#fff':'rgba(255,255,255,.5)';x.beginPath();x.moveTo(0,r*c.height/3);x.lineTo(c.width,r*c.height/3);x.stroke()}for(let col=0;col<=5;col++){x.strokeStyle='rgba(255,255,255,.5)';x.beginPath();x.moveTo(col*c.width/5,0);x.lineTo(col*c.width/5,c.height);x.stroke()}if(id==='depth'){x.fillStyle='#fff';x.font='9px monospace';for(let col=0;col<5;col++){const v=DATA.frames[current].candidates[col],d=v.surface_depth_m;x.fillText(d==null?'n/a':d.toFixed(2)+'m',col*c.width/5+2,c.height/2+12)}}const nodes=DATA.frames[current]?.reverse_projection?.nodes||[];for(const n of nodes){if(!n.visible||!Number.isFinite(+n.pixel_u)||!Number.isFinite(+n.pixel_v)||!Number.isFinite(+n.score))continue;const px=(+n.pixel_u+0.5)*c.width/(DATA.frames[current].image_size?.width||c.width),py=(+n.pixel_v+0.5)*c.height/(DATA.frames[current].image_size?.height||c.height),col=semanticColor(+n.score);x.beginPath();x.arc(px,py,Math.max(2,c.width/80),0,Math.PI*2);x.fillStyle=`rgb(${col.join(',')})`;x.fill();x.strokeStyle='#fff';x.lineWidth=1;x.stroke()}}}
 function fmt(v,n=2){return Number.isFinite(v)?Number(v).toFixed(n):'-'}
-function drawWorld(f){const s=$('world'),pts=[];const add=p=>{if(p&&Number.isFinite(+p[0])&&Number.isFinite(+p[1]))pts.push([+p[0],+p[1]])};f.candidates.forEach(c=>add([c.x,c.y]));(f.graph?.skeleton||[]).forEach(add);(f.graph?.semantic||[]).forEach(add);(f.graph?.astar||[]).forEach(add);add([f.odom.position[0],f.odom.position[1]]);add([f.goal.x,f.goal.y]);if(f.selected_frontier)add(f.selected_frontier);let minx=Math.min(...pts.map(p=>p[0]))-4,maxx=Math.max(...pts.map(p=>p[0]))+4,miny=Math.min(...pts.map(p=>p[1]))-4,maxy=Math.max(...pts.map(p=>p[1]))+4;const sx=x=>50+(x-minx)/(maxx-minx||1)*1000,sy=y=>460-(y-miny)/(maxy-miny||1)*420;let o='';const line=(a,b,cl,w=1)=>o+=`<line x1="${sx(a[0])}" y1="${sy(a[1])}" x2="${sx(b[0])}" y2="${sy(b[1])}" stroke="${cl}" stroke-width="${w}"/>`;for(const e of f.graph?.edges||[])if(e.length===2)line(e[0],e[1],'#465866',1);const path=f.graph?.astar||[];for(let i=1;i<path.length;i++)line(path[i-1],path[i],'#55d6e8',3);for(const p of f.graph?.skeleton||[])o+=`<circle cx="${sx(p[0])}" cy="${sy(p[1])}" r="3" fill="#81909a"/>`;for(const p of f.graph?.semantic||[])o+=`<circle cx="${sx(p[0])}" cy="${sy(p[1])}" r="7" fill="#ff776f" stroke="#fff"/>`;for(const c of f.candidates){const cl=c.risk==='high'?'#ff776f':'#56d58b';o+=`<circle cx="${sx(c.x)}" cy="${sy(c.y)}" r="${c.column===f.planner.selected_semantic_column?8:5}" fill="${cl}"/><text x="${sx(c.x)+7}" y="${sy(c.y)+4}" fill="#edf4f7" font-size="11">c${c.column}</text>`}o+=`<circle cx="${sx(f.odom.position[0])}" cy="${sy(f.odom.position[1])}" r="7" fill="#55d6e8"/><text x="${sx(f.odom.position[0])+8}" y="${sy(f.odom.position[1])-7}" fill="#55d6e8">odom</text><circle cx="${sx(f.goal.x)}" cy="${sy(f.goal.y)}" r="7" fill="#f4c95d"/><text x="${sx(f.goal.x)+8}" y="${sy(f.goal.y)-7}" fill="#f4c95d">mission</text>`;if(f.selected_frontier)o+=`<circle cx="${sx(f.selected_frontier[0])}" cy="${sy(f.selected_frontier[1])}" r="11" fill="none" stroke="#fff" stroke-width="3"/>`;s.innerHTML=o}
+function drawWorld(f){const s=$('world'),pts=[];const add=p=>{if(p&&Number.isFinite(+p[0])&&Number.isFinite(+p[1]))pts.push([+p[0],+p[1]])};f.candidates.forEach(c=>add([c.x,c.y]));(f.graph?.skeleton||[]).forEach(add);(f.graph?.semantic||[]).forEach(add);(f.graph?.astar||[]).forEach(add);add([f.odom.position[0],f.odom.position[1]]);add([f.goal.x,f.goal.y]);if(f.selected_frontier)add(f.selected_frontier);let minx=Math.min(...pts.map(p=>p[0]))-4,maxx=Math.max(...pts.map(p=>p[0]))+4,miny=Math.min(...pts.map(p=>p[1]))-4,maxy=Math.max(...pts.map(p=>p[1]))+4;const sx=x=>50+(x-minx)/(maxx-minx||1)*1000,sy=y=>460-(y-miny)/(maxy-miny||1)*420;let o='';const line=(a,b,cl,w=1)=>o+=`<line x1="${sx(a[0])}" y1="${sy(a[1])}" x2="${sx(b[0])}" y2="${sy(b[1])}" stroke="${cl}" stroke-width="${w}"/>`;for(const e of f.graph?.edges||[])if(e.length===2)line(e[0],e[1],'#465866',1);const path=f.graph?.astar||[];for(let i=1;i<path.length;i++)line(path[i-1],path[i],'#55d6e8',3);for(const p of f.graph?.skeleton||[])o+=`<circle cx="${sx(p[0])}" cy="${sy(p[1])}" r="3" fill="#81909a"/>`;for(const p of f.graph?.semantic||[])o+=`<circle cx="${sx(p[0])}" cy="${sy(p[1])}" r="7" fill="${semanticColor(f.candidates.find(c=>Math.abs(c.x-p[0])<1e-3&&Math.abs(c.y-p[1])<1e-3)?.calibrated_score ?? 0)}" stroke="#fff"/>`;for(const c of f.candidates){const fill=semanticColor(c.calibrated_score ?? c.score ?? 0);const stroke=c.risk==='high'?'#ff776f':'#56d58b';o+=`<circle cx="${sx(c.x)}" cy="${sy(c.y)}" r="${c.column===f.planner.selected_semantic_column?8:5}" fill="${fill}" stroke="${stroke}" stroke-width="1"/><text x="${sx(c.x)+7}" y="${sy(c.y)+4}" fill="#edf4f7" font-size="11">c${c.column}</text>`}o+=`<circle cx="${sx(f.odom.position[0])}" cy="${sy(f.odom.position[1])}" r="7" fill="#55d6e8"/><text x="${sx(f.odom.position[0])+8}" y="${sy(f.odom.position[1])-7}" fill="#55d6e8">odom</text><circle cx="${sx(f.goal.x)}" cy="${sy(f.goal.y)}" r="7" fill="#f4c95d"/><text x="${sx(f.goal.x)+8}" y="${sy(f.goal.y)-7}" fill="#f4c95d">mission</text>`;if(f.selected_frontier)o+=`<circle cx="${sx(f.selected_frontier[0])}" cy="${sy(f.selected_frontier[1])}" r="11" fill="none" stroke="#fff" stroke-width="3"/>`;s.innerHTML=o}
 let renderToken=0;
 async function render(){const token=++renderToken;const f=DATA.frames[current],p=f.planner||{};$('controls').innerHTML=DATA.frames.map((x,i)=>`<button class="${i===current?'active':''}" onclick="current=${i};render()">F${i} <small>${x.time_s.toFixed(2)}s</small></button>`).join('');$('session').textContent=`${DATA.session} · frame ${current+1}/${DATA.frames.length} · stamp ${f.stamp_ns}`;const [heat,rgb,depth]=await Promise.all([loadImage(f.heatmap),loadImage(f.rgb),loadImage(f.depth)]);if(token!==renderToken)return;drawFrameImage('rgb',rgb,f.patch_means,heat,depth);drawFrameImage('depth',depth,f.patch_means,heat,depth);drawFrameImage('heat',heat,f.patch_means,heat,depth);$('facts').innerHTML=`<div class="fact"><b>${fmt(f.odom.position[0])}, ${fmt(f.odom.position[1])}</b><small>odom XY</small></div><div class="fact"><b>${f.candidates.length}/5</b><small>virtual columns</small></div><div class="fact"><b>${p.route_decision||'-'}</b><small>route decision</small></div><div class="fact"><b>base ${fmt(f.frame_baseline,4)}</b><small>heatmap baseline</small></div>`;$('sync').textContent=`sync: rgb ${fmt(f.sync_ms.rgb,1)} ms · depth ${fmt(f.sync_ms.depth,1)} ms · odom ${fmt(f.sync_ms.odom,1)} ms`;$('planner').innerHTML=`<pre>${esc(JSON.stringify(p,null,2))}</pre>`;drawWorld(f);$('decision').innerHTML=`<p><b>Graph frontier pose:</b> ${f.selected_frontier?f.selected_frontier.slice(0,2).map(v=>fmt(v)).join(', '):'none'} · <b>planner semantic column:</b> ${p.selected_semantic_column??'-'} · <b>semantic candidates:</b> ${p.astar_semantic_frontier_candidates??'-'} · <b>ordinary candidates:</b> ${p.astar_ordinary_frontier_candidates??'-'}</p><table><thead><tr><th>col</th><th>raw mean</th><th>calibrated risk</th><th>surface depth</th><th>virtual node</th></tr></thead><tbody>${f.candidates.map(c=>`<tr><td>V${c.column}</td><td>${c.raw_score==null?'-':c.raw_score.toFixed(4)}</td><td class="${c.calibrated_score>=0.35?'high':'low'}">${c.calibrated_score==null?'-':c.calibrated_score.toFixed(4)}</td><td>${c.surface_depth_m==null?'-':c.surface_depth_m.toFixed(2)+' m'}</td><td>(${fmt(c.x)}, ${fmt(c.y)}, ${fmt(c.z)})</td></tr>`).join('')}</tbody></table>`;$('raw').textContent=JSON.stringify(f,null,2)}render();
 // Override the compact base renderer with an equal-scale XY top view. The
 // same metre-to-pixel scale is used for X and Y, so the five rays keep their
 // physical angles instead of being stretched by the panel aspect ratio.
-function drawWorld(f){const s=$('world'),points=[];const trail=(DATA.trajectory||[]).slice(0,f.index+1),add=p=>{if(p&&Number.isFinite(+p[0])&&Number.isFinite(+p[1]))points.push([+p[0],+p[1]])};f.candidates.forEach(c=>add([c.x,c.y]));(f.measured_projections||[]).forEach(c=>add([c.x,c.y]));(f.graph?.skeleton||[]).forEach(add);(f.graph?.semantic||[]).forEach(add);(f.graph?.astar||[]).forEach(add);trail.forEach(add);add([f.odom.position[0],f.odom.position[1]]);add([f.goal.x,f.goal.y]);if(f.selected_frontier)add(f.selected_frontier);let minx=Math.min(...points.map(p=>p[0]))-4,maxx=Math.max(...points.map(p=>p[0]))+4,miny=Math.min(...points.map(p=>p[1]))-4,maxy=Math.max(...points.map(p=>p[1]))+4;const scale=Math.min(1000/(maxx-minx||1),420/(maxy-miny||1)),cx=(minx+maxx)/2,cy=(miny+maxy)/2,sx=x=>550+(x-cx)*scale,sy=y=>250-(y-cy)*scale;let out='';const line=(a,b,color,width=1,dash='')=>out+=`<line x1="${sx(a[0])}" y1="${sy(a[1])}" x2="${sx(b[0])}" y2="${sy(b[1])}" stroke="${color}" stroke-width="${width}" ${dash?`stroke-dasharray="${dash}"`:''}/>`;for(const e of f.graph?.edges||[])if(e.length===2)line(e[0],e[1],'#465866');for(let i=1;i<trail.length;i++)line(trail[i-1],trail[i],'#77a9ba',2);const path=f.graph?.astar||[];for(let i=1;i<path.length;i++)line(path[i-1],path[i],'#55d6e8',3);for(const m of f.measured_projections||[])line([f.odom.position[0],f.odom.position[1]],[m.x,m.y],'#70818c',1,'3 3');for(const c of f.candidates)line([f.odom.position[0],f.odom.position[1]],[c.x,c.y],c.risk==='high'?'#753f43':'#2e7653',1,'5 4');for(const p of f.graph?.skeleton||[])out+=`<circle cx="${sx(p[0])}" cy="${sy(p[1])}" r="3" fill="#81909a"/>`;for(const p of f.graph?.semantic||[])out+=`<circle cx="${sx(p[0])}" cy="${sy(p[1])}" r="7" fill="#ff776f" stroke="#fff"/>`;for(const c of f.candidates){const color=c.column===f.planner.selected_semantic_column?'#56d58b':(c.risk==='high'?'#ff776f':'#9ddf9d');const scoreLabel=c.raw_score==null?'n/a':c.raw_score.toFixed(3);const riskLabel=c.calibrated_score==null?'n/a':c.calibrated_score.toFixed(3);out+=`<circle cx="${sx(c.x)}" cy="${sy(c.y)}" r="${c.column===f.planner.selected_semantic_column?8:5}" fill="${color}" stroke="${c.column===f.planner.selected_semantic_column?'#fff':'#15242d'}" stroke-width="1"/><text x="${sx(c.x)+7}" y="${sy(c.y)-1}" fill="#edf4f7" font-size="11">V${c.column}</text><text x="${sx(c.x)+7}" y="${sy(c.y)+11}" fill="#9db0bb" font-size="10">${scoreLabel} / ${riskLabel}</text>`}out+=`<circle cx="${sx(f.odom.position[0])}" cy="${sy(f.odom.position[1])}" r="7" fill="#55d6e8"/><text x="${sx(f.odom.position[0])+8}" y="${sy(f.odom.position[1])-7}" fill="#55d6e8">odom</text><circle cx="${sx(f.goal.x)}" cy="${sy(f.goal.y)}" r="7" fill="#f4c95d"/><text x="${sx(f.goal.x)+8}" y="${sy(f.goal.y)-7}" fill="#f4c95d">mission</text>`;if(f.selected_frontier)out+=`<circle cx="${sx(f.selected_frontier[0])}" cy="${sy(f.selected_frontier[1])}" r="11" fill="none" stroke="#fff" stroke-width="3"/>`;s.innerHTML=out}
-function drawRecomputed(f){const path=f.recomputed_astar?.selected_path||[];if(path.length<2)return;const all=[];const add=p=>{if(p&&Number.isFinite(+p[0])&&Number.isFinite(+p[1]))all.push([+p[0],+p[1]])};f.candidates.forEach(c=>add([c.x,c.y]));(f.measured_projections||[]).forEach(c=>add([c.x,c.y]));(f.graph?.skeleton||[]).forEach(add);(f.graph?.semantic||[]).forEach(add);(f.graph?.astar||[]).forEach(add);add([f.odom.position[0],f.odom.position[1]]);add([f.goal.x,f.goal.y]);if(f.selected_frontier)add(f.selected_frontier);let minx=Math.min(...all.map(p=>p[0]))-4,maxx=Math.max(...all.map(p=>p[0]))+4,miny=Math.min(...all.map(p=>p[1]))-4,maxy=Math.max(...all.map(p=>p[1]))+4;const scale=Math.min(1000/(maxx-minx||1),420/(maxy-miny||1)),cx=(minx+maxx)/2,cy=(miny+maxy)/2,sx=x=>550+(x-cx)*scale,sy=y=>250-(y-cy)*scale;const s=$('world'),g=document.createElementNS('http://www.w3.org/2000/svg','g');g.setAttribute('data-layer','recomputed-astar');for(let i=1;i<path.length;i++){const e=document.createElementNS('http://www.w3.org/2000/svg','line');e.setAttribute('x1',sx(path[i-1][0]));e.setAttribute('y1',sy(path[i-1][1]));e.setAttribute('x2',sx(path[i][0]));e.setAttribute('y2',sy(path[i][1]));e.setAttribute('stroke','#ffb347');e.setAttribute('stroke-width','4');e.setAttribute('stroke-linecap','round');g.appendChild(e)}s.appendChild(g)}const baseRender=render;render=function(){baseRender();drawRecomputed(DATA.frames[current])};render();
+function drawWorld(f){const s=$('world'),points=[];const trail=(DATA.trajectory||[]).slice(0,f.index+1),add=p=>{if(p&&Number.isFinite(+p[0])&&Number.isFinite(+p[1]))points.push([+p[0],+p[1]])};f.candidates.forEach(c=>add([c.x,c.y]));(f.measured_projections||[]).forEach(c=>add([c.x,c.y]));(f.graph?.skeleton||[]).forEach(add);(f.graph?.semantic||[]).forEach(add);(f.graph?.astar||[]).forEach(add);trail.forEach(add);add([f.odom.position[0],f.odom.position[1]]);add([f.goal.x,f.goal.y]);if(f.selected_frontier)add(f.selected_frontier);let minx=Math.min(...points.map(p=>p[0]))-4,maxx=Math.max(...points.map(p=>p[0]))+4,miny=Math.min(...points.map(p=>p[1]))-4,maxy=Math.max(...points.map(p=>p[1]))+4;const scale=Math.min(1000/(maxx-minx||1),420/(maxy-miny||1)),cx=(minx+maxx)/2,cy=(miny+maxy)/2,sx=x=>550+(x-cx)*scale,sy=y=>250-(y-cy)*scale;let out='';const line=(a,b,color,width=1,dash='')=>out+=`<line x1="${sx(a[0])}" y1="${sy(a[1])}" x2="${sx(b[0])}" y2="${sy(b[1])}" stroke="${color}" stroke-width="${width}" ${dash?`stroke-dasharray="${dash}"`:''}/>`;for(const e of f.graph?.edges||[])if(e.length===2)line(e[0],e[1],'#465866');for(let i=1;i<trail.length;i++)line(trail[i-1],trail[i],'#77a9ba',2);const path=f.graph?.astar||[];for(let i=1;i<path.length;i++)line(path[i-1],path[i],'#55d6e8',3);for(const m of f.measured_projections||[])line([f.odom.position[0],f.odom.position[1]],[m.x,m.y],'#70818c',1,'3 3');for(const c of f.candidates)line([f.odom.position[0],f.odom.position[1]],[c.x,c.y],c.risk==='high'?'#753f43':'#2e7653',1,'5 4');const reverse=f.reverse_projection?.nodes||[];for(let i=0;i<(f.graph?.skeleton||[]).length;i++){const p=f.graph.skeleton[i],n=reverse[i],has=n&&Number.isFinite(+n.score),fill=has?`rgb(${semanticColor(+n.score).join(',')})`:'#81909a',top=i===f.reverse_projection?.stats?.top_node_index;out+=`<circle cx="${sx(p[0])}" cy="${sy(p[1])}" r="${top?7:4}" fill="${fill}" stroke="${top?'#fff':'#15242d'}" stroke-width="${top?2:1}"/>`;if(has)out+=`<text x="${sx(p[0])+6}" y="${sy(p[1])-3}" fill="#edf4f7" font-size="10">N${i} ${(+n.score).toFixed(2)}</text>`;}for(let i=0;i<(f.graph?.semantic||[]).length;i++){const p=f.graph.semantic[i];const fill=rgbaColor(f.graph.semantic_colors?.[i],'#ff776f');out+=`<circle cx="${sx(p[0])}" cy="${sy(p[1])}" r="7" fill="${fill}" stroke="#fff"/>`;}for(const c of f.candidates){const color=c.column===f.planner.selected_semantic_column?'#56d58b':semanticColor(c.runtime_score ?? c.score ?? 0);const scoreLabel=c.raw_score==null?'n/a':c.raw_score.toFixed(3);const riskLabel=c.runtime_score==null?'n/a':c.runtime_score.toFixed(3);out+=`<circle cx="${sx(c.x)}" cy="${sy(c.y)}" r="${c.column===f.planner.selected_semantic_column?8:5}" fill="${color}" stroke="${c.column===f.planner.selected_semantic_column?'#fff':'#15242d'}" stroke-width="1"/><text x="${sx(c.x)+7}" y="${sy(c.y)-1}" fill="#edf4f7" font-size="11">V${c.column}</text><text x="${sx(c.x)+7}" y="${sy(c.y)+11}" fill="#9db0bb" font-size="10">${scoreLabel} / ${riskLabel}</text>`}out+=`<circle cx="${sx(f.odom.position[0])}" cy="${sy(f.odom.position[1])}" r="7" fill="#55d6e8"/><text x="${sx(f.odom.position[0])+8}" y="${sy(f.odom.position[1])-7}" fill="#55d6e8">odom</text><circle cx="${sx(f.goal.x)}" cy="${sy(f.goal.y)}" r="7" fill="#f4c95d"/><text x="${sx(f.goal.x)+8}" y="${sy(f.goal.y)-7}" fill="#f4c95d">mission</text>`;if(f.selected_frontier)out+=`<circle cx="${sx(f.selected_frontier[0])}" cy="${sy(f.selected_frontier[1])}" r="11" fill="none" stroke="#fff" stroke-width="3"/>`;s.innerHTML=out}
+function drawBackprojection(f){const s=$('backproj');if(!s)return;const all=[];const add=p=>{if(p&&Number.isFinite(+p[0])&&Number.isFinite(+p[1]))all.push([+p[0],+p[1]])};(f.measured_projections||[]).forEach(m=>add([m.x,m.y]));(f.graph?.route_bubbles||[]).forEach(b=>add([b.center[0],b.center[1]]));(f.graph?.skeleton||[]).forEach(add);(f.graph?.semantic||[]).forEach(add);(f.graph?.astar||[]).forEach(add);add([f.odom.position[0],f.odom.position[1]]);if(!all.length){s.innerHTML='';return}let minx=Math.min(...all.map(p=>p[0]))-4,maxx=Math.max(...all.map(p=>p[0]))+4,miny=Math.min(...all.map(p=>p[1]))-4,maxy=Math.max(...all.map(p=>p[1]))+4;const scale=Math.min(1000/(maxx-minx||1),420/(maxy-miny||1)),cx=(minx+maxx)/2,cy=(miny+maxy)/2,sx=x=>550+(x-cx)*scale,sy=y=>250-(y-cy)*scale;let out='';const line=(a,b,color,width=1,dash='')=>out+=`<line x1="${sx(a[0])}" y1="${sy(a[1])}" x2="${sx(b[0])}" y2="${sy(b[1])}" stroke="${color}" stroke-width="${width}" ${dash?`stroke-dasharray="${dash}"`:''}/>`;const reverse=f.reverse_projection?.nodes||[];for(let i=0;i<(f.graph?.skeleton||[]).length;i++){const p=f.graph.skeleton[i],n=reverse[i],has=n&&Number.isFinite(+n.score),fill=has?`rgb(${semanticColor(+n.score).join(',')})`:'#81909a',top=i===f.reverse_projection?.stats?.top_node_index;out+=`<circle cx="${sx(p[0])}" cy="${sy(p[1])}" r="${top?7:4}" fill="${fill}" stroke="${top?'#fff':'#15242d'}" stroke-width="${top?2:1}"/>`;if(has)out+=`<text x="${sx(p[0])+6}" y="${sy(p[1])-3}" fill="#edf4f7" font-size="10">N${i} ${(+n.score).toFixed(2)}</text>`}for(const anchor of f.measured_projection_debug||[]){const point=anchor.point||[];if(point.length<2)continue;const matched=anchor.nearest_anchor;out+=`<circle cx="${sx(point[0])}" cy="${sy(point[1])}" r="5" fill="${anchor.inside_anchor?'#56d58b':'#f4c95d'}" stroke="#fff" stroke-width="1"/>`;if(matched&&matched.center){line(point,matched.center,'#70818c',1,'4 4');out+=`<circle cx="${sx(matched.center[0])}" cy="${sy(matched.center[1])}" r="${Math.max(7, (matched.radius||0.75) * scale)}" fill="none" stroke="#56a8ff" stroke-width="2" opacity="0.9"/>`;out+=`<text x="${sx(point[0])+7}" y="${sy(point[1])-2}" fill="#edf4f7" font-size="10">c${anchor.column} ${matched.kind} d=${anchor.anchor_distance==null?'n/a':anchor.anchor_distance.toFixed(2)}</text>`}}for(const b of f.graph?.route_bubbles||[])out+=`<circle cx="${sx(b.center[0])}" cy="${sy(b.center[1])}" r="${Math.max(3, (b.radius||0.0) * scale)}" fill="none" stroke="#56a8ff" stroke-width="1" opacity="0.7"/>`;out+=`<circle cx="${sx(f.odom.position[0])}" cy="${sy(f.odom.position[1])}" r="7" fill="#55d6e8"/><text x="${sx(f.odom.position[0])+8}" y="${sy(f.odom.position[1])-7}" fill="#55d6e8">odom</text>`;s.innerHTML=out}
+function drawRecomputed(f){const path=f.recomputed_astar?.selected_path||[];if(path.length<2)return;const all=[];const add=p=>{if(p&&Number.isFinite(+p[0])&&Number.isFinite(+p[1]))all.push([+p[0],+p[1]])};f.candidates.forEach(c=>add([c.x,c.y]));(f.measured_projections||[]).forEach(c=>add([c.x,c.y]));(f.graph?.skeleton||[]).forEach(add);(f.graph?.semantic||[]).forEach(add);(f.graph?.astar||[]).forEach(add);add([f.odom.position[0],f.odom.position[1]]);add([f.goal.x,f.goal.y]);if(f.selected_frontier)add(f.selected_frontier);let minx=Math.min(...all.map(p=>p[0]))-4,maxx=Math.max(...all.map(p=>p[0]))+4,miny=Math.min(...all.map(p=>p[1]))-4,maxy=Math.max(...all.map(p=>p[1]))+4;const scale=Math.min(1000/(maxx-minx||1),420/(maxy-miny||1)),cx=(minx+maxx)/2,cy=(miny+maxy)/2,sx=x=>550+(x-cx)*scale,sy=y=>250-(y-cy)*scale;const s=$('world'),g=document.createElementNS('http://www.w3.org/2000/svg','g');g.setAttribute('data-layer','recomputed-astar');for(let i=1;i<path.length;i++){const e=document.createElementNS('http://www.w3.org/2000/svg','line');e.setAttribute('x1',sx(path[i-1][0]));e.setAttribute('y1',sy(path[i-1][1]));e.setAttribute('x2',sx(path[i][0]));e.setAttribute('y2',sy(path[i][1]));e.setAttribute('stroke','#ffb347');e.setAttribute('stroke-width','4');e.setAttribute('stroke-linecap','round');g.appendChild(e)}s.appendChild(g)}const baseRender=render;render=function(){baseRender();const frame=DATA.frames[current];drawBackprojection(frame);drawRecomputed(frame)};render();
 let autoplay=true,autoplayTimer=null;
 function highlightChoice(f){const svg=$('world'),selected=f.recomputed_astar?.selected_column;for(const label of [...svg.querySelectorAll('text')].filter(n=>/^V[0-4]$/.test(n.textContent))){const col=Number(label.textContent.slice(1)),cx=Number(label.getAttribute('x'))-7,cy=Number(label.getAttribute('y'))-4, circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('cx',cx);circle.setAttribute('cy',cy);circle.setAttribute('r',col===selected?'8':'6');circle.setAttribute('fill',col===selected?'#56d58b':(f.candidates[col]?.risk==='high'?'#ff776f':'#71808b'));circle.setAttribute('stroke',col===selected?'#fff':'#15242d');circle.setAttribute('stroke-width',col===selected?'2':'1');svg.insertBefore(circle,label);label.setAttribute('x',cx+7);label.setAttribute('y',cy+4);label.setAttribute('fill','#edf4f7')}}
 function stopAutoplay(){if(autoplayTimer){clearInterval(autoplayTimer);autoplayTimer=null}}
 function startAutoplay(){stopAutoplay();if(!autoplay)return;autoplayTimer=setInterval(()=>{if(current>=DATA.frames.length-1){autoplay=false;stopAutoplay();return}current++;render()},900)}
 function renderTimeline(){const events=DATA.route_events||[];$('timeline').innerHTML=events.map((e,i)=>`<button class="event ${e.severity} ${e.frame_index===current?'current':''}" onclick="current=${e.frame_index};render()"><b>${i+1}. ${e.time_s.toFixed(2)} s · ${esc(e.reason)}</b><br>${esc(e.label)}<br><small>frontier ${e.frontier_id||'-'} · rejected ${e.semantic_edges_rejected}</small></button>`).join('')}
 function renderDiagnosis(f){const p=f.planner||{},run=DATA.route_diagnosis||{},progress=Number(p.frontier_progress_t||0),ratio=Number(p.frontier_replan_ratio||run.replan_ratio||0.4),held=p.route_decision==='ROUTE_HELD'&&!p.searched,below=held&&progress<ratio;const event=(DATA.route_events||[]).find(e=>e.frame_index===f.index);let headline,detail;if(event){headline=event.label;detail=`本帧 route_decision=${event.decision}，searched=${event.searched}，frontier=${event.frontier_id||'-'}。`}else if(below){headline='旧路线被继续持有，未运行 A*';detail=`progress=${(progress*100).toFixed(1)}%，尚未达到 ${(ratio*100).toFixed(0)}% 触发阈值。拓扑图即使已经出现绕路，只要旧 frontier 仍被判为可达，当前逻辑也不会搜索新路径。`}else{headline='当前帧继续执行已接收路线';detail=`route_decision=${p.route_decision||'-'}，searched=${!!p.searched}，progress=${(progress*100).toFixed(1)}%。`}const alert=below&&f.index===DATA.frames.length-1?'diagnostic-alert':'';$('diagnosis').innerHTML=`<div class="${alert}"><p><b>${esc(headline)}</b></p><p>${esc(detail)}</p></div><p class="muted">全程：${run.progress_replans??0} 次 progress 重规划，${run.route_unreachable_replans??0} 次 endpoint 不可达重规划，${run.semantic_edge_route_clears??0} 次语义末边拒绝并清空路线。末帧 searched=${run.final_searched}，progress=${fmt((run.final_progress||0)*100,1)}%，speed=${fmt(run.final_speed_mps)} m/s。</p>`}
-function renderCandidateDecision(f){const paths=new Map((f.recomputed_astar?.paths||[]).map(p=>[p.column,p])),selected=f.recomputed_astar?.selected_column;$('decision').innerHTML=`<p><b>Current-contract winner:</b> ${selected==null?'none':'V'+selected} · <b>historical online endpoint:</b> ${f.selected_frontier?f.selected_frontier.slice(0,2).map(v=>fmt(v)).join(', '):'none'} · <b>online reported column:</b> ${f.planner?.selected_semantic_column??'-'} · <b>score source:</b> middle-row patch mean → projected node</p><table><thead><tr><th>candidate</th><th>patch mean</th><th>node risk</th><th>world node</th><th>A* route cost</th><th>mission distance</th><th>semantic cost (m)</th><th>objective</th><th>status</th></tr></thead><tbody>${f.candidates.map(c=>{const p=paths.get(c.column)||{};const nodeState=c.column===selected?'selected':(c.column===f.planner?.selected_semantic_column?'planner-picked':'candidate');return `<tr><td>${nodeState} V${c.column}</td><td>${fmt(c.score,4)}</td><td>${fmt(c.calibrated_score,4)}</td><td>(${fmt(c.x)}, ${fmt(c.y)}, ${fmt(c.z)})</td><td>${fmt(p.route_cost)}</td><td>${fmt(p.goal_distance)}</td><td>${fmt(p.semantic_cost_m,2)}</td><td>${fmt(p.objective,5)}</td><td>${p.synthetic_connection?'diagnostic link':'logged graph link'}</td></tr>`}).join('')}</tbody></table><table><thead><tr><th>col</th><th>patch mean</th><th>calibrated risk</th><th>source row</th><th>selected</th></tr></thead><tbody>${f.candidates.map(c=>`<tr><td>V${c.column}</td><td>${fmt(c.score,4)}</td><td>${fmt(c.calibrated_score,4)}</td><td>middle</td><td>${c.column===selected?'yes':'no'}</td></tr>`).join('')}</tbody></table>`}
+function renderCandidateDecision(f){const paths=new Map((f.recomputed_astar?.paths||[]).map(p=>[p.column,p])),selected=f.recomputed_astar?.selected_column;$('decision').innerHTML=`<p><b>Current-contract winner:</b> ${selected==null?'none':'V'+selected} · <b>historical online endpoint:</b> ${f.selected_frontier?f.selected_frontier.slice(0,2).map(v=>fmt(v)).join(', '):'none'} · <b>online reported column:</b> ${f.planner?.selected_semantic_column??'-'} · <b>score source:</b> full heatmap runtime score (middle-row mean is shown separately) · <b>node colors:</b> actual Marker colors when present</p><table><thead><tr><th>candidate</th><th>runtime score</th><th>diagnostic contrast</th><th>patch color</th><th>node color</th><th>world node</th><th>A* route cost</th><th>mission distance</th><th>semantic cost (m)</th><th>objective</th><th>status</th></tr></thead><tbody>${f.candidates.map(c=>{const p=paths.get(c.column)||{};const nodeState=c.column===selected?'selected':(c.column===f.planner?.selected_semantic_column?'planner-picked':'candidate');const color=semanticColor(c.runtime_score ?? c.score ?? 0);return `<tr><td>${nodeState} V${c.column}</td><td>${fmt(c.runtime_score ?? c.score,4)}</td><td>${fmt(c.diagnostic_contrast_score,4)}</td><td><span style=\"display:inline-block;width:16px;height:10px;background:rgb(${color.join(',')});border:1px solid #fff\"></span></td><td>actual marker / projected</td><td>(${fmt(c.x)}, ${fmt(c.y)}, ${fmt(c.z)})</td><td>${fmt(p.route_cost)}</td><td>${fmt(p.goal_distance)}</td><td>${fmt(p.semantic_cost_m,2)}</td><td>${fmt(p.objective,5)}</td><td>${p.synthetic_connection?'diagnostic link':'logged graph link'}</td></tr>`}).join('')}</tbody></table><table><thead><tr><th>col</th><th>runtime score</th><th>diagnostic contrast</th><th>source</th><th>selected</th></tr></thead><tbody>${f.candidates.map(c=>`<tr><td>V${c.column}</td><td>${fmt(c.runtime_score ?? c.score,4)}</td><td>${fmt(c.diagnostic_contrast_score,4)}</td><td>middle row runtime / baseline diagnostic</td><td>${c.column===selected?'yes':'no'}</td></tr>`).join('')}</tbody></table>`;const st=f.reverse_projection?.stats||{};const nodes=f.reverse_projection?.nodes||[];$('reverse_stats').innerHTML=`<h3>Offline reverse-projection result for ordinary graph nodes</h3><p class="muted">visible=${st.visible_nodes??0}, annotated=${st.annotated_nodes??0}, score min=${fmt(st.score_min,4)}, max=${fmt(st.score_max,4)}, mean=${fmt(st.score_mean,4)}, p90=${fmt(st.score_p90,4)}, top node=${st.top_node_index==null?'-':'N'+st.top_node_index}</p><table><thead><tr><th>node</th><th>world</th><th>pixel</th><th>depth</th><th>Gaussian radius</th><th>offline score</th><th>historical Marker color</th></tr></thead><tbody>${nodes.map(n=>`<tr><td>N${n.node_index}</td><td>(${fmt(n.world?.[0])}, ${fmt(n.world?.[1])}, ${fmt(n.world?.[2])})</td><td>${n.pixel_u==null?'-':`${fmt(n.pixel_u,1)}, ${fmt(n.pixel_v,1)}`}</td><td>${fmt(n.projection_depth_m)} m</td><td>${fmt(n.object_radius_m)} m</td><td class="${n.score>=0.35?'high':'low'}">${fmt(n.score,4)}</td><td>${n.logged_color?'old logged':'none'}</td></tr>`).join('')}</tbody></table>`}
 const rendered=render;render=function(){rendered();const frame=DATA.frames[current];highlightChoice(frame);renderTimeline();renderDiagnosis(frame);renderCandidateDecision(frame);const old=$('autoplay');if(old)old.remove();const button=document.createElement('button');button.id='autoplay';button.textContent=autoplay?'暂停自动播放':'继续自动播放';button.onclick=()=>{autoplay=!autoplay;if(autoplay)startAutoplay();else stopAutoplay();button.textContent=autoplay?'暂停自动播放':'继续自动播放'};$('controls').prepend(button);if(autoplay&&!autoplayTimer)startAutoplay()};render();
 </script></body></html>'''.replace('__DATA__', payload)
 

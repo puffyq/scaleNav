@@ -3048,4 +3048,205 @@ TEST(AcceptedRouteConnectivity, AcceptsRollingOdomHeadAfterReconnect)
   EXPECT_TRUE(connectivity.routeUsable());
 }
 
+TEST(TopoSemanticProjection, WorldToImageRoundTripMatchesOpticalDepth)
+{
+  const Eigen::Vector3f camera(0.5F, 0.0F, -0.1F);
+  const Eigen::Vector3f body = Eigen::Vector3f::Zero();
+  const Eigen::Quaternionf identity = Eigen::Quaternionf::Identity();
+  const Eigen::Vector3f world = body + identity * semanticPointFluAtOpticalDepth(
+    0.25F, 0.75F, 90.0F, 60.0F, 12.0F, camera);
+  float u = 0.0F;
+  float v = 0.0F;
+  float depth = 0.0F;
+  ASSERT_TRUE(worldPointToSemanticImage(
+    world, body, identity, camera, 90.0F, 60.0F, u, v, depth));
+  EXPECT_NEAR(u, 0.25F, 1e-4F);
+  EXPECT_NEAR(v, 0.75F, 1e-4F);
+  EXPECT_NEAR(depth, 12.0F, 1e-4F);
+}
+
+TopoNode::Ptr addVerifiedNode(TopoGraph &graph, const Eigen::Vector3f &center)
+{
+  graph.init_region_size_x_ = 20.0;
+  graph.init_region_size_y_ = 20.0;
+  graph.init_region_size_z_ = 20.0;
+  auto node = std::make_shared<TopoNode>();
+  node->center_ = center;
+  node->geometry_state_ = TopoGeometryState::Verified;
+  node->bubble_radius_ = 1.0F;
+  graph.getRegionNode(Eigen::Vector3i::Zero())->topo_nodes_.insert(node);
+  return node;
+}
+
+TEST(TopoSemanticProjection, VerifiedNodeSamplesProjectedHeatmap)
+{
+  TopoGraph graph;
+  const auto node = addVerifiedNode(graph, Eigen::Vector3f(10.0F, 0.0F, 0.0F));
+  constexpr int width = 32;
+  constexpr int height = 24;
+  std::vector<float> heatmap(width * height, 0.05F);
+  for (int v = 10; v <= 13; ++v) {
+    for (int u = 14; u <= 17; ++u) {
+      heatmap[v * width + u] = 0.92F;
+    }
+  }
+  SemanticHeatmapAnnotation view;
+  view.heatmap = heatmap.data();
+  view.width = width;
+  view.height = height;
+  view.camera_translation_flu = Eigen::Vector3f::Zero();
+  view.min_heatmap_score = 0.20F;
+  view.min_radius_m = 1.0F;
+  view.max_radius_m = 20.0F;
+  ASSERT_EQ(graph.annotateVerifiedNodesFromHeatmap(view, 11), 1U);
+  EXPECT_GT(node->semantic_score_, 0.70F);
+  EXPECT_EQ(node->semantic_observations_, 1U);
+}
+
+TEST(TopoSemanticProjection, OffBlobNodeStaysLowForSmallTree)
+{
+  TopoGraph graph;
+  const auto node = addVerifiedNode(graph, Eigen::Vector3f(10.0F, 6.0F, 0.0F));
+  constexpr int width = 32;
+  constexpr int height = 24;
+  std::vector<float> heatmap(width * height, 0.04F);
+  for (int v = 11; v <= 12; ++v) {
+    for (int u = 15; u <= 16; ++u) {
+      heatmap[v * width + u] = 0.95F;
+    }
+  }
+  SemanticHeatmapAnnotation view;
+  view.heatmap = heatmap.data();
+  view.width = width;
+  view.height = height;
+  view.camera_translation_flu = Eigen::Vector3f::Zero();
+  view.min_radius_m = 1.0F;
+  view.max_radius_m = 20.0F;
+  ASSERT_EQ(graph.annotateVerifiedNodesFromHeatmap(view, 12), 1U);
+  EXPECT_LT(node->semantic_score_, 0.25F);
+}
+
+TEST(TopoSemanticProjection, FreeSpaceNodeInFrontOfWallSamplesHeatmap)
+{
+  TopoGraph graph;
+  // Node sits in free space 8 m in front of a later surface. Annotation copies
+  // the 2D heatmap onto the existing node; it does not require a matching
+  // depth return at the node itself.
+  const auto node = addVerifiedNode(graph, Eigen::Vector3f(8.0F, 0.0F, 0.0F));
+  constexpr int width = 32;
+  constexpr int height = 24;
+  std::vector<float> heatmap(width * height, 0.05F);
+  for (int v = 9; v <= 14; ++v) {
+    for (int u = 12; u <= 19; ++u) {
+      heatmap[v * width + u] = 0.91F;
+    }
+  }
+  SemanticHeatmapAnnotation view;
+  view.heatmap = heatmap.data();
+  view.width = width;
+  view.height = height;
+  view.camera_translation_flu = Eigen::Vector3f::Zero();
+  view.min_radius_m = 1.0F;
+  view.max_radius_m = 20.0F;
+  ASSERT_EQ(graph.annotateVerifiedNodesFromHeatmap(view, 13), 1U);
+  EXPECT_GT(node->semantic_score_, 0.70F);
+}
+
+TEST(TopoSemanticProjection, LargeWallBlobRepelsFartherThanTree)
+{
+  auto make_view = [](std::vector<float> &heatmap, bool wide_wall) {
+    constexpr int width = 48;
+    constexpr int height = 24;
+    heatmap.assign(width * height, 0.04F);
+    if (wide_wall) {
+      for (int v = 8; v <= 15; ++v) {
+        for (int u = 4; u <= 43; ++u) {
+          heatmap[v * width + u] = 0.88F;
+        }
+      }
+    } else {
+      for (int v = 11; v <= 12; ++v) {
+        for (int u = 23; u <= 24; ++u) {
+          heatmap[v * width + u] = 0.88F;
+        }
+      }
+    }
+    SemanticHeatmapAnnotation view;
+    view.heatmap = heatmap.data();
+    view.width = width;
+    view.height = height;
+    view.camera_translation_flu = Eigen::Vector3f::Zero();
+    view.min_radius_m = 1.0F;
+    view.max_radius_m = 20.0F;
+    return view;
+  };
+
+  std::vector<float> tree_heat, wall_heat;
+  TopoGraph tree_graph;
+  TopoGraph wall_graph;
+  const auto tree_node = addVerifiedNode(tree_graph, Eigen::Vector3f(8.0F, 6.0F, 0.0F));
+  const auto wall_node = addVerifiedNode(wall_graph, Eigen::Vector3f(8.0F, 6.0F, 0.0F));
+  const auto tree_view = make_view(tree_heat, false);
+  const auto wall_view = make_view(wall_heat, true);
+  ASSERT_EQ(tree_graph.annotateVerifiedNodesFromHeatmap(tree_view, 14), 1U);
+  ASSERT_EQ(wall_graph.annotateVerifiedNodesFromHeatmap(wall_view, 15), 1U);
+  EXPECT_LT(tree_node->semantic_score_, 0.35F);
+  EXPECT_GT(wall_node->semantic_score_, 0.50F);
+  EXPECT_GT(wall_node->semantic_score_, tree_node->semantic_score_);
+}
+
+
+TEST(TopoSemanticProjection, FlightLayerNodeProjectsToGroundPlane)
+{
+  TopoGraph graph;
+  const auto air = addVerifiedNode(graph, Eigen::Vector3f(8.0F, 0.0F, 1.6F));
+  constexpr int width = 32;
+  constexpr int height = 24;
+  std::vector<float> heatmap(width * height, 0.05F);
+  for (int v = 14; v <= 20; ++v) {
+    for (int u = 13; u <= 18; ++u) {
+      heatmap[v * width + u] = 0.90F;
+    }
+  }
+  SemanticHeatmapAnnotation view;
+  view.heatmap = heatmap.data();
+  view.width = width;
+  view.height = height;
+  view.body_world = Eigen::Vector3f(0.0F, 0.0F, 1.6F);
+  view.camera_translation_flu = Eigen::Vector3f::Zero();
+  view.min_heatmap_score = 0.20F;
+  view.min_radius_m = 1.0F;
+  view.max_radius_m = 20.0F;
+  view.ground_z_m = 0.0F;
+  ASSERT_EQ(graph.annotateVerifiedNodesFromHeatmap(view, 17), 1U);
+  EXPECT_GT(air->semantic_score_, 0.50F);
+}
+
+TEST(TopoSemanticProjection, CloserSurfaceDoesNotZeroExistingNode)
+{
+  // Existing-node annotation is only heatmap readout. A nearer surface on the
+  // same camera ray does not mean "no semantics"; collision checks disconnect
+  // blocked edges, so this path must still copy the image score.
+  TopoGraph graph;
+  const auto node = addVerifiedNode(graph, Eigen::Vector3f(10.0F, 0.0F, 0.0F));
+  constexpr int width = 32;
+  constexpr int height = 24;
+  std::vector<float> heatmap(width * height, 0.06F);
+  for (int v = 10; v <= 13; ++v) {
+    for (int u = 14; u <= 17; ++u) {
+      heatmap[v * width + u] = 0.93F;
+    }
+  }
+  SemanticHeatmapAnnotation view;
+  view.heatmap = heatmap.data();
+  view.width = width;
+  view.height = height;
+  view.camera_translation_flu = Eigen::Vector3f::Zero();
+  view.min_heatmap_score = 0.20F;
+  view.min_radius_m = 1.0F;
+  view.max_radius_m = 20.0F;
+  ASSERT_EQ(graph.annotateVerifiedNodesFromHeatmap(view, 16), 1U);
+  EXPECT_GT(node->semantic_score_, 0.70F);
+}
+
 }  // namespace

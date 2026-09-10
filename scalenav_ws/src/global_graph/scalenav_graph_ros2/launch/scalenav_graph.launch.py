@@ -116,6 +116,8 @@ def generate_launch_description():
         DeclareLaunchArgument("semantic_point_min_score", default_value="0.20"),
         DeclareLaunchArgument("semantic_point_separation_m", default_value="1.5"),
         DeclareLaunchArgument("semantic_point_radius_m", default_value="0.75"),
+        DeclareLaunchArgument("semantic_annotation_min_radius_m", default_value="1.0"),
+        DeclareLaunchArgument("semantic_annotation_max_radius_m", default_value="20.0"),
         DeclareLaunchArgument("semantic_point_max_nodes", default_value="16"),
         DeclareLaunchArgument("virtual_semantic_prune_enabled", default_value="true"),
         DeclareLaunchArgument("virtual_semantic_backtrack_margin_m", default_value="12.0"),
@@ -264,6 +266,10 @@ def generate_launch_description():
                 "semantic_point_separation_m": LaunchConfiguration(
                     "semantic_point_separation_m"),
                 "semantic_point_radius_m": LaunchConfiguration("semantic_point_radius_m"),
+                "semantic_annotation_min_radius_m": LaunchConfiguration(
+                    "semantic_annotation_min_radius_m"),
+                "semantic_annotation_max_radius_m": LaunchConfiguration(
+                    "semantic_annotation_max_radius_m"),
                 "semantic_point_max_nodes": LaunchConfiguration("semantic_point_max_nodes"),
                 "virtual_semantic_prune_enabled": LaunchConfiguration(
                     "virtual_semantic_prune_enabled"),
