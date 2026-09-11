@@ -49,6 +49,19 @@ add_executable(scalenav_graph_node
   ${TOPO_SOURCES}
 )
 
+add_executable(coarse_grid_astar_node
+  src/scale_manager/src/coarse_grid_astar_node.cpp
+)
+target_include_directories(coarse_grid_astar_node PRIVATE
+  include
+  ${EIGEN3_INCLUDE_DIRS}
+  ${PCL_INCLUDE_DIRS}
+)
+target_compile_definitions(coarse_grid_astar_node PRIVATE PCL_NO_PRECOMPILE)
+ament_target_dependencies(coarse_grid_astar_node
+  geometry_msgs nav_msgs pcl_conversions rclcpp sensor_msgs visualization_msgs)
+target_link_libraries(coarse_grid_astar_node ${PCL_LIBRARIES})
+
 target_include_directories(scalenav_graph_node PRIVATE
   include
   ${TOPO_ROOT}/include
@@ -65,6 +78,12 @@ if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   ament_add_gtest(test_route_memory test/test_route_memory.cpp)
   target_include_directories(test_route_memory PRIVATE include ${EIGEN3_INCLUDE_DIRS})
+
+  ament_add_gtest(test_coarse_grid_astar test/test_coarse_grid_astar.cpp)
+  target_include_directories(test_coarse_grid_astar PRIVATE
+    include
+    ${EIGEN3_INCLUDE_DIRS}
+  )
 
   ament_add_gtest(test_lidar_map test/test_lidar_map.cpp)
   target_include_directories(test_lidar_map PRIVATE
@@ -145,7 +164,7 @@ if(BUILD_TESTING)
       --html ${CMAKE_CURRENT_BINARY_DIR}/semantic_frontier_module_test.html)
 endif()
 
-install(TARGETS scalenav_graph_node DESTINATION lib/${PROJECT_NAME})
+install(TARGETS scalenav_graph_node coarse_grid_astar_node DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../config
   DESTINATION share/${PROJECT_NAME})

@@ -14,6 +14,8 @@ CONFIG="$SRC/config/config.yaml"
 LOG_ROOT="${SCALENAV_LOG_DIR:-$ROOT/log_scalenav}"
 MAX_SPEED="${YOPO_SIMPLE_MAX_SPEED:-6.0}"
 IGNORE_COLLISION="${IGNORE_COLLISION:-false}"
+GOAL_TOPIC="${GOAL_TOPIC:-/goal_pose}"
+MISSION_GOAL_TOPIC="${MISSION_GOAL_TOPIC:-}"
 
 [[ -f /opt/ros/humble/setup.bash ]] || { echo "ROS2 Humble not found" >&2; exit 1; }
 [[ -f "$WS/install/setup.bash" ]] || { echo "ScaleNav is not built" >&2; exit 1; }
@@ -46,13 +48,18 @@ run ros2 launch scalenav_log scalenav_log.launch.py output_dir:="$LOG_ROOT"
 run ros2 launch airsim_renderer controller_airsim.launch.py \
   maximum_linear_speed:="$MAX_SPEED" ignore_collision:="$IGNORE_COLLISION"
 run ros2 launch depth2points_ros2 depth_planar_to_pointcloud.launch.py
-run "$PYTHON" "$SRC/scalenav/online_planner_ros2.py" \
-  --model "$MODEL" --device cuda --config-file "$CONFIG" \
-  --control --original-goal-input --goal-topic /goal_pose \
-  --world-frame world_enu --odom-twist-frame body \
-  --model-image-width 160 --model-image-height 96 --model-vertical-num 3 \
-  --trajectory-speed-color-max-mps "$MAX_SPEED" \
+YOPO_ARGS=(
+  --model "$MODEL" --device cuda --config-file "$CONFIG"
+  --control --original-goal-input --goal-topic "$GOAL_TOPIC"
+  --world-frame world_enu --odom-twist-frame body
+  --model-image-width 160 --model-image-height 96 --model-vertical-num 3
+  --trajectory-speed-color-max-mps "$MAX_SPEED"
   --fixed-altitude --plan-from-reference --disable-event-log
+)
+if [[ -n "$MISSION_GOAL_TOPIC" ]]; then
+  YOPO_ARGS+=(--mission-goal-topic "$MISSION_GOAL_TOPIC")
+fi
+run "$PYTHON" "$SRC/scalenav/online_planner_ros2.py" "${YOPO_ARGS[@]}"
 
 echo "started YOPO-Simple control; model=$MODEL max_speed=${MAX_SPEED}m/s log_root=$LOG_ROOT"
 wait -n $PIDS

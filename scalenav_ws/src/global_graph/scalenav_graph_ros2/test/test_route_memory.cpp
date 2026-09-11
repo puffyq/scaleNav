@@ -534,14 +534,16 @@ TEST(RouteMemory, ValidCandidateDoesNotFallBackToTheIncumbent)
     false, false, true, true, true, false));
 }
 
-TEST(RouteMemory, BlockedOrDisconnectedIncumbentCannotMaskCandidateFailure)
+TEST(RouteMemory, BlockedOrDisconnectedIncumbentStillHoldsAfterCandidateFailure)
 {
-  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+  EXPECT_TRUE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
     true, false, true, true, false, false));
-  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+  EXPECT_TRUE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
     true, false, true, false, true, false));
-  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+  EXPECT_TRUE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
     true, false, true, true, true, true));
+  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+    true, false, false, true, true, false));
 }
 
 TEST(RouteMemory, AcceptedRouteNeedsTwoConsecutiveUnsafeChecks)
@@ -564,6 +566,70 @@ TEST(RouteMemory, SafeCheckClearsAcceptedRouteUnsafeEvidence)
   EXPECT_FALSE(scalenav_graph::consecutiveUnsafeRouteRequiresReplan(
     false, false, 2, unsafe_frames));
   EXPECT_EQ(unsafe_frames, 0);
+}
+
+TEST(RouteMemory, GraphUnreachableKeepsACommittedWitness)
+{
+  EXPECT_TRUE(scalenav_graph::shouldHoldCommittedWitnessWhenGraphUnreachable(
+    true, 2));
+  EXPECT_TRUE(scalenav_graph::shouldHoldCommittedWitnessWhenGraphUnreachable(
+    true, 8));
+  EXPECT_FALSE(scalenav_graph::shouldHoldCommittedWitnessWhenGraphUnreachable(
+    false, 8));
+  EXPECT_FALSE(scalenav_graph::shouldHoldCommittedWitnessWhenGraphUnreachable(
+    true, 1));
+  EXPECT_FALSE(scalenav_graph::shouldHoldCommittedWitnessWhenGraphUnreachable(
+    true, 0));
+}
+
+TEST(RouteMemory, ShortcutPredictionFailureDoesNotKillTheCorridor)
+{
+  EXPECT_TRUE(scalenav_graph::shouldIgnoreShortcutPredictionFailure(true, true));
+  EXPECT_FALSE(scalenav_graph::shouldIgnoreShortcutPredictionFailure(false, true));
+  EXPECT_FALSE(scalenav_graph::shouldIgnoreShortcutPredictionFailure(true, false));
+}
+
+TEST(RouteMemory, GraphFlickerKeepsACommittedPolyline)
+{
+  EXPECT_TRUE(scalenav_graph::shouldHoldCommittedRouteOnGraphFlicker(true, 8));
+  EXPECT_FALSE(scalenav_graph::shouldHoldCommittedRouteOnGraphFlicker(true, 1));
+  EXPECT_FALSE(scalenav_graph::shouldHoldCommittedRouteOnGraphFlicker(false, 8));
+}
+
+TEST(RouteMemory, InitialAcceptIsOnlyLegalBeforeTheFirstCommit)
+{
+  EXPECT_STREQ(scalenav_graph::committedRouteAcceptReason(false, "INITIAL_ACCEPT"),
+               "INITIAL_ACCEPT");
+  EXPECT_STREQ(scalenav_graph::committedRouteAcceptReason(true, "INITIAL_ACCEPT"),
+               "ROUTE_RECOVERED");
+  EXPECT_STREQ(scalenav_graph::committedRouteAcceptReason(true, "FRONTIER_PROGRESS"),
+               "FRONTIER_PROGRESS");
+}
+
+TEST(RouteMemory, FailedSemanticTailHopIsDroppedNotHeld)
+{
+  EXPECT_TRUE(scalenav_graph::shouldDropFailedHorizonHop(true, true));
+  EXPECT_FALSE(scalenav_graph::shouldDropFailedHorizonHop(true, false));
+  EXPECT_FALSE(scalenav_graph::shouldDropFailedHorizonHop(false, true));
+}
+
+TEST(RouteMemory, VerifiedPrefixGuidesUntilItIsExhausted)
+{
+  EXPECT_TRUE(scalenav_graph::verifiedPrefixCanGuideLocalGoal(12.0F, 0.75F));
+  EXPECT_TRUE(scalenav_graph::verifiedPrefixCanGuideLocalGoal(0.75F, 0.75F));
+  EXPECT_FALSE(scalenav_graph::verifiedPrefixCanGuideLocalGoal(0.74F, 0.75F));
+  EXPECT_FALSE(scalenav_graph::verifiedPrefixCanGuideLocalGoal(
+    std::numeric_limits<float>::quiet_NaN(), 0.75F));
+  EXPECT_TRUE(scalenav_graph::shouldExtendCommittedPrefix(true, 0.2F, 0.75F));
+  EXPECT_FALSE(scalenav_graph::shouldExtendCommittedPrefix(true, 12.0F, 0.75F));
+  EXPECT_FALSE(scalenav_graph::shouldExtendCommittedPrefix(false, 0.2F, 0.75F));
+}
+
+TEST(RouteMemory, ExhaustedPrefixCannotVetoAHorizonExtension)
+{
+  EXPECT_TRUE(scalenav_graph::shouldHoldIncumbentAgainstHorizonExtension(true, true));
+  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAgainstHorizonExtension(true, false));
+  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAgainstHorizonExtension(false, true));
 }
 
 }  // namespace

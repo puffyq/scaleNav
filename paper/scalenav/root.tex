@@ -155,6 +155,11 @@ circumnavigation, with no retraining or modification of the planner
 core.  In this division of labor, TopoGuide acts as a navigator that
 remembers and selects the route, while an interchangeable local
 planner executes only the next goal \cite{ving}.
+Figure~\ref{fig:teaser} shows one such decision: the semantic response
+marks the far block before depth returns a measurement, the learned
+policy selects the central branch, and the verified graph with its A*
+search commits a route that reaches the executor only as a moving local
+goal.
 
 Experiments on a 140-m course containing both dense small obstacles
 and a single 60-m-scale block show that three standalone executors,
@@ -299,6 +304,9 @@ model nor the local planner appears in its update.  $\Pi_{\mathrm{route}}$
 produces the accepted route $\mathcal{W}_t$ together with the frontier and
 local goals and, when enabled, a frontier index $\hat c_t$ from the learned
 policy; this index is a ranking hint, not a trajectory or safety decision.
+Figure~\ref{fig:system_architecture} summarizes the data flow: depth and
+odometry maintain the verified topology, RGB and text shape the route
+cost, and only the moving local goal crosses to the executor.
 Each executor consumes the local goal next to its usual sensing and
 odometry, with the goal expressed in the body frame.  The learned
 executor, for instance, receives
@@ -598,7 +606,7 @@ through a grove.
 Closed-loop and profiling trials are conducted in Unreal Engine 5.7 with
 Colosseum, an AirSim-compatible simulator \cite{airsim}, using synchronized
 RGB-D and odometry.  The semantic and GCN interface is additionally
-validated in two closed-loop real-world flights
+validated in closed-loop real-world flights
 (Fig.~\ref{fig:gcn_real_views}).  Unless noted otherwise, the primary experiments use a
 1.6-m planning layer and one-way mission from $(0,0,1.6)$ to
 $(0,140,1.6)$~m; neither the obstacle layout nor the nominal start and goal is
@@ -608,17 +616,19 @@ randomized across methods.
 \label{sec:protocol}
 \begin{figure*}[!t]
 \centering
-\safefig[width=0.90\textwidth]{pics/experiments/map2_0_140_1p6/figure4_integrated_topoguide.pdf}
+\safefig[width=0.99\textwidth]{pics/experiments/map2_0_140_1p6/figure4_integrated_topoguide.pdf}
 \vspace{-2pt}
-\caption{Integrated cross-executor evaluation.  The upper row overlays each
-standalone executor (blue, orange, or green) with its TopoGuide counterpart
-(red) on the same obstacle backdrop; upper-panel annotations report
-aggregate success.  The lower
-row shows the online route-layer wall-time profile for the corresponding guided
-run.  All curves are wall time in ms, binned over normalized mission time, and
-trace point processing, graph construction, the complete planning tick, and
-A* search latency.  Stars mark completed goals and crosses mark incomplete
-baseline flights.}
+\caption{Integrated cross-executor evaluation.  The first three columns overlay
+each standalone executor (blue, orange, or green) with its TopoGuide counterpart
+(red) on the same obstacle backdrop; the fourth column adds FAR Planner
+(purple).  The lower row uses shared normalized mission-time and wall-time
+axes, with identical ranges and ticks across all four panels:
+TopoGuide columns report incremental route-layer timing, while FAR reports its
+V-Graph update time and path-search time from the planner
+console trace.  Curves are binned medians; FAR's untimestamped resource
+messages are placed at the midpoint of adjacent timestamped planner messages
+within the recorded mission interval.  FAR success is based on two trials.
+Stars mark completed goals and crosses mark incomplete baseline flights.}
 \label{fig:integrated_results}
 \end{figure*}
 
@@ -628,7 +638,7 @@ baseline flights.}
 \safefig[width=0.24\columnwidth]{pics/0903_graph_semantic_frontier_building2.png}\hfill
 \safefig[width=0.24\columnwidth]{pics/0903_graph_semantic_frontier_forest1.png}\hfill
 \safefig[width=0.24\columnwidth]{pics/0903_graph_semantic_frontier_forest2.png}
-\caption{GCN-interface views from two closed-loop real-world flights.
+\caption{GCN-interface views from closed-loop real-world flights.
 Each panel preserves the real RGB frame and the PEARL
 heatmap; red marks the proposed frontier column and the green dashed
 arrow marks the mission-goal direction.}
@@ -670,10 +680,11 @@ online.  Matched language trials use the query ``blocks, wall.''
 
 \emph{Results.}  Figure~\ref{fig:integrated_results} combines representative trajectory
 overlays, closed-loop outcome rates, and online-resource time series.  Each
-upper panel overlays one standalone executor with its TopoGuide-guided
+of the first three upper panels overlays one standalone executor with its TopoGuide-guided
 counterpart in a common world frame.  The aligned lower panel reports the
 incremental route-layer wall time for that column's representative TopoGuide
-run.
+run.  The fourth column adds the FAR trajectory and its console-derived
+resource profile; these module timings are not a matched total-compute comparison.
 
 All three standalone configurations terminated without a successful mission,
 whereas
@@ -698,15 +709,43 @@ stall: TopoGuide (EGO) collided three times after 31.30, 83.41, and
 132.15~m of executed motion, spanning early, middle, and late portions of
 the mission, and TopoGuide (SUPER) collided once after 6.95~m.
 
+\emph{Global-planning references.}  As supplementary references on the same
+mission, FAR Planner \cite{farplanner} completes all its flights but with
+longer paths ($200.33$~m) and slower flights ($42.54$~s) than both
+TopoGuide stacks, while a coarse global A* on a low-resolution accumulated
+map never completes, timing out after $275$--$328$~m of motion; both
+references run without the semantic input.
+
 \emph{Online workload.}  The online search is restricted to a local working
 set even when the verified topology persists outside the current sensing
 window: retaining the explored backbone does not enlarge the planning tick.
 At
 approximately 500 nodes and 3,200 directed edges, GCN inference on an
 NVIDIA GeForce RTX 3090 adds 0.83~ms mean latency (0.60~ms at P50, 1.97~ms
-at P95).  The lower row of Fig.~\ref{fig:integrated_results} separates
+at P95).  The first three lower panels of Fig.~\ref{fig:integrated_results} separate
 these components and characterizes the incremental route layer, not
 total executor compute.
+
+\subsection{Obstacle-Scale Evaluation}
+\label{sec:scale_sweep}
+To separate the contribution of obstacle scale from the fixed layout, we
+repeat the mission on a single-block course with the block length varied
+from $5$~m to $100$~m, holding the start, goal, and planning layer fixed,
+and compare the standalone executor with the TopoGuide-guided stack at
+each scale (Fig.~\ref{fig:scale_sweep}).  The standalone executor remains
+competitive up to a 60-m block but pays a rapidly growing detour
+(234.2~m, 76.2~s), and fails outright at 100~m; TopoGuide's cost grows
+mildly and it completes every scale.
+
+\begin{figure}[t]
+\centering
+\safefig[width=0.76\columnwidth]{pics/experiments/scale_sweep.pdf}
+\caption{Obstacle-scale sweep on the single-block course.  The standalone
+executor's path length and flight time grow steeply with block length and
+it times out at 100~m; TopoGuide completes every scale with a mild cost
+increase.}
+\label{fig:scale_sweep}
+\end{figure}
 
 \subsection{Ablations and Policy Analysis}
 \label{sec:heuristic_eval}
@@ -717,34 +756,28 @@ semantic nodes, and semantic edge cost.  The resulting flight metrics are
 reported in Table~\ref{tab:closed_loop}.
 
 \begin{table}[t]
-\caption{Closed-loop outcomes on the dense-block mission (upper groups) and
-the volumetric grove mission (last group).  Semantic-off removes PEARL
-heatmaps, far-field nodes, and semantic edge cost; the frontier-policy
-group replaces only the ranking policy.  Continuous values are computed
-over successful flights; $L_{\rm obs}$ denotes the path observed before a
-failed flight.}
+\caption{Route-layer ablations on the dense-block mission.  Semantic-off
+removes PEARL heatmaps, far-field nodes, and semantic edge cost; the
+frontier-policy group replaces only the ranking policy.  Continuous values
+are computed over successful flights.}
 \label{tab:closed_loop}
 \centering
-\small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lccccccccc}
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{lccccc}
 \toprule
-Condition & Success (\%) & Collision (\%) & Timeout (\%) & Path (m) & Time (s) & Avg. speed (m/s) & Max. speed (m/s) & $L_{\rm obs}$ (m) & $z$ span (m) \\
+Condition & Succ. & Coll. & TO & Path (m) & Time (s) \\
 \midrule
-\multicolumn{10}{l}{\emph{Semantic ablation (YOPO, GCN)}}\\
-Matched query & 100 & 0 & 0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ & \blank & \blank \\
-Semantic disabled & 60 & 40 & 0 & $169.47\pm3.16$ & $32.34\pm2.70$ & $5.261\pm0.315$ & $6.404\pm0.158$ & $11.69\pm1.60$ & \blank \\
-Irrelevant query & 80 & 20 & 0 & $175.76\pm6.09$ & $35.02\pm1.65$ & $5.023\pm0.127$ & $6.398\pm0.274$ & $20.32\pm2.67$ & \blank \\
+\multicolumn{6}{l}{\emph{Semantic ablation}}\\
+Matched query & 100 & 0 & 0 & $171.6\pm6.6$ & $33.6\pm1.3$ \\
+Semantic off & 60 & 40 & 0 & $169.5\pm3.2$ & $32.3\pm2.7$ \\
+Irrelevant query & 80 & 20 & 0 & $175.8\pm6.1$ & $35.0\pm1.7$ \\
 \midrule
-\multicolumn{10}{l}{\emph{Frontier-policy ablation (YOPO, semantic on)}}\\
-Hand-designed & 88.9 & 11.1 & 0 & $199.14\pm14.12$ & $38.54\pm3.06$ & $5.172\pm0.097$ & $6.409\pm0.184$ & \blank & \blank \\
-GCN & 100.0 & 0.0 & 0.0 & $171.59\pm6.57$ & $33.61\pm1.25$ & $5.105\pm0.045$ & $6.254\pm0.138$ & \blank & \blank \\
-\midrule
-\multicolumn{10}{l}{\emph{Volumetric grove mission}}\\
-TopoGuide (GCN-3D) & 80 & 20 & 0 & $167.40\pm13.83$ & $36.98\pm5.30$ & $4.564\pm0.327$ & \blank & \blank & $2.225\pm0.477$ \\
+\multicolumn{6}{l}{\emph{Frontier-policy ablation}}\\
+Hand-designed & 88.9 & 11.1 & 0 & $199.1\pm14.1$ & $38.5\pm3.1$ \\
+GCN & 100.0 & 0.0 & 0.0 & $171.6\pm6.6$ & $33.6\pm1.3$ \\
 \bottomrule
 \end{tabular}
-}
 \end{table}
 
 Semantic influence changes the outcome rate without changing the geometric
@@ -778,7 +811,7 @@ the untouched test split, the deployed checkpoint obtains $89.3\%$ exact and
 $89.4\%$ macro accuracy; $99.4\%$ of predictions are within one adjacent
 direction column, with a mean absolute column error of $0.115$.  The
 hand-designed frontier policy matches $22.2\%$ of the strict 35-m labels.
-Figure~\ref{fig:gcn_real_views} shows the deployed interface in two
+Figure~\ref{fig:gcn_real_views} shows the deployed interface in
 closed-loop real-world flights: the PEARL heatmap, the selected GCN
 column, and the mission-goal direction are computed online on the real
 fisheye frames.
@@ -799,7 +832,7 @@ $0.05$ and the corridor disappears from the semantic stream
 
 \begin{figure}[!t]
 \centering
-\safefig[width=0.88\columnwidth]{pics/candidates/pearl_powerline_graph3d_candidate_v26.png}
+\safefig[width=0.80\columnwidth]{pics/candidates/pearl_powerline_graph3d_candidate_v26.png}
 \caption{Power-line mission and the resolution sensitivity of its semantic
 cue.  Top: the same RGB frame at $160{\times}96$ and at 1080p with the
 corresponding PEARL responses; the peak wire response rises from $0.054$ to
@@ -808,8 +841,9 @@ its polynomial fit (orange dashed), and the ground-truth voxels.}
 \label{fig:powerline3d}
 \end{figure}
 
-TopoGuide completes $80\%$ of the trials without timeout
-(Table~\ref{tab:closed_loop}).  Every successful
+TopoGuide completes $80\%$ of the trials without timeout,
+with a mean path of $167.40\pm13.83$~m and a mean flight time of
+$36.98\pm5.30$~s.  Every successful
 flight changes altitude substantially: the per-flight vertical span ranges
 from 1.731 to 2.934~m.  The shortest successful route is 149.203~m in
 30.934~s and spans 1.808~m vertically.  The two failures are early collisions

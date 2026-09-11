@@ -26,6 +26,7 @@ START_SCRIPT = WS / "scripts" / "start.sh"
 GCN_SCRIPT = WS / "scripts" / "start_gcn_online.sh"
 ROUTE_YOPO_SCRIPT = WS / "scripts" / "start_route_yopo.sh"
 YOPO_SIMPLE_SCRIPT = WS / "scripts" / "start_yopo_simple_control.sh"
+COARSE_ASTAR_SCRIPT = WS / "scripts" / "start_coarse_astar.sh"
 SCALENAV_EGO_SCRIPT = WS / "scripts" / "start_scalenav_ego.sh"
 SCALENAV_SUPER_SCRIPT = WS / "scripts" / "start_scalenav_super.sh"
 BASELINE_ROOT = PROJECT_ROOT / "bc" / "third_party" / "compare"
@@ -33,6 +34,7 @@ BASELINE_SCRIPTS = {
     "ego": BASELINE_ROOT / "run_ego_map2.sh",
     "super": BASELINE_ROOT / "run_super_map2.sh",
 }
+FAR_SCRIPT = BASELINE_ROOT / "run_far_map2.sh"
 COMBINED_SCRIPTS = {
     "scalenav_ego": SCALENAV_EGO_SCRIPT,
     "scalenav_super": SCALENAV_SUPER_SCRIPT,
@@ -88,8 +90,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stack",
         choices=(
-            "scalenav", "gcn", "yopo_simple", "route_yopo", "ego", "super",
-            "scalenav_ego", "scalenav_super",
+            "scalenav", "gcn", "yopo_simple", "route_yopo", "coarse_astar",
+            "ego", "super", "scalenav_ego", "scalenav_super", "far",
         ),
         default="scalenav",
         help="planner stack to launch for each isolated trial (default: scalenav)",
@@ -140,7 +142,7 @@ def parse_args() -> argparse.Namespace:
     # argparse applies ``type`` only to values supplied on the command line;
     # defaults are kept as-is.  ROS2 geometry messages require native Python
     # floats, so an integer default here fails when publishing the goal.
-    parser.add_argument("--goal-y", type=float, default=190.0)
+    parser.add_argument("--goal-y", type=float, default=140.0)
     parser.add_argument("--goal-z", type=float, default=1.6)
     parser.add_argument("--start-x", type=float, default=0.0)
     parser.add_argument("--start-y", type=float, default=0.0)
@@ -273,6 +275,7 @@ def conflicting_processes() -> list[tuple[int, str]]:
         "online_planner_ros2.py",
         "gcn_frontier_policy_ros2.py",
         "scalenav_graph_node",
+        "coarse_grid_astar_node",
         "ego_planner_node",
         "traj_server",
         "fsm_node",
@@ -301,8 +304,12 @@ def validate_environment(args: argparse.Namespace) -> None:
         launcher = YOPO_SIMPLE_SCRIPT
     elif args.stack == "route_yopo":
         launcher = ROUTE_YOPO_SCRIPT
+    elif args.stack == "coarse_astar":
+        launcher = COARSE_ASTAR_SCRIPT
     elif args.stack in COMBINED_SCRIPTS:
         launcher = COMBINED_SCRIPTS[args.stack]
+    elif args.stack == "far":
+        launcher = FAR_SCRIPT
     else:
         launcher = BASELINE_SCRIPTS[args.stack]
     if not launcher.is_file():
@@ -392,18 +399,21 @@ def newest_new_session(log_root: Path, previous: set[Path]) -> str:
 def start_stack(
     args: argparse.Namespace, console_path: Path
 ) -> tuple[subprocess.Popen[str], Any]:
-    if args.stack in {"scalenav", "gcn", "yopo_simple", "route_yopo"}:
+    if args.stack in {"scalenav", "gcn", "yopo_simple", "route_yopo", "coarse_astar"}:
         launcher = {
             "scalenav": START_SCRIPT,
             "gcn": GCN_SCRIPT,
             "yopo_simple": YOPO_SIMPLE_SCRIPT,
             "route_yopo": ROUTE_YOPO_SCRIPT,
+            "coarse_astar": COARSE_ASTAR_SCRIPT,
         }[args.stack]
         command = [str(launcher)]
         if args.no_semantic and args.stack in {"scalenav", "route_yopo"}:
             command.append("--no-semantic")
     elif args.stack in COMBINED_SCRIPTS:
         command = [str(COMBINED_SCRIPTS[args.stack])]
+    elif args.stack == "far":
+        command = [str(FAR_SCRIPT)]
     else:
         command = [
             "bash",
@@ -509,8 +519,8 @@ class MissionMonitor:
         self.collision: bool | None = None
         self.collision_received_at = 0.0
         self.goal_topic = "/goal_pose" if args.stack in {
-            "scalenav", "gcn", "yopo_simple", "route_yopo",
-            "scalenav_ego", "scalenav_super",
+            "scalenav", "gcn", "yopo_simple", "route_yopo", "coarse_astar",
+            "scalenav_ego", "scalenav_super", "far",
         } else "/move_base_simple/goal"
         # Every benchmark launch has one planner and one structured logger on
         # the goal topic. Waiting for both prevents the logger from accepting a

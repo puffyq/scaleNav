@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Build the integrated Fig. 4: route overlays, outcomes, and resources."""
+"""Build the integrated trajectory and mean-speed comparison, including FAR."""
 
 from __future__ import annotations
 
 import importlib.util
-import json
 import math
 from pathlib import Path
 
@@ -17,6 +16,7 @@ REPO_ROOT = HERE.parents[1]
 PLOT_IMPL = HERE / "plot_speed_trajectories.py"
 TRUTH_MAP = HERE / "pics/map2_ground_truth_airsim_20260904.ply"
 OUT = HERE / "pics/experiments/map2_0_140_1p6/figure4_integrated_topoguide"
+FAR_SESSION = REPO_ROOT / "log_scalenav/session_20260910_212024_960/index.jsonl"
 
 
 RUNS = {
@@ -55,8 +55,12 @@ def load_impl():
 
 def plot_overlay(ax, impl, label, baseline_path, ours_path, baseline_color):
     goal = np.array([0.0, 140.0, 1.6])
-    baseline = impl.load_flight(baseline_path, goal, 0.5, 0.3, require_goal=False)
-    ours = impl.load_flight(ours_path, goal, 0.5, 0.3, require_goal=True)
+    baseline = impl.load_flight(
+        baseline_path, goal, 0.5, 0.3, require_goal=False, return_timestamps=True,
+    )
+    ours = impl.load_flight(
+        ours_path, goal, 0.5, 0.3, require_goal=True, return_timestamps=True,
+    )
     image, bounds, _, _ = impl.load_truth_voxel_map(TRUTH_MAP, 0.15)
     impl.draw_voxels(ax, impl.fill_voxel_footprints(image), bounds)
 
@@ -85,111 +89,110 @@ def plot_overlay(ax, impl, label, baseline_path, ours_path, baseline_color):
     ax.set_ylim(-35, 35)
     ax.set_aspect(1.25, adjustable="box")
     ax.grid(True, color="#d9dde1", linewidth=0.45, alpha=0.8)
+    return baseline, ours
 
 
-def load_resource_samples(path):
-    records = []
-    mission_start = None
-    mission_end = None
-    with path.open(encoding="utf-8") as stream:
-        for line in stream:
-            line = (line.replace(":-inf", ":-Infinity")
-                    .replace(":inf", ":Infinity")
-                    .replace(":nan", ":NaN"))
-            event = json.loads(line, parse_constant=lambda value: float(value))
-            stamp = int(event.get("stamp_ns", 0))
-            if event.get("kind") == "mission":
-                mission_event = (event.get("data") or {}).get("event")
-                if mission_event == "start" and mission_start is None:
-                    mission_start = stamp
-                elif mission_event == "complete":
-                    mission_end = stamp
-            elif event.get("kind") == "timing":
-                records.append((stamp, event.get("data") or {}))
-    if mission_start is None:
-        mission_start = min(stamp for stamp, _ in records)
-    if mission_end is None:
-        mission_end = max(stamp for stamp, _ in records)
-    duration = max(1, mission_end - mission_start)
-    return [
-        (100.0 * (stamp - mission_start) / duration, data)
-        for stamp, data in records
-        if mission_start <= stamp <= mission_end
-    ]
+def plot_far(ax, impl):
+    goal = np.array([0.0, 140.0, 1.6])
+    flight = impl.load_flight(
+        FAR_SESSION, goal, 0.5, 0.3, require_goal=True, return_timestamps=True,
+    )
+    image, bounds, _, _ = impl.load_truth_voxel_map(TRUTH_MAP, 0.15)
+    impl.draw_voxels(ax, impl.fill_voxel_footprints(image), bounds)
+    points = np.column_stack((flight[0][:, 1], flight[0][:, 0]))
+    ax.plot(points[:, 0], points[:, 1], color="#7a5195", linewidth=1.9, zorder=3)
+    ax.scatter(points[0, 0], points[0, 1], s=18, c="#202124", zorder=4)
+    ax.scatter(points[-1, 0], points[-1, 1], marker="*", s=52,
+               c="#7a5195", edgecolors="white", linewidths=0.5, zorder=5)
+    ax.set_title("FAR Planner\nsuccess 100%", fontsize=8.2,
+                 fontweight="semibold", pad=3)
+    ax.set_xlabel("Mission progress $y$ (m)")
+    ax.set_ylabel("")
+    ax.tick_params(axis="y", labelleft=False)
+    ax.set_xlim(-8, 150)
+    ax.set_ylim(-35, 35)
+    ax.set_aspect(1.25, adjustable="box")
+    ax.grid(True, color="#d9dde1", linewidth=0.45, alpha=0.8)
+    return flight
 
 
-def binned_median(records, module, key, positive=False, bins=20):
+def binned_mean_speed(flight, bins=20):
+    speeds = np.asarray(flight[1], dtype=float)
+    timestamps = np.asarray(flight[4], dtype=np.int64)
+    if len(timestamps) < 2 or speeds.shape != timestamps.shape:
+        raise ValueError("Expected matching speed and timestamp arrays with at least two samples")
+    elapsed = (timestamps - timestamps[0]) / 1e9
+    if np.any(np.diff(elapsed) <= 0) or not np.isfinite(speeds).all() or np.any(speeds < 0):
+        raise ValueError("Expected increasing timestamps and finite nonnegative speeds")
+    time_pct = 100.0 * elapsed / elapsed[-1]
     edges = np.linspace(0.0, 100.0, bins + 1)
     centers = 0.5 * (edges[:-1] + edges[1:])
-    buckets = [[] for _ in range(bins)]
-    for time_pct, data in records:
-        if data.get("module") != module:
-            continue
-        value = data.get(key)
-        if not isinstance(value, (int, float)) or not math.isfinite(value):
-            continue
-        if positive and value <= 0:
-            continue
-        index = min(bins - 1, max(0, int(time_pct / 100.0 * bins)))
-        buckets[index].append(float(value))
-    medians = np.array([
-        np.median(values) if values else np.nan for values in buckets
-    ])
-    return centers, medians
+    indices = np.minimum(bins - 1, np.searchsorted(edges, time_pct, side="right") - 1)
+    counts = np.bincount(indices, minlength=bins)
+    totals = np.bincount(indices, weights=speeds, minlength=bins)
+    means = np.full(bins, np.nan)
+    np.divide(totals, counts, out=means, where=counts > 0)
+    return centers, means, float(elapsed[-1])
 
 
-def resource_panel(ax, label, path, show_left_label=False, show_right_label=False):
-    records = load_resource_samples(path)
-    timing_specs = (
-        ("Point", "cloud", "total_ms", "#2a9d72", "-."),
-        ("Graph", "background", "total_ms", "#6b4c9a", "--"),
-        ("Plan tick", "planner", "total_ms", "#202124", "-"),
-        ("A* time", "planner", "astar_ms", "#e07a22", ":"),
-    )
-    handles = []
-    for name, module, key, color, style in timing_specs:
-        x, y = binned_median(records, module, key)
-        line, = ax.plot(x, y, label=name, color=color, linestyle=style,
-                        linewidth=1.5, alpha=0.95)
-        handles.append(line)
-    ax.set_title(f"{label}: route-layer workload", fontsize=8.5,
-                 fontweight="semibold", pad=3)
-    ax.set_xlim(0, 100)
-    ax.set_ylim(bottom=0)
-    ax.set_xlabel("Normalized mission time (%)")
-    ax.set_ylabel("Wall time (ms)" if show_left_label else "")
-    if not show_left_label:
-        ax.tick_params(axis="y", labelleft=False)
-    ax.grid(True, color="#d9dde1", linewidth=0.45, alpha=0.8)
-    ax.legend(handles=handles, labels=[line.get_label() for line in handles],
-              fontsize=5.5, ncol=3, frameon=False, loc="upper left",
-              handlelength=2.0, columnspacing=0.65)
+def speed_panel(axis, label, curves):
+    for name, flight, color in curves:
+        centers, means, duration = binned_mean_speed(flight)
+        axis.plot(centers, means, color=color, linewidth=1.6,
+                  label=f"{name} ({duration:.1f} s)")
+    axis.set_title(f"{label}: mean speed", fontsize=8.5,
+                   fontweight="semibold", pad=3)
+    axis.legend(fontsize=5.8, ncol=1, frameon=False, loc="upper left",
+                handlelength=2.0)
 
 
 def main():
     impl = load_impl()
     plt.rcParams.update({"font.size": 7.2, "font.family": "DejaVu Sans"})
-    fig = plt.figure(figsize=(10.7, 5.25))
+    fig = plt.figure(figsize=(13.8, 5.25))
     left, right, gap = 0.045, 0.985, 0.055
-    width = (right - left - 2.0 * gap) / 3.0
+    width = (right - left - 3.0 * gap) / 4.0
     top_y, top_h = 0.59, 0.34
     bottom_y, bottom_h = 0.225, 0.28
 
     top_axes = [
         fig.add_axes([left + i * (width + gap), top_y, width, top_h])
-        for i in range(3)
+        for i in range(4)
     ]
+    comparisons = []
     for ax, (label, (base, ours, color)) in zip(top_axes, RUNS.items()):
-        plot_overlay(ax, impl, label, base, ours, color)
+        baseline_flight, guided_flight = plot_overlay(ax, impl, label, base, ours, color)
+        comparisons.append((label, [
+            ("Standalone", baseline_flight, color),
+            ("TopoGuide", guided_flight, "#d62828"),
+        ]))
+    far_flight = plot_far(top_axes[-1], impl)
+    comparisons.append(("FAR Planner", [("FAR", far_flight, "#7a5195")]))
 
-    for index, (label, (_, ours, _)) in enumerate(RUNS.items()):
-        resource_panel(
-            fig.add_axes([
-                left + index * (width + gap), bottom_y, width, bottom_h
-            ]),
-            label, ours,
-            show_left_label=index == 0,
+    speed_axes = []
+    for index in range(4):
+        axis = fig.add_axes(
+            [left + index * (width + gap), bottom_y, width, bottom_h],
+            sharex=speed_axes[0] if speed_axes else None,
+            sharey=speed_axes[0] if speed_axes else None,
         )
+        speed_axes.append(axis)
+    for axis, (label, curves) in zip(speed_axes, comparisons):
+        speed_panel(axis, label, curves)
+    peak_speed = max(
+        float(np.nanmax(line.get_ydata()))
+        for axis in speed_axes for line in axis.lines
+        if np.isfinite(line.get_ydata()).any()
+    )
+    upper_speed = max(1.0, float(math.ceil(1.15 * peak_speed)))
+    for index, axis in enumerate(speed_axes):
+        axis.set_xlim(0, 100)
+        axis.set_xticks(np.arange(0, 101, 20))
+        axis.set_ylim(0, upper_speed)
+        axis.set_yticks(np.arange(0, upper_speed + 1, 1))
+        axis.set_xlabel("Normalized flight time (%)")
+        axis.set_ylabel("Mean speed (m/s)" if index == 0 else "")
+        axis.grid(True, color="#d9dde1", linewidth=0.45, alpha=0.8)
     for suffix in (".png", ".pdf"):
         fig.savefig(OUT.with_suffix(suffix), dpi=300, bbox_inches="tight")
     print(f"wrote {OUT}.png and {OUT}.pdf")

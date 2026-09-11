@@ -37,6 +37,36 @@ the runner accepts the start only after pose, speed, and heading stabilize.
 | `closed_loop/scalenav_ego_20260904_110038` | `run_20260904_110038_2376695` | ScaleNav semantic route layer with EGO execution | 9 collision, 1 timeout |
 | `closed_loop/scalenav_super_20260904_110656` | `run_20260904_110656_2391835` | ScaleNav semantic route layer with SUPER execution | 5 success, 4 collision, 1 timeout |
 
+### Backup experiments (excluded from main tables)
+
+| Directory | Source run | Condition | Outcomes |
+| --- | --- | --- | --- |
+| `closed_loop/gcn_no_semantic_20260911_094902` | `run_20260911_094902_2114755` | Map2 fixed-altitude GCN, semantic disabled (`semantic=false`, `pearl=0`); two-trial backup batch | 2 success |
+| `closed_loop/scalenav_no_semantic_20260911_095047` | `run_20260911_095047_2118305` | Map2 fixed-altitude ScaleNav, semantic disabled (`semantic=false`, launch `semantic=0`); two-trial backup batch | 2 success |
+| `closed_loop/gcn_semantic_no_persistent_map_20260911_101214` | `run_20260911_101214_2140124` | Map2 GCN with semantics; without full-history map persistence (user-labeled); two-trial backup batch | 2 success |
+| `closed_loop/gcn_semantic_persistent_map_20260911_101453` | `run_20260911_101453_2144759` | Map2 GCN with semantics; full-history map persistence (user-provided console: `persist_map=true`, radius 1000 m); two-trial backup batch | 2 success |
+
+These backup batches are not included in `aggregate_metrics.csv` or the main
+paper tables and do not replace the existing ten-trial main or ablation
+batches. Each backup directory includes a README, aggregate metrics, and
+per-trial JSON records in addition to the files listed below.
+
+The September 11 GCN memory comparison has semantics enabled in both batches
+(`semantic=true`, `pearl=1`, prompt `blocks, walls, box`). Memory-condition
+labels come from the user's experiment annotation and, for the persistent
+batch, the supplied launcher console output; the saved `config.json` files
+do not record map-persistence parameters. Without full-history persistence
+does not mean all graph, route, or semantic memory is disabled.
+
+| Memory condition | Success | Duration (s) | Path (m) | Path efficiency (%) |
+| --- | ---: | ---: | ---: | ---: |
+| Without full-history persistence | 2/2 | 34.387 +/- 0.403 | 178.918 +/- 0.775 | 78.249 +/- 0.339 |
+| With full-history persistence | 2/2 | 33.253 +/- 0.902 | 171.448 +/- 5.670 | 81.702 +/- 2.702 |
+
+Values are mean +/- sample standard deviation over successful trials. These
+two-trial batches are descriptive backup results, not evidence of a
+statistically established performance improvement.
+
 Each directory contains:
 
 - `summary.csv`: one row per trial, copied from the automated test output.

@@ -10,8 +10,6 @@ PROJECT_ROOT="$(cd -- "$WS/.." && pwd)"
 # --count value passed after the defaults still takes precedence.
 TRIAL_COUNT="${TRIAL_COUNT:-10}"
 SEMANTIC_INFLUENCE="${SEMANTIC_INFLUENCE:-1}"
-# This entry point exercises the online GCN stack by default. Set STACK=scalenav
-# to run the original non-GCN planner for comparison.
 STACK="${STACK:-gcn}"
 GCN_MODEL="${GCN_2D_MODEL:-$PROJECT_ROOT/train_gcn/frontier_gcn_map2_35m.pt}"
 START_Z="${START_Z_2D:-1.6}"
@@ -19,6 +17,21 @@ GOAL_Z="${GOAL_Z_2D:-1.6}"
 PROMPT="${PROMPT_2D:-blocks, walls, box}"
 GRAPH_FIXED_LAYER=true
 FIXED_ALTITUDE=true
+PERSIST_ROUTE_LAYER="${PERSIST_ROUTE_LAYER:-false}"
+if [[ -z "$PERSIST_ROUTE_LAYER" ]]; then
+  if [[ "${LOCAL_SLIDING_GRAPH:-false}" == "true" ]]; then
+    PERSIST_ROUTE_LAYER=false
+  else
+    PERSIST_ROUTE_LAYER=true
+  fi
+fi
+case "$PERSIST_ROUTE_LAYER" in
+  true) export LOCAL_SLIDING_GRAPH=false ;;
+  false) export LOCAL_SLIDING_GRAPH=true ;;
+  *) echo "PERSIST_ROUTE_LAYER must be true or false" >&2; exit 2 ;;
+esac
+export MAP_HISTORY_RADIUS_M="${MAP_HISTORY_RADIUS_M:-40.0}"
+export LOCAL_SLIDING_GRAPH_RADIUS_M="${LOCAL_SLIDING_GRAPH_RADIUS_M:-$MAP_HISTORY_RADIUS_M}"
 
 if [[ "$SEMANTIC_INFLUENCE" != "0" && "$SEMANTIC_INFLUENCE" != "1" ]]; then
   echo "SEMANTIC_INFLUENCE must be 0 or 1" >&2
@@ -56,6 +69,6 @@ fi
 if [[ "$STACK" == "gcn" ]]; then
   echo "2D Map2 GCN model: $GCN_MODEL"
 fi
-echo "2D mission: start=(0,0,$START_Z) goal=(0,140,$GOAL_Z) graph_fixed_layer=true fixed_altitude=true"
+echo "2D mission: stack=$STACK start=(0,0,$START_Z) goal=(0,140,$GOAL_Z) graph_fixed_layer=true fixed_altitude=true persist_route_layer=$PERSIST_ROUTE_LAYER map_history_radius=$MAP_HISTORY_RADIUS_M local_sliding_graph=$LOCAL_SLIDING_GRAPH"
 
 exec /usr/bin/python3 "$SCRIPT_DIR/run_repeated_test.py" "${RUN_ARGS[@]}" "$@"

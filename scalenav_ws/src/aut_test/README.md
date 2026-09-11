@@ -41,8 +41,13 @@ Run continuously until stopped with `Ctrl-C` (each valid flight is reset and
 recorded in the continuously updated batch summary):
 
 ```bash
-bash scalenav_ws/src/aut_test/run_0_140_continuous.sh
+bash scalenav_ws/src/aut_test/run_0_140_continuous.sh --count 2
 ```
+
+It defaults to the real-time coarse 3D occupancy A* baseline: a rolling
+20 m window of 0.5 m voxels, replanned every tick from live depth. This is
+a volumetric search, not a 2D altitude slice and not an offline global
+map. Use `STACK=scalenav` or `STACK=gcn` for topology stacks.
 
 Pass the same runner options as the finite test, for example
 `--timeout 90 --cooldown 3` or `--prompt 'blocks, wall'`.

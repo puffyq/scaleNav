@@ -76,6 +76,9 @@ if [[ "$GCN_SEMANTIC" == "1" ]]; then
 fi
 run ros2 launch scalenav_graph_ros2 scalenav_graph.launch.py \
   graph_fixed_layer:="$GRAPH_FIXED_LAYER" \
+  local_sliding_graph:="${LOCAL_SLIDING_GRAPH:-false}" \
+  local_sliding_graph_radius_m:="${LOCAL_SLIDING_GRAPH_RADIUS_M:-40.0}" \
+  map_history_radius_m:="${MAP_HISTORY_RADIUS_M:-40.0}" \
   goal_topic:=/goal_pose next_goal_topic:=/scalenav/local_goal \
   next_goal_frame:=world_enu visualization_frame:=world_enu \
   odom_twist_frame:=body wait_for_initial_semantic:=$( [[ "$GCN_SEMANTIC" == "1" ]] && echo true || echo false ) \

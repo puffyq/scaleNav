@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <string_view>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -844,15 +845,88 @@ inline bool semanticRouteResetRequested(bool enabled, float before, float after,
 
 // A newly searched route is provisional until its exact execution witness has
 // passed validation. Failure of that provisional route is not evidence that a
-// separately validated incumbent became unsafe.
+// separately validated incumbent became unsafe. A committed witness therefore
+// stays the incumbent even if the rolling graph currently looks unreachable
+// or a previous tick asked for a forced replan.
 inline bool shouldHoldIncumbentAfterCandidateFailure(
     bool candidate_selected, bool candidate_witness_valid,
     bool incumbent_available, bool incumbent_reachable,
     bool incumbent_topology_executable, bool incumbent_forced_replan)
 {
-  return candidate_selected && !candidate_witness_valid &&
-         incumbent_available && incumbent_reachable &&
-         incumbent_topology_executable && !incumbent_forced_replan;
+  (void)incumbent_reachable;
+  (void)incumbent_topology_executable;
+  (void)incumbent_forced_replan;
+  return candidate_selected && !candidate_witness_valid && incumbent_available;
+}
+
+// Rolling-graph neighbor loss is not a corridor change. A committed
+// geometric witness with at least two points should keep executing.
+inline bool shouldHoldCommittedWitnessWhenGraphUnreachable(
+    bool accepted_valid, std::size_t witness_points)
+{
+  return accepted_valid && witness_points >= 2;
+}
+
+// Shortcut chords are execution geometry. A live collision on a chord must
+// drop the chord and restart the two-frame latch on the A* polyline; it must
+// not count as corridor death.
+inline bool shouldIgnoreShortcutPredictionFailure(
+    bool has_shortcut_geometry, bool prediction_unsafe)
+{
+  return has_shortcut_geometry && prediction_unsafe;
+}
+
+// Ordinary-semantic last hops and missing backbone neighbors are graph
+// flicker, not a free-space corridor change. Keep the committed polyline.
+inline bool shouldHoldCommittedRouteOnGraphFlicker(
+    bool accepted_valid, std::size_t witness_points)
+{
+  return shouldHoldCommittedWitnessWhenGraphUnreachable(
+    accepted_valid, witness_points);
+}
+
+// INITIAL_ACCEPT is only legal before this mission has committed a route.
+inline const char *committedRouteAcceptReason(
+    bool mission_has_committed_route, const char *reason)
+{
+  if (mission_has_committed_route && reason != nullptr &&
+      std::string_view(reason) == "INITIAL_ACCEPT") {
+    return "ROUTE_RECOVERED";
+  }
+  return reason;
+}
+
+// A virtual-semantic last hop is a horizon token, not corridor identity.
+// Dropping a failed tail hop is not a corridor switch.
+inline bool shouldDropFailedHorizonHop(
+    bool failed_edge_is_ordinary_semantic, bool failed_hop_is_path_tail)
+{
+  return failed_edge_is_ordinary_semantic && failed_hop_is_path_tail;
+}
+
+// Local-goal lookahead can keep rolling while the verified prefix still
+// has a usable forward remainder. Exhaustion is measured against the
+// minimum subgoal advance, not against a dead semantic hop.
+inline bool verifiedPrefixCanGuideLocalGoal(
+    float remaining_m, float minimum_advance_m)
+{
+  return std::isfinite(remaining_m) &&
+         remaining_m >= std::max(0.0F, minimum_advance_m);
+}
+
+inline bool shouldExtendCommittedPrefix(
+    bool accepted_valid, float remaining_m, float minimum_advance_m)
+{
+  return accepted_valid &&
+         !verifiedPrefixCanGuideLocalGoal(remaining_m, minimum_advance_m);
+}
+
+// An exhausted prefix must not veto a horizon extension merely because the
+// dead-end incumbent still looks cheaper in the objective.
+inline bool shouldHoldIncumbentAgainstHorizonExtension(
+    bool prefix_can_guide, bool candidate_not_better)
+{
+  return prefix_can_guide && candidate_not_better;
 }
 
 inline bool consecutiveUnsafeRouteRequiresReplan(

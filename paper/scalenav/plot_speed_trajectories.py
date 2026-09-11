@@ -127,7 +127,9 @@ def load_flight(
     goal_radius: float,
     stop_speed: float,
     require_goal: bool = True,
+    return_timestamps: bool = False,
 ):
+    """Load the plotted flight interval, optionally appending odometry timestamps."""
     samples = []
     mission_start_ns = None
     mission_end_ns = None
@@ -231,7 +233,11 @@ def load_flight(
             samples[start:end], key=lambda sample: abs(sample[0] - collision_ns)
         )
         collision_position = collision_sample[1]
-    return positions, speeds, completed, collision_position
+    result = (positions, speeds, completed, collision_position)
+    if return_timestamps:
+        timestamps = np.asarray([sample[0] for sample in samples[start:end]], dtype=np.int64)
+        return (*result, timestamps)
+    return result
 
 
 def dilate_voxels(image: np.ndarray, radius_cells: int) -> np.ndarray:
