@@ -1,0 +1,32 @@
+{
+  "source": "Unreal collision scene box-overlap truth",
+  "level": "/Game/FlyingCPP/Maps/FlyingExampleMapV4",
+  "frame": "world_enu",
+  "player_start_location_ue_cm": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "player_start_yaw_deg": 180.0,
+  "resolution_m": 0.25,
+  "bounds_enu_m": {
+    "x": [
+      -50.0,
+      50.0
+    ],
+    "y": [
+      -10.0,
+      150.0
+    ],
+    "z": [
+      0.6,
+      2.6
+    ]
+  },
+  "dimensions_xy": [
+    400,
+    640
+  ],
+  "occupied_cells": 36,
+  "ply": "/mnt/code/lab/yopo/OpenSeek/paper/scalenav/pics/map4_collision_truth_20260906.ply"
+}

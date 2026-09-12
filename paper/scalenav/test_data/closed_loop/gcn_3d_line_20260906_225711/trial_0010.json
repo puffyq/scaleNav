@@ -1,0 +1,35 @@
+{
+  "outcome": "collision",
+  "detail": "/sim/collision became true",
+  "duration_s": 4.56080233800003,
+  "path_m": 10.018898755941876,
+  "average_speed_mps": 2.196740400798709,
+  "max_speed_mps": 6.642354162023435,
+  "final_x": 0.9104001404994426,
+  "final_y": 9.64092516960883,
+  "final_z": 1.9823905118579994,
+  "final_error_m": 130.37108712291175,
+  "final_speed_mps": 6.616194764093066,
+  "odom_samples": 480,
+  "collision": true,
+  "trial": 10,
+  "started_at": "2026-09-06T23:03:40.079+08:00",
+  "ended_at": "2026-09-06T23:03:51.410+08:00",
+  "goal": [
+    0.0,
+    140.0,
+    3.5
+  ],
+  "expected_start": [
+    0.0,
+    0.0,
+    3.5
+  ],
+  "position_tolerance_m": 0.5,
+  "speed_tolerance_mps": 0.3,
+  "timeout_s": 120.0,
+  "no_progress_timeout_s": 0.0,
+  "progress_distance_m": 0.5,
+  "session_dir": "/mnt/code/lab/yopo/OpenSeek/log_scalenav/session_20260906_230342_621",
+  "console_log": "/mnt/code/lab/yopo/OpenSeek/scalenav_ws/src/aut_test/results/run_20260906_225711_315755/trial_0010_stack.log"
+}

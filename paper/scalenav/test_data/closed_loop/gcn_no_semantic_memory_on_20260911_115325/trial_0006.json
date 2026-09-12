@@ -1,0 +1,35 @@
+{
+  "outcome": "success",
+  "detail": "goal position and settling-speed tolerances satisfied",
+  "duration_s": 31.86468897300074,
+  "path_m": 174.5659903713105,
+  "average_speed_mps": 5.478352244995141,
+  "max_speed_mps": 6.399432011898686,
+  "final_x": -0.015286370590257484,
+  "final_y": 140.05570480572067,
+  "final_z": 1.5974420352595924,
+  "final_error_m": 0.057820772130895745,
+  "final_speed_mps": 0.2905515001084681,
+  "odom_samples": 3570,
+  "collision": false,
+  "trial": 6,
+  "started_at": "2026-09-11T11:57:02.794+08:00",
+  "ended_at": "2026-09-11T11:57:40.936+08:00",
+  "goal": [
+    0.0,
+    140.0,
+    1.6
+  ],
+  "expected_start": [
+    0.0,
+    0.0,
+    1.6
+  ],
+  "position_tolerance_m": 0.5,
+  "speed_tolerance_mps": 0.3,
+  "timeout_s": 90.0,
+  "no_progress_timeout_s": 0.0,
+  "progress_distance_m": 0.5,
+  "session_dir": "/mnt/code/lab/yopo/OpenSeek/log_scalenav/session_20260911_115705_326",
+  "console_log": "/mnt/code/lab/yopo/OpenSeek/scalenav_ws/src/aut_test/results/run_20260911_115325_2220771/trial_0006_stack.log"
+}

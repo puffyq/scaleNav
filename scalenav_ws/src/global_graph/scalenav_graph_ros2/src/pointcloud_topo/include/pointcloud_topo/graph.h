@@ -1,0 +1,939 @@
+/***
+ * @Author: ning-zelin && zl.ning@qq.com
+ * @Date: 2023-12-02 16:33:15
+ * @LastEditTime: 2024-03-14 11:41:02
+ * @Description:
+ * @
+ * @Copyright (c) 2024 by ning-zelin, All Rights Reserved.
+ */
+
+#pragma once
+#include <Eigen/Eigen>
+#include <geometry_msgs/Point.h>
+#include <omp.h>
+#include <pcl/common/distances.h>
+
+#include <pcl/filters/voxel_grid.h>
+// #include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/io/pcd_io.h>
+
+#include <pcl/octree/octree.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl_ros/point_cloud.h>
+#include <pointcloud_topo/parallel_bubble_astar.h>
+#include <random>
+#include <algorithm>
+#include <cstdint>
+#include <cmath>
+#include <deque>
+#include <limits>
+#include <mutex>
+#include <vector>
+#include <ros/ros.h>
+#include <thread>
+#include <lidar_map/lidar_map.h>
+#include <unordered_map>
+#include <unordered_set>
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
+using namespace std;
+
+struct Vector3iHash {
+  std::size_t operator()(const Eigen::Vector3i &v) const {
+    std::size_t seed = 0;
+    for (int i = 0; i < 3; ++i) {
+      seed ^= std::hash<int>{}(v[i]) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    }
+    return seed;
+  }
+};
+
+struct Vector2iHash {
+  std::size_t operator()(const Eigen::Vector2i &v) const {
+    std::size_t seed = 0;
+    for (int i = 0; i < 2; ++i) {
+      seed ^= std::hash<int>{}(v[i]) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    }
+    return seed;
+  }
+};
+
+struct PairHash {
+  std::size_t operator()(const std::pair<Eigen::Vector3i, Eigen::Vector3i> &p) const {
+    std::size_t seed = 0;
+    seed ^= Vector3iHash{}(p.first) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    seed ^= Vector3iHash{}(p.second) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    return seed;
+  }
+};
+
+struct PairHashSet {
+  std::shared_timed_mutex hs_mtx;
+
+  void insert(const Eigen::Vector3i &v1, const Eigen::Vector3i &v2) {
+    std::unique_lock<std::shared_timed_mutex> lk(hs_mtx);
+    mySet.insert(std::make_pair(v1, v2));
+    mySet.insert(std::make_pair(v2, v1));
+    lk.unlock();
+  }
+
+  void remove(const Eigen::Vector3i &v1, const Eigen::Vector3i &v2) {
+    std::unique_lock<std::shared_timed_mutex> lk(hs_mtx);
+    mySet.erase(std::make_pair(v1, v2));
+    mySet.erase(std::make_pair(v2, v1));
+    lk.unlock();
+  }
+
+  bool check(const Eigen::Vector3i &v1, const Eigen::Vector3i &v2) {
+    std::shared_lock<std::shared_timed_mutex> lk(hs_mtx);
+    bool fail = mySet.find(std::make_pair(v1, v2)) == mySet.end();
+    lk.unlock();
+    if (fail) {
+      return false;
+    } else {
+      return true;
+    }
+  }
+
+  void reset() { mySet.clear(); }
+
+  // private:
+  std::unordered_set<std::pair<Eigen::Vector3i, Eigen::Vector3i>, PairHash> mySet;
+};
+
+class BubbleNode {
+public:
+  typedef std::shared_ptr<BubbleNode> Ptr;
+  BubbleNode(double radius, Eigen::Vector3f center);
+  double radius_;
+  int idx_;
+  Eigen::Vector3f center_;
+};
+
+enum class TopoNodeRole : std::uint8_t {
+  Geometric = 0,
+  Semantic = 1,
+  Odom = 2,
+};
+
+enum class TopoGeometryState : std::uint8_t {
+  Verified = 0,
+  Unknown = 1,
+};
+
+// A semantic point is a risk anchor only when the semantic evidence is
+// strong enough to overcome the heatmap/EMA noise floor.  Keep this predicate
+// shared by planning diagnostics and RViz so a tiny residual score is never
+// presented as a block risk.
+inline bool isSemanticRiskAnchor(
+    float score, float confidence, float minimum_score = 0.35F,
+    float minimum_confidence = 0.5F) {
+  return std::isfinite(score) && std::isfinite(confidence) &&
+         score >= minimum_score && confidence >= minimum_confidence;
+}
+
+// PEARL's per-pixel output is a similarity/probability map, not a calibrated
+// obstacle probability: an empty frame commonly has a non-zero background.
+// Subtract a frame background estimate and retain only positive contrast.
+inline float calibrateSemanticScore(float score, float frame_baseline) {
+  if (!std::isfinite(score) || !std::isfinite(frame_baseline)) return 0.0F;
+  // A forest-filled FOV has a high quantile "background" that is actually
+  // trees. Subtracting it zeros every patch (raw≈0.50, baseline≈0.50 → risk 0).
+  // Cap the floor so uniform high heatmaps remain high-risk.
+  constexpr float kMaxBackground = 0.25F;
+  const float background = std::clamp(frame_baseline, 0.0F, kMaxBackground);
+  const float denominator = std::max(1.0e-3F, 1.0F - background);
+  return std::clamp((score - background) / denominator, 0.0F, 1.0F);
+}
+
+// Patch scores are max-pooled, so their median is biased toward the most
+// salient pixels in every patch and is not a stable background estimate.
+// A lower quantile keeps ordinary patches as the reference while preserving
+// positive contrast for the few high-risk patches.
+inline float semanticFrameBaseline(std::vector<float> scores,
+                                   float quantile = 0.25F) {
+  if (scores.empty()) return 0.0F;
+  scores.erase(std::remove_if(scores.begin(), scores.end(),
+    [](float value) { return !std::isfinite(value); }), scores.end());
+  if (scores.empty()) return 0.0F;
+  const float q = std::clamp(quantile, 0.0F, 1.0F);
+  const std::size_t index = static_cast<std::size_t>(
+    std::floor(q * static_cast<float>(scores.size() - 1)));
+  auto middle = scores.begin() + static_cast<std::ptrdiff_t>(index);
+  std::nth_element(scores.begin(), middle, scores.end());
+  return std::clamp(*middle, 0.0F, 1.0F);
+}
+
+// Project synchronized camera depth using its optical-Z convention.
+inline Eigen::Vector3f semanticPointFluAtOpticalDepth(
+    float normalized_u, float normalized_v,
+    float horizontal_fov_deg, float vertical_fov_deg,
+    float depth_m, const Eigen::Vector3f &camera_translation) {
+  constexpr float kPi = 3.14159265358979323846F;
+  const float horizontal_tangent = std::tan(
+    std::clamp(horizontal_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
+  const float vertical_tangent = std::tan(
+    std::clamp(vertical_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
+  Eigen::Vector3f depth_ray(
+    1.0F,
+    -(2.0F * std::clamp(normalized_u, 0.0F, 1.0F) - 1.0F) * horizontal_tangent,
+    -(2.0F * std::clamp(normalized_v, 0.0F, 1.0F) - 1.0F) * vertical_tangent);
+  return camera_translation + std::max(0.0F, depth_m) * depth_ray;
+}
+
+inline Eigen::Vector3f virtualSemanticPointFlu(
+    float normalized_u, float normalized_v,
+    float horizontal_fov_deg, float vertical_fov_deg,
+    float distance_m, const Eigen::Vector3f &camera_translation) {
+  // Virtual alternatives use radial range instead: all five columns must be
+  // equally far from the camera or the outer columns can silently fall
+  // outside the local A* radius.
+  const Eigen::Vector3f optical_point = semanticPointFluAtOpticalDepth(
+    normalized_u, normalized_v, horizontal_fov_deg, vertical_fov_deg,
+    1.0F, Eigen::Vector3f::Zero());
+  const Eigen::Vector3f direction = optical_point.norm() > 1e-6F ?
+    optical_point.normalized() : Eigen::Vector3f::UnitX();
+  return camera_translation + std::max(0.0F, distance_m) * direction;
+}
+
+inline bool worldPointToSemanticImage(
+    const Eigen::Vector3f &point_world,
+    const Eigen::Vector3f &body_world,
+    const Eigen::Quaternionf &world_from_body,
+    const Eigen::Vector3f &camera_translation_flu,
+    float horizontal_fov_deg, float vertical_fov_deg,
+    float &normalized_u, float &normalized_v, float &optical_depth_m) {
+  const Eigen::Vector3f body_flu =
+    world_from_body.conjugate() * (point_world - body_world);
+  const Eigen::Vector3f cam = body_flu - camera_translation_flu;
+  optical_depth_m = cam.x();
+  if (!(optical_depth_m > 1e-4F) || !cam.allFinite()) return false;
+  constexpr float kPi = 3.14159265358979323846F;
+  const float horizontal_tangent = std::tan(
+    std::clamp(horizontal_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
+  const float vertical_tangent = std::tan(
+    std::clamp(vertical_fov_deg, 1.0F, 179.0F) * kPi / 360.0F);
+  if (horizontal_tangent <= 1e-6F || vertical_tangent <= 1e-6F) return false;
+  normalized_u = 0.5F - 0.5F * cam.y() / (optical_depth_m * horizontal_tangent);
+  normalized_v = 0.5F - 0.5F * cam.z() / (optical_depth_m * vertical_tangent);
+  return std::isfinite(normalized_u) && std::isfinite(normalized_v);
+}
+
+struct SemanticHeatmapAnnotation {
+  const float *heatmap = nullptr;
+  int width = 0;
+  int height = 0;
+  Eigen::Vector3f body_world = Eigen::Vector3f::Zero();
+  Eigen::Quaternionf world_from_body = Eigen::Quaternionf::Identity();
+  Eigen::Vector3f camera_translation_flu = Eigen::Vector3f(0.5F, 0.0F, -0.1F);
+  float horizontal_fov_deg = 90.0F;
+  float vertical_fov_deg = 60.0F;
+  float min_heatmap_score = 0.20F;
+  float min_radius_m = 1.0F;
+  float max_radius_m = 20.0F;
+  // Verified nodes are a ground-plane map in front of the camera. Project
+  // (x, y, ground_z) rather than the flight-layer z, otherwise a level
+  // camera collapses every node onto the horizon line.
+  float ground_z_m = 0.0F;
+};
+
+inline bool retainGeometryAfterMiss(
+    std::uint8_t miss_count, std::uint8_t grace = 2U) {
+  return miss_count <= grace;
+}
+
+class TopoNode {
+public:
+  typedef std::shared_ptr<TopoNode> Ptr;
+  std::uint64_t persistent_id_ = 0;
+  bool is_viewpoint_ = false;
+  bool is_history_odom_node_ = false;
+  // Accepted route geometry forms the reusable mission corridor. Local map
+  // misses may refresh its edges, but must not discard the anchor itself.
+  bool is_route_anchor_ = false;
+  TopoNodeRole role_ = TopoNodeRole::Geometric;
+  TopoGeometryState geometry_state_ = TopoGeometryState::Verified;
+  // A Bubble can be absent for one map snapshot while the ray-carved map and
+  // the topology update are catching up.  Keep a short miss count so one
+  // failed regeneration cannot make a persistent node disappear.
+  std::uint8_t geometry_miss_count_ = 0;
+  float yaw_;
+  Eigen::Vector3f center_;
+  // Radius of the representative real BubbleNode used to create this node.
+  // It is retained after the transient BubbleNode list is released so
+  // semantic association can distinguish tight corridors from open space.
+  float bubble_radius_ = 0.0F;
+  // Planning reads semantics directly from the persistent topology node.
+  float semantic_score_ = 0.0F;
+  float semantic_confidence_ = 0.0F;
+  // Latest patch evidence is kept separately from the bounded, time-decayed
+  // risk memory used by frontier ranking and route costs. This preserves the
+  // five-way frame ranking while allowing repeated observations to accumulate.
+  float semantic_risk_ = 0.0F;
+  std::int64_t semantic_risk_stamp_ns_ = 0;
+  std::uint32_t semantic_observations_ = 0;
+  std::int64_t semantic_stamp_ns_ = 0;
+  // True only for a fixed-depth projection created as one of the five
+  // semantic frontier alternatives. A measured depth projection is an
+  // annotation on ordinary geometry and must never become a frontier merely
+  // because its geometry is not currently Verified.
+  bool is_virtual_semantic_ = false;
+  // Heatmap-frame identity retained so the five horizontal rays from one
+  // observation can be compared as relative alternatives during frontier
+  // selection. A negative column denotes legacy data without this metadata.
+  std::int64_t semantic_frame_stamp_ns_ = 0;
+  std::int8_t semantic_column_ = -1;
+  // Prevent an edge detached by live obstacle validation from being
+  // reinserted repeatedly during the same semantic frame.
+  std::int64_t semantic_edges_attempted_stamp_ns_ = 0;
+  vector<BubbleNode::Ptr> bubbles_; // 过程量，计算出topoNode后会清空
+  unordered_set<TopoNode::Ptr> neighbors_;
+  unordered_map<TopoNode::Ptr, uint8_t> unreachable_nbrs_;
+  unordered_map<TopoNode::Ptr, vector<Eigen::Vector3f>> paths_;
+  unordered_map<TopoNode::Ptr, float> weight_;
+  // Minimum obstacle clearance along the edge witness, computed when the
+  // witness is built so route search does not query the live KD-tree.
+  unordered_map<TopoNode::Ptr, float> edge_clearance_;
+};
+
+// Measured depth can annotate a Verified backbone node with semantic evidence.
+// That does not turn the node into a provisional semantic endpoint: only an
+// Unknown fixed-depth projection has the direct ordinary-semantic edge
+// contract used by insertion, A*, and live route validation.
+inline bool isVirtualSemanticEndpoint(const TopoNode::Ptr &node) {
+  return node && node->is_virtual_semantic_ &&
+         node->geometry_state_ == TopoGeometryState::Unknown &&
+         node->semantic_observations_ > 0;
+}
+
+inline bool isOrdinaryBackboneEndpoint(const TopoNode::Ptr &node) {
+  return node && (node->role_ == TopoNodeRole::Odom ||
+                  node->geometry_state_ == TopoGeometryState::Verified);
+}
+
+inline bool isOrdinarySemanticLink(const TopoNode::Ptr &left,
+                                   const TopoNode::Ptr &right) {
+  return (isVirtualSemanticEndpoint(left) &&
+          isOrdinaryBackboneEndpoint(right)) ||
+         (isVirtualSemanticEndpoint(right) &&
+          isOrdinaryBackboneEndpoint(left));
+}
+
+inline bool hasExecutableTopologyEdge(const TopoNode::Ptr &from,
+                                      const TopoNode::Ptr &to) {
+  if (!from || !to || !from->neighbors_.count(to)) return false;
+  const auto forward_path = from->paths_.find(to);
+  const auto forward_weight = from->weight_.find(to);
+  return forward_path != from->paths_.end() && forward_path->second.size() >= 2 &&
+         forward_weight != from->weight_.end() && std::isfinite(forward_weight->second);
+}
+
+inline bool executionPathContainsShortcutChord(
+    const std::vector<TopoNode::Ptr> &topology_path,
+    const std::vector<TopoNode::Ptr> &execution_path) {
+  if (topology_path.size() < 2 || execution_path.size() < 2) return false;
+  std::size_t topology_cursor = 0;
+  std::size_t previous_index = 0;
+  bool have_previous = false;
+  for (const auto &execution_node : execution_path) {
+    const auto match = std::find(
+      topology_path.begin() + static_cast<std::ptrdiff_t>(topology_cursor),
+      topology_path.end(), execution_node);
+    if (match == topology_path.end()) return true;
+    const std::size_t index = static_cast<std::size_t>(
+      std::distance(topology_path.begin(), match));
+    if (have_previous && index > previous_index + 1) return true;
+    previous_index = index;
+    topology_cursor = index + 1;
+    have_previous = true;
+  }
+  return false;
+}
+
+struct AcceptedRouteConnectivity {
+  bool verified_prefix_reachable = false;
+  bool accepted_head_edge_usable = false;
+  bool accepted_stable_edges_usable = false;
+  bool has_terminal_unknown = false;
+  bool terminal_unknown_edge_usable = false;
+  std::size_t verified_nodes_visited = 0;
+  TopoNode::Ptr verified_anchor;
+
+  bool routeUsable() const {
+    // The accepted route is a progressing segment, not a requirement to keep
+    // the original odom-to-second-node edge attached forever.  The rolling
+    // odom vertex is reconnected as the vehicle moves, so that old head edge
+    // normally disappears even though the vehicle remains in the same
+    // Verified component.  Replanning on that transient pointer/edge change
+    // caused repeated left/right frontier switches.  Reachability to the
+    // accepted Verified anchor is the stable contract; an Unknown semantic
+    // endpoint still requires its live terminal edge.
+    return accepted_stable_edges_usable && verified_prefix_reachable &&
+           (!has_terminal_unknown || terminal_unknown_edge_usable);
+  }
+};
+
+// An Unknown semantic node is allowed only as the final frontier. It may be a
+// provisional execution target, but it must never bridge two disconnected
+// Verified components when an accepted route is checked from the current odom.
+inline AcceptedRouteConnectivity acceptedRouteConnectivity(
+    const TopoNode::Ptr &current_odom,
+    const std::vector<TopoNode::Ptr> &accepted_path) {
+  AcceptedRouteConnectivity result;
+  if (!isOrdinaryBackboneEndpoint(current_odom) || accepted_path.size() < 2) {
+    return result;
+  }
+  // The rolling odom node can be replaced as the vehicle moves. Keep the
+  // original head-edge result as a diagnostic, but do not make it a hold
+  // requirement: the stable check below is reachability to the accepted
+  // Verified anchor from the current odom node.
+  const bool accepted_head_is_odom = accepted_path.front() &&
+    accepted_path.front()->role_ == TopoNodeRole::Odom;
+  result.accepted_head_edge_usable =
+    (accepted_path.front() == current_odom || accepted_head_is_odom) &&
+    hasExecutableTopologyEdge(current_odom, accepted_path[1]);
+
+  // Only the rolling odom edge may legitimately disappear while a route is
+  // held. Every later edge is part of the accepted A* sequence; endpoint
+  // reachability through some other branch cannot make that stale sequence
+  // executable.
+  result.accepted_stable_edges_usable = true;
+  for (std::size_t i = 2; i < accepted_path.size(); ++i) {
+    if (!hasExecutableTopologyEdge(accepted_path[i - 1], accepted_path[i])) {
+      result.accepted_stable_edges_usable = false;
+      break;
+    }
+  }
+
+  const auto terminal = accepted_path.back();
+  if (isVirtualSemanticEndpoint(terminal)) {
+    result.has_terminal_unknown = true;
+    result.verified_anchor = accepted_path[accepted_path.size() - 2];
+    result.terminal_unknown_edge_usable =
+      isOrdinarySemanticLink(result.verified_anchor, terminal) &&
+      hasExecutableTopologyEdge(result.verified_anchor, terminal);
+  } else if (isOrdinaryBackboneEndpoint(terminal)) {
+    result.verified_anchor = terminal;
+  } else {
+    return result;
+  }
+  if (!isOrdinaryBackboneEndpoint(result.verified_anchor)) return result;
+
+  std::deque<TopoNode::Ptr> queue;
+  std::unordered_set<TopoNode::Ptr> visited;
+  queue.push_back(current_odom);
+  visited.insert(current_odom);
+  while (!queue.empty()) {
+    const auto current = queue.front();
+    queue.pop_front();
+    if (current == result.verified_anchor) {
+      result.verified_prefix_reachable = true;
+      break;
+    }
+    for (const auto &neighbor : current->neighbors_) {
+      if (!isOrdinaryBackboneEndpoint(neighbor) ||
+          !hasExecutableTopologyEdge(current, neighbor) ||
+          !visited.insert(neighbor).second) {
+        continue;
+      }
+      queue.push_back(neighbor);
+    }
+  }
+  result.verified_nodes_visited = visited.size();
+  return result;
+}
+
+inline bool semanticNodeActiveForPlanning(
+    const TopoNode &node, std::int64_t active_virtual_stamp_ns) {
+  if (node.geometry_state_ == TopoGeometryState::Verified ||
+      active_virtual_stamp_ns == 0) {
+    return true;
+  }
+  if (active_virtual_stamp_ns < 0 || node.semantic_stamp_ns_ <= 0) return false;
+  // The active value is a current-time reference for virtual semantic memory.
+  // Keep observations from the preceding 1.5 s eligible for planning/frontiers.
+  constexpr std::int64_t kSemanticPlanningMemoryNs = 1'500'000'000LL;
+  const std::int64_t age_ns = active_virtual_stamp_ns - node.semantic_stamp_ns_;
+  return age_ns >= 0 && age_ns <= kSemanticPlanningMemoryNs;
+}
+
+inline bool semanticNodeActiveForRisk(
+    const TopoNode &node, std::int64_t reference_stamp_ns,
+    std::int64_t risk_memory_ns) {
+  if (node.geometry_state_ == TopoGeometryState::Verified || reference_stamp_ns == 0) {
+    return true;
+  }
+  if (reference_stamp_ns < 0 || node.semantic_stamp_ns_ <= 0 || risk_memory_ns < 0) {
+    return false;
+  }
+  const std::int64_t age_ns = reference_stamp_ns - node.semantic_stamp_ns_;
+  return age_ns >= 0 && age_ns <= risk_memory_ns;
+}
+
+struct PairPtrHash {
+  std::size_t operator()(const std::pair<TopoNode::Ptr, TopoNode::Ptr> &p) const {
+    return std::hash<TopoNode::Ptr>()(p.first) ^ std::hash<TopoNode::Ptr>()(p.second);
+  }
+};
+
+struct PtrPair {
+  PtrPair() { flatten_data.reserve(2000); };
+
+  void insert(TopoNode::Ptr a, TopoNode::Ptr b) {
+    if (map.count(a) && map[a].count(b))
+      return;
+    if (map.count(b) && map[b].count(a))
+      return;
+    map[a].insert(b);
+  }
+
+  unordered_map<TopoNode::Ptr, unordered_set<TopoNode::Ptr>> map;
+
+  struct iter_elem {
+    TopoNode::Ptr p1;
+    TopoNode::Ptr p2;
+    bool insert;
+    // True when this pair was already a graph neighbour before the update.
+    // Existing edges must not be dropped on TIME_OUT / NO_PATH; only an
+    // occupied witness (or a colliding replacement) may remove them.
+    bool existing = false;
+    // Soft retry: keep the previous witness and cool down before rechecking.
+    bool soft_retry = false;
+    uint8_t doubt_streak = 0;
+    vector<Eigen::Vector3f> path;
+  };
+
+  void flatten() {
+    flatten_data.clear();
+    for (auto it = map.begin(); it != map.end(); it++) {
+      for (auto it2 = it->second.begin(); it2 != it->second.end(); it2++) {
+        flatten_data.push_back(iter_elem{it->first, *it2, true, false, 0, {}});
+      }
+    }
+  }
+
+  vector<iter_elem> flatten_data;
+};
+
+class RegionNode {
+public:
+  typedef std::shared_ptr<RegionNode> Ptr;
+  RegionNode(Eigen::Vector3i region_idx);
+  Eigen::Vector3i region_idx_;
+  int his_odom_id_;
+  unordered_set<TopoNode::Ptr> topo_nodes_;
+};
+
+class BubbleUnionSet {
+public:
+  BubbleUnionSet(double min_topobubble_radius) : min_topobubble_radius_(min_topobubble_radius) {};
+  typedef std::shared_ptr<BubbleUnionSet> Ptr;
+  void updateRegionNode(RegionNode::Ptr region_ptr, const Eigen::Vector3f &region_center_);
+  void unionSetCluster(const vector<BubbleNode::Ptr> &bubbles, vector<TopoNode::Ptr> &topos, Eigen::Vector3f &center);
+
+private:
+  std::unordered_map<BubbleNode::Ptr, BubbleNode::Ptr> parent;
+  std::unordered_map<BubbleNode::Ptr, int> rank;
+  std::vector<BubbleNode::Ptr> clusters;
+  std::vector<BubbleNode::Ptr> bubbles;
+  double min_topobubble_radius_;
+  std::unordered_map<BubbleNode::Ptr, TopoNode::Ptr> topo_map;
+  void init(const std::vector<BubbleNode::Ptr> &bubbles_);
+  BubbleNode::Ptr find(BubbleNode::Ptr b);
+  void merge(BubbleNode::Ptr b1, BubbleNode::Ptr b2);
+  void getClusters();
+  void getTopoNodes(unordered_set<TopoNode::Ptr> &topo_nodes_, const Eigen::Vector3f &center);
+};
+
+struct TopoGraphUpdateTiming {
+  double total_ms = 0.0;
+  double prepare_ms = 0.0;
+  double parallel_wall_ms = 0.0;
+  double bubble_cpu_ms = 0.0;
+  double cluster_cpu_ms = 0.0;
+  double diff_ms = 0.0;
+  double remove_ms = 0.0;
+  double reconnect_ms = 0.0;
+  double insert_ms = 0.0;
+  size_t regions = 0;
+  size_t occupied_regions = 0;
+  size_t free_regions = 0;
+  size_t bubbles = 0;
+  size_t planar_bubbles = 0;
+  size_t new_nodes = 0;
+  size_t remained_nodes = 0;
+  size_t removed_nodes = 0;
+  size_t deferred_nodes = 0;
+  size_t inserted_nodes = 0;
+  // Connection diagnostics are intentionally separate from inserted_nodes:
+  // the latter counts vertices accepted by the topology diff, not reachable
+  // vertices.  A vertex can therefore be inserted while all candidate edges
+  // time out or fail collision validation.
+  size_t insert_candidate_edges = 0;
+  size_t insert_success_edges = 0;
+  size_t insert_timeout_edges = 0;
+  size_t insert_no_path_edges = 0;
+  size_t insert_start_fail_edges = 0;
+  size_t insert_end_fail_edges = 0;
+  size_t insert_collision_reject_edges = 0;
+  // Diagnostics for re-validation of edges that already exist in the graph.
+  // Without these, edge_no_path only reflected new-neighbour insertion and
+  // hid progressive deletion of previously verified corridors.
+  size_t existing_edges_checked = 0;
+  size_t existing_edges_kept = 0;
+  size_t existing_edges_repaired = 0;
+  size_t existing_edges_removed = 0;
+  size_t existing_edges_soft_retry = 0;
+  size_t existing_edges_cooldown_skipped = 0;
+  size_t duplicate_nodes_merged = 0;
+  size_t half_edges_removed = 0;
+  size_t semantic_restored_nodes = 0;
+  size_t semantic_memory_records = 0;
+};
+
+struct TopoSemanticRecord {
+  std::uint64_t node_id = 0;
+  Eigen::Vector3f center = Eigen::Vector3f::Zero();
+  Eigen::Vector3i region_idx = Eigen::Vector3i::Zero();
+  float score = 0.0F;
+  float confidence = 0.0F;
+  std::uint32_t observations = 0;
+  std::int64_t stamp_ns = 0;
+  float risk = 0.0F;
+  std::int64_t risk_stamp_ns = 0;
+  bool is_virtual = false;
+  std::int64_t frame_stamp_ns = 0;
+  std::int8_t column = -1;
+};
+
+struct VirtualSemanticPruneResult {
+  size_t before = 0;
+  size_t removed_behind = 0;
+  size_t removed_capacity = 0;
+  size_t after = 0;
+  vector<std::uint64_t> removed_ids;
+};
+
+struct LocalGraphPruneResult {
+  size_t topology_nodes = 0;
+  size_t history_odom_nodes = 0;
+  size_t semantic_memory_records = 0;
+  size_t bubble_snapshots = 0;
+  vector<std::uint64_t> removed_semantic_ids;
+};
+
+struct TopoFrontierCandidateStats {
+  std::uint64_t node_id = 0;
+  std::int64_t frame_stamp_ns = 0;
+  std::int8_t column = -1;
+  float semantic_risk = 0.0F;
+  float astar_cost = 0.0F;
+  float route_distance = 0.0F;
+  float mission_distance = 0.0F;
+  float frame_min_risk = 0.0F;
+  float frame_risk_range = 0.0F;
+  float risk_regret = 0.0F;
+  float semantic_cost_m = 0.0F;
+  float direction_cosine = 1.0F;
+  float backtrack_cost_m = 0.0F;
+  float objective = std::numeric_limits<float>::infinity();
+};
+
+struct TopoGraphSearchStats {
+  size_t semantic_query_nodes = 0;
+  size_t semantic_inactive_virtual_nodes_skipped = 0;
+  size_t expanded_nodes = 0;
+  size_t edge_evaluations = 0;
+  size_t semantic_candidate_checks = 0;
+  size_t candidate_frontier_goals = 0;
+  size_t reverse_edges_skipped = 0;
+  size_t semantic_frontier_candidates = 0;
+  size_t ordinary_frontier_candidates = 0;
+  size_t semantic_frontier_edge_rejections = 0;
+  float best_semantic_frontier_objective = std::numeric_limits<float>::infinity();
+  float best_ordinary_frontier_objective = std::numeric_limits<float>::infinity();
+  std::uint64_t best_semantic_frontier_id = 0;
+  std::uint64_t best_ordinary_frontier_id = 0;
+  size_t semantic_mixed_frames = 0;
+  size_t semantic_all_low_frames = 0;
+  size_t semantic_all_high_frames = 0;
+  std::int64_t selected_semantic_frame_stamp_ns = 0;
+  std::int8_t selected_semantic_column = -1;
+  float selected_semantic_frame_min_risk = 0.0F;
+  float selected_semantic_frame_risk_range = 0.0F;
+  float selected_semantic_risk_regret = 0.0F;
+  float selected_semantic_cost_m = 0.0F;
+  vector<TopoFrontierCandidateStats> semantic_frontier_ranking;
+  bool timed_out = false;
+};
+
+// The online graph is optionally represented on one horizontal layer.  All
+// observations (occupied returns and free-ray endpoints) must use the same
+// projection before region selection; filtering by the original camera
+// endpoint height drops valid side-corridor evidence at long range.
+inline Eigen::Vector3f projectGraphPoint(const Eigen::Vector3f &point,
+                                         bool planar, float planar_z) {
+  Eigen::Vector3f projected = point;
+  if (planar) projected.z() = planar_z;
+  return projected;
+}
+
+class TopoGraph {
+public:
+  TopoGraph(float res = 0.1) : check_pts_octree_(res) {}
+
+  ros::NodeHandle nh;
+
+  typedef std::unordered_map<Eigen::Vector3i, TopoNode::Ptr, Vector3iHash> HashMap;
+  TopoNode::Ptr odom_node_;
+  ParallelBubbleAstar::Ptr parallel_bubble_astar_;
+  std::ofstream log;
+  void removeNodes(vector<TopoNode::Ptr> &nodes);
+  void updateRemainedConnections(vector<TopoNode::Ptr> &nodes);
+  void insertNodes(vector<TopoNode::Ptr> &nodes, bool only_raycast = false);
+  void insertNode(TopoNode::Ptr &new_node, vector<TopoNode::Ptr> &nbr_nodes, vector<vector<Eigen::Vector3f>> &paths);
+  // void getUnreachableLocalNodes(vector<TopoNode::Ptr> &nodes_unreachable);
+  void updateSkeleton();
+  // Copy persistent topology, including virtual-depth semantic points, into
+  // a freshly initialized graph before applying the current local Bubble diff.
+  // The transient odometry query node is recreated by updateOdomNode().
+  void copyPersistentNodesFrom(const TopoGraph &source);
+  void updateHistoricalOdoms();
+  void updateOdomNode(Eigen::Vector3f &odom_pos, float &yaw);
+  size_t insertSemanticNodes(
+      const vector<Eigen::Vector3f> &centers, const vector<float> &semantic_scores,
+      float bubble_radius, const Eigen::Vector3f &odom_pos,
+      std::int64_t stamp_ns,
+      const vector<float> &semantic_confidences = {},
+      const vector<std::uint8_t> &semantic_virtual_flags = {},
+      const vector<std::int8_t> &semantic_columns = {});
+  // Project verified free-space nodes back into the current 2D heatmap and
+  // take a Gaussian-weighted average around the projected pixel. Nodes are
+  // treated as a ground-plane map: the image uses (x, y, ground_z), so a
+  // level camera with vertical FOV places nearer nodes lower and farther
+  // nodes toward the horizon. This copies only image evidence onto existing
+  // graph nodes. No depth-occlusion test is performed here: a nearer return
+  // cannot identify the unknown object behind it and therefore must not zero
+  // or reject this node. Unsafe ordinary-to-semantic edges are handled by
+  // the independent edge collision check. Virtual fixed-depth frontiers are
+  // not annotated here.
+  size_t annotateVerifiedNodesFromHeatmap(
+      const SemanticHeatmapAnnotation &view, std::int64_t stamp_ns);
+
+  // Re-check every ordinary-to-semantic edge against the current obstacle
+  // map.  This must run independently of semantic-frame updates because the
+  // lidar map can discover a blocking obstacle between two semantic frames.
+  size_t revalidateSemanticEdges();
+  Eigen::Vector3f min_bd, max_bd, map_bd_min, map_bd_max;
+  double min_x_, min_y_, min_z_; // 最小格子尺寸
+  double bubble_min_radius_, frt_bubble_radius_;
+  double init_region_size_x_, init_region_size_y_, init_region_size_z_; // 初始分区大小
+  int x_len, y_len, z_len;                                              // 分区数量
+  double max_radius, cube_discrete_size;
+  bool view_graph_;
+  bool planar_graph_ = false;
+  float planar_z_ = 0.0F;
+  int getBoxId(const Eigen::Vector3f &pt);
+  vector<Eigen::Vector3i> update_idx_vec_; //
+
+  vector<RegionNode::Ptr> toponodes_update_region_arr_;
+  vector<RegionNode::Ptr> viewpoints_update_region_arr_;
+
+  vector<RegionNode::Ptr> regions_arr_;
+  unordered_map<Eigen::Vector3i, RegionNode::Ptr, Vector3iHash> reg_map_idx2ptr_;
+  vector<Eigen::Vector3f> global_path_;
+  vector<Eigen::Vector3f> global_view_points_;
+  LIOInterface::Ptr lidar_map_interface_;
+  typedef std::shared_ptr<TopoGraph> Ptr;
+  void getIndex(const Eigen::Vector3f &point, Eigen::Vector3i &region_idx_);
+  bool index2boundary(const Eigen::Vector3i &region_idx_, Eigen::Vector3f &low_bd, Eigen::Vector3f &high_bd);
+  RegionNode::Ptr getRegionNode(const Eigen::Vector3i &region_idx_);
+  bool graphSearch(const TopoNode::Ptr &start_node, const TopoNode::Ptr &end_node, std::vector<TopoNode::Ptr> &path, double time_out,
+                   bool kino = false, std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> last_path = {},
+                   float semantic_cost_weight = 0.0F,
+                   float max_search_radius_m = std::numeric_limits<float>::infinity(),
+                   TopoGraphSearchStats *search_stats = nullptr,
+                   std::int64_t active_virtual_semantic_stamp_ns = 0,
+                   float previous_path_cost_factor = 0.9F,
+                   float path_cost_weight = 1.0F,
+                   const Eigen::Vector3f *mission_goal = nullptr);
+  bool goalDirectedSearch(
+      const TopoNode::Ptr &start_node, const Eigen::Vector3f &goal,
+      std::vector<TopoNode::Ptr> &path, double time_out,
+      float path_cost_weight = 0.2f, float previous_path_cost_factor = 0.05f,
+      const std::unordered_set<pair<TopoNode::Ptr, TopoNode::Ptr>, PairPtrHash> &last_path = {},
+      float semantic_cost_weight = 0.0F,
+      float max_search_radius_m = std::numeric_limits<float>::infinity(),
+      const Eigen::Vector3f *progress_origin = nullptr,
+      float preferred_frontier_goal_forward_m = 0.0F,
+      bool prefer_mission_goal = false,
+      float preferred_frontier_goal_radial_m = std::numeric_limits<float>::infinity(),
+      float minimum_execution_path_m = 0.0F,
+      const Eigen::Vector3f *view_direction = nullptr,
+      float horizontal_fov_deg = 90.0F,
+      float progress_penalty_weight = 0.5F,
+      float direction_penalty_weight = 0.35F,
+      float fov_penalty_weight = 0.2F,
+      float smoothness_penalty_weight = 0.35F,
+      TopoGraphSearchStats *search_stats = nullptr,
+      std::int64_t active_virtual_semantic_stamp_ns = 0,
+      float frontier_goal_distance_weight = 1.0F,
+      float frontier_semantic_detour_budget_m = 45.0F,
+      float frontier_semantic_frame_budget_m = 12.0F,
+      float frontier_semantic_noise_floor = 0.08F,
+      const Eigen::Vector3f *frontier_direction_hint = nullptr,
+      float frontier_direction_hint_weight = 20.0F);
+  float semanticRiskForEdge(
+      const TopoNode::Ptr &from, const TopoNode::Ptr &to,
+      const std::vector<TopoNode::Ptr> *semantic_nodes = nullptr) const;
+  float clearanceCostForEdge(const TopoNode::Ptr &from, const TopoNode::Ptr &to) const;
+  float routeEdgeCost(
+      const TopoNode::Ptr &from, const TopoNode::Ptr &to,
+      float path_cost_weight, float semantic_cost_weight,
+      bool apply_previous_path_discount = false,
+      float previous_path_cost_factor = 1.0F,
+      const std::vector<TopoNode::Ptr> *semantic_nodes = nullptr,
+      size_t *semantic_candidate_checks = nullptr) const;
+  void init(ros::NodeHandle &nh, LIOInterface::Ptr &lidar_map, ParallelBubbleAstar::Ptr &parallel_bubble_astar);
+  void cauculateMemoryConsumption();
+  double getPathLength(const vector<TopoNode::Ptr> &topo_path);
+
+  void inline posToIndex(const Eigen::Vector3f &pt, Eigen::Vector3i &idx) {
+    idx = ((pt - lidar_map_interface_->lp_->global_box_min_boundary_) * 1000).array().floor().cast<int>();
+  }
+
+  void inline indexToPos(const Eigen::Vector3i &idx, Eigen::Vector3f &pt) {
+    pt = (idx.cast<float>() + Eigen::Vector3f(0.5, 0.5, 0.5)) / 1000.0f + lidar_map_interface_->lp_->global_box_min_boundary_;
+  }
+
+  void overlap(vector<TopoNode::Ptr> &set1, vector<TopoNode::Ptr> &set2, vector<TopoNode::Ptr> &overlap);
+  void setdiff(vector<TopoNode::Ptr> &set1, vector<TopoNode::Ptr> &set2, vector<TopoNode::Ptr> &set_1diff2);
+  void getPreNbrs(TopoNode::Ptr &node, vector<TopoNode::Ptr> &nbrs);
+  void setUpdateGoal(const Eigen::Vector3f &goal) {
+    update_goal_ = goal;
+    has_update_goal_ = true;
+  }
+  void getRegionsToUpdate();
+  vector<BubbleNode::Ptr> getBubbleSnapshot() const;
+  const TopoGraphUpdateTiming &getLastUpdateTiming() const { return last_update_timing_; }
+  void updateNodeSemantic(const TopoNode::Ptr &node, float observation,
+                          float ema_alpha, std::int64_t stamp_ns,
+                          float observation_confidence = 1.0F);
+  vector<TopoSemanticRecord> semanticMemorySnapshot() const;
+  void loadSemanticMemory(const vector<TopoSemanticRecord> &records);
+  size_t semanticMemorySize() const;
+  size_t protectRouteGeometry(const vector<TopoNode::Ptr> &nodes);
+  size_t routeAnchorCount() const;
+  VirtualSemanticPruneResult pruneVirtualSemanticNodes(
+      const Eigen::Vector3f &position,
+      const Eigen::Vector3f &forward_direction,
+      float backtrack_margin_m,
+      size_t maximum_nodes,
+      std::int64_t active_stamp_ns = 0,
+      const unordered_set<std::uint64_t> &protected_ids = {});
+  size_t restoreNodeSemanticMemory(
+      vector<TopoNode::Ptr> &nodes,
+      const unordered_set<std::uint64_t> &unavailable_ids = {});
+  // Merge geometrically duplicate persistent vertices without discarding
+  // their incident edges or semantic memory.  The return value is the number
+  // of vertices removed from the graph.
+  // Bubble centers can move by a few centimetres between map snapshots. A
+  // quarter-metre tolerance is the map voxel size, so it also merges genuine
+  // adjacent topology vertices and removes valid branches.
+  size_t deduplicateNearbyNodes(float tolerance_m = 0.05F);
+  // Remove stale one-way neighbor references left by an incremental diff.
+  // ScaleNav edges are undirected; a half-edge is never a valid planning edge.
+  size_t normalizeConnectivity();
+  // Remove one undirected edge and all cached edge state.  This is used when
+  // a provisional semantic connection is disproved by the live witness check.
+  bool removeEdge(const TopoNode::Ptr &from, const TopoNode::Ptr &to);
+  void removeNode(TopoNode::Ptr &node);
+  std::vector<TopoNode::Ptr> semanticNodes(
+      const Eigen::Vector3f *origin = nullptr,
+      float maximum_distance_m = std::numeric_limits<float>::infinity(),
+      std::int64_t active_virtual_stamp_ns = 0,
+      size_t *inactive_virtual_nodes_skipped = nullptr) const;
+  std::vector<TopoNode::Ptr> semanticRiskNodes(
+      const Eigen::Vector3f *origin = nullptr,
+      float maximum_distance_m = std::numeric_limits<float>::infinity(),
+      std::int64_t reference_stamp_ns = 0,
+      size_t *inactive_virtual_nodes_skipped = nullptr) const;
+  size_t nodeCountWithinRadius(
+      const Eigen::Vector3f &origin,
+      float maximum_distance_m = std::numeric_limits<float>::infinity()) const;
+  // Keep the persistent topology consistent with a rolling local map. Nodes,
+  // incident edges, semantic memory, and Bubble snapshots outside the window
+  // are removed together so old global structure cannot affect later A* runs.
+  LocalGraphPruneResult pruneOutsideRadius(
+      const Eigen::Vector3f &origin, float maximum_distance_m);
+  float estimateRoughDistance(const Eigen::Vector3f &goal, const int his_idx);
+  vector<TopoNode::Ptr> history_odom_nodes_;
+  vector<float> his_odom_dis_vec_;
+
+private:
+  class SemanticSpatialIndex;
+  TopoGraphUpdateTiming last_update_timing_;
+  mutable std::mutex region_map_mutex_;
+  mutable std::mutex bubble_snapshot_mutex_;
+  unordered_map<Eigen::Vector3i, vector<BubbleNode::Ptr>, Vector3iHash> bubble_snapshots_by_region_;
+  PointVector check_pts_;
+  pcl::octree::OctreePointCloudSearch<pcl::PointXYZ> check_pts_octree_;
+  int max_update_region_num_;
+  Eigen::Vector3f update_goal_ = Eigen::Vector3f::Zero();
+  bool has_update_goal_ = false;
+  bool use_prior_map_;
+  double update_connection_timeout, insert_node_timeout;
+  double semantic_node_match_distance_ = 2.5;
+  // Current-generation virtual semantic endpoints extend the observable
+  // topology beyond the measured Bubble frontier.  They attach only to the
+  // verified graph backbone and are replaced when measured geometry arrives.
+  int semantic_point_connection_candidates_ = 4;
+  int semantic_point_max_connections_ = 2;
+  // Virtual-depth semantic points influence nearby ordinary edges too;
+  // otherwise A* can pass beside a risk node without ever visiting it.
+  double semantic_point_influence_m_ = 5.0;
+  // Bound per-edge semantic field evaluation when a long-lived map contains
+  // many overlapping risk spheres. Zero disables the bound.
+  int semantic_edge_candidate_limit_ = 8;
+  double semantic_risk_memory_ms_ = 5000.0;
+  // Fraction of each valid observation admitted into the accumulated risk
+  // memory. The result remains bounded in [0, 1].
+  double semantic_risk_accumulation_alpha_ = 0.25;
+  double clearance_cost_weight_ = 2.0;
+  double clearance_target_m_ = 1.2;
+  mutable std::mutex semantic_memory_mutex_;
+  unordered_map<std::uint64_t, TopoSemanticRecord> semantic_memory_;
+  std::uint64_t next_semantic_node_id_ = 1;
+  bool hasOverlapWithBox(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd);
+  float edgeSemanticRisk(
+      const TopoNode::Ptr &from, const TopoNode::Ptr &to,
+      const std::vector<TopoNode::Ptr> *semantic_nodes = nullptr,
+      size_t *semantic_candidate_checks = nullptr,
+      const SemanticSpatialIndex *semantic_index = nullptr) const;
+  float routeEdgeCostIndexed(
+      const TopoNode::Ptr &from, const TopoNode::Ptr &to,
+      float path_cost_weight, float semantic_cost_weight,
+      bool apply_previous_path_discount, float previous_path_cost_factor,
+      const std::vector<TopoNode::Ptr> *semantic_nodes,
+      size_t *semantic_candidate_checks,
+      const SemanticSpatialIndex *semantic_index) const;
+
+  size_t selected_occupied_regions_ = 0;
+  size_t selected_free_regions_ = 0;
+
+  void generateBubble(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd, vector<BubbleNode::Ptr> &bubble_node_vec,
+                      vector<bool> &check_flags);
+  void splitCubeBubbleGeneration(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd, vector<BubbleNode::Ptr> &bubble_node_vec,
+                                 vector<bool> &check_flags);
+  void supplementCubeBubbleGeneration(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd, vector<BubbleNode::Ptr> &bubble_node_vec,
+                                      vector<bool> &check_flags, const BubbleNode::Ptr &bubble_node);
+  bool isCubeCoveredByBubble(const Eigen::Vector3f &low_bd, const Eigen::Vector3f &high_bd, const vector<BubbleNode::Ptr> &bubble_node_vec);
+
+  int searchPathWithBoundary(const Eigen::Vector3f &start, const Eigen::Vector3f &end, double &time_out, vector<Eigen::Vector3f> &path);
+  float edgeClearancePenalty(const TopoNode::Ptr &from,
+                             const TopoNode::Ptr &to,
+                             float edge_length) const;
+  float witnessMinimumClearance(const vector<Eigen::Vector3f> &path) const;
+};

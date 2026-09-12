@@ -1,0 +1,41 @@
+mode,time_pct,sessions,p50,p95
+Persistent,2.5,27,61.5,65.0
+Persistent,7.5,27,98.0,118.0
+Persistent,12.5,27,140.0,164.55
+Persistent,17.5,27,176.0,209.0
+Persistent,22.5,27,213.0,245.0
+Persistent,27.5,27,240.0,252.1
+Persistent,32.5,27,234.5,250.4
+Persistent,37.5,27,226.0,252.1
+Persistent,42.5,27,229.0,261.4
+Persistent,47.5,27,217.5,278.9
+Persistent,52.5,27,206.0,258.2
+Persistent,57.5,27,208.0,224.1
+Persistent,62.5,27,218.0,226.85
+Persistent,67.5,27,212.0,226.35
+Persistent,72.5,27,201.0,212.7
+Persistent,77.5,27,201.0,210.0
+Persistent,82.5,27,211.0,220.0
+Persistent,87.5,27,223.0,232.8
+Persistent,92.5,27,225.0,238.1
+Persistent,97.5,27,224.0,250.54999999999998
+Sliding only,2.5,10,59.5,64.425
+Sliding only,7.5,10,102.5,114.39999999999999
+Sliding only,12.5,10,138.0,150.2
+Sliding only,17.5,10,177.0,189.75
+Sliding only,22.5,10,212.0,228.85
+Sliding only,27.5,10,227.25,236.0
+Sliding only,32.5,10,218.0,236.1
+Sliding only,37.5,10,220.5,226.0
+Sliding only,42.5,10,225.0,247.7
+Sliding only,47.5,10,219.25,240.95
+Sliding only,52.5,10,197.0,216.54999999999998
+Sliding only,57.5,10,189.5,208.17499999999998
+Sliding only,62.5,10,192.5,214.375
+Sliding only,67.5,10,177.5,208.55
+Sliding only,72.5,10,176.75,190.29999999999998
+Sliding only,77.5,10,184.0,193.2
+Sliding only,82.5,10,196.0,199.65
+Sliding only,87.5,10,205.0,214.1
+Sliding only,92.5,10,214.0,223.0
+Sliding only,97.5,10,212.5,220.5

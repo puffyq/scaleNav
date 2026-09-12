@@ -16,7 +16,7 @@ export TEXMFCONFIG="${TEX_CACHE_DIR}/config"
 export TEXMFHOME="${TEX_CACHE_DIR}/home"
 
 for pass in 1 2; do
-  xelatex \
+  pdflatex \
     -interaction=nonstopmode \
     -halt-on-error \
     root.tex

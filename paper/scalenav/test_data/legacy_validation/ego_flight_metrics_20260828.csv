@@ -1,0 +1,2 @@
+session,method,scenario,seed,goal_complete,success,collision,completion_time_s,path_m,average_speed_mps,path_efficiency_pct,goal_spl_pct,minimum_clearance_m,max_speed_mps,estimated_max_acceleration_mps2,estimated_jerk_rms_mps3,route_switches,planner_total_mean_ms,planner_total_p99_ms
+session_20260828_141537_951,,,,False,,True,4.552250822,12.488288569071779,2.7433217231174303,96.46754678856786,0.0,,4.324821826487743,11.73841544886399,64.66002719371392,,,

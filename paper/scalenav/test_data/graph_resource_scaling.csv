@@ -1,0 +1,15 @@
+mode,metric,samples,center,p95,unit
+Persistent,local_window,447,214.0,248.7,nodes
+Persistent,expanded,1462,185.0,215.0,nodes
+Persistent,edge_evaluations,1462,1271.0,1467.7000000000003,nodes
+Persistent,cloud,9236,39.77492960978778,55.6233135,ms
+Persistent,background,4304,116.50206637314128,208.8243566,ms
+Persistent,planner,8647,70.92196556875217,164.3639447,ms
+Persistent,astar,1462,20.358013459644322,59.83232785,ms
+Sliding only,local_window,169,197.0,231.0,nodes
+Sliding only,expanded,774,173.0,194.0,nodes
+Sliding only,edge_evaluations,774,1170.0,1348.6999999999998,nodes
+Sliding only,cloud,3210,41.710075861059195,57.34848454999999,ms
+Sliding only,background,1615,122.25650872693497,205.9816578,ms
+Sliding only,planner,3271,66.51275923417914,155.8053415,ms
+Sliding only,astar,774,18.337117059431524,56.92716999999991,ms

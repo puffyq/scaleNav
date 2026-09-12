@@ -1,0 +1,92 @@
+{
+  "source": "Unreal runtime static render-mesh triangle ground truth",
+  "uses_camera_observations": false,
+  "uses_flight_logs_for_geometry": false,
+  "frame": "world_enu",
+  "coordinate_conversion": "x=UE_Y/100, y=UE_X/100, z=UE_Z/100",
+  "bounds_enu_m": {
+    "x": [
+      -50.0,
+      50.0
+    ],
+    "y": [
+      -10.0,
+      150.0
+    ],
+    "z": [
+      0.6,
+      2.6
+    ]
+  },
+  "resolution_m": 0.25,
+  "grid_dimensions_xy": [
+    400,
+    640
+  ],
+  "rpc_seconds": 18.986376986955293,
+  "runtime_meshes": 103,
+  "valid_meshes": 14,
+  "rejected_meshes": 0,
+  "source_vertices": 72835062,
+  "source_triangles": 43817797,
+  "slab_candidate_triangles": 227360,
+  "occupied_cells": 5779,
+  "contributing_meshes": [
+    {
+      "name": "instancedfoliageactor_25600_-1_0_0",
+      "slab_candidate_triangles": 11102,
+      "new_occupied_cells": 289
+    },
+    {
+      "name": "instancedfoliageactor_25600_0_-1_0",
+      "slab_candidate_triangles": 101400,
+      "new_occupied_cells": 2608
+    },
+    {
+      "name": "instancedfoliageactor_25600_-1_-1_0",
+      "slab_candidate_triangles": 2420,
+      "new_occupied_cells": 67
+    },
+    {
+      "name": "instancedfoliageactor_25600_-1_-1_0",
+      "slab_candidate_triangles": 2794,
+      "new_occupied_cells": 74
+    },
+    {
+      "name": "instancedfoliageactor_25600_0_0_0",
+      "slab_candidate_triangles": 107160,
+      "new_occupied_cells": 2721
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "slab_candidate_triangles": 414,
+      "new_occupied_cells": 2
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "slab_candidate_triangles": 414,
+      "new_occupied_cells": 4
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "slab_candidate_triangles": 414,
+      "new_occupied_cells": 4
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "slab_candidate_triangles": 414,
+      "new_occupied_cells": 4
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "slab_candidate_triangles": 414,
+      "new_occupied_cells": 2
+    },
+    {
+      "name": "powerline_generator_c_uaid_74563c6a874b9ffc02_2003534591",
+      "slab_candidate_triangles": 414,
+      "new_occupied_cells": 4
+    }
+  ],
+  "ply": "/mnt/code/lab/yopo/OpenSeek/paper/scalenav/pics/map4_mesh_truth_20260906.ply"
+}

@@ -1,0 +1,22 @@
+{
+  "SettingsVersion": 1.2,
+  "SimMode": "Multirotor",
+  "PhysicsEngineName": "ExternalPhysicsEngine",
+  "LocalHostIp": "127.0.0.1",
+  "ApiServerPort": 41452,
+  "RpcEnabled": true,
+  "ViewMode": "NoDisplay",
+  "Vehicles": {
+    "drone_1": {
+      "VehicleType": "SimpleFlight",
+      "DefaultVehicleState": "Armed",
+      "AutoCreate": true,
+      "IsFpvVehicle": true,
+      "AllowAPIAlways": true,
+      "EnableCollisions": true,
+      "X": 0.0,
+      "Y": 0.0,
+      "Z": -1.6
+    }
+  }
+}
