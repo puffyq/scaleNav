@@ -1,0 +1,21 @@
+{
+  "source": "yokohama1.fbx static model",
+  "transform": "local FBX xyz -> world_enu xyz + (0,100,170.6)",
+  "resolution_m": 0.25,
+  "bounds_enu_m": {
+    "x": [
+      -50.0,
+      50.0
+    ],
+    "y": [
+      -10.0,
+      210.0
+    ],
+    "z": [
+      169.6,
+      171.6
+    ]
+  },
+  "occupied_cells": 696,
+  "ply": "/mnt/code/lab/yopo/OpenSeek/paper/scalenav/pics/map5_fbx_truth_20260911.ply"
+}

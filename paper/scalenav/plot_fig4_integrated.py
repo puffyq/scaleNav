@@ -92,7 +92,7 @@ def plot_overlay(ax, impl, label, baseline_path, ours_path, baseline_color):
     return baseline, ours
 
 
-def plot_far(ax, impl):
+def plot_far(ax, impl, reference_flight):
     goal = np.array([0.0, 140.0, 1.6])
     flight = impl.load_flight(
         FAR_SESSION, goal, 0.5, 0.3, require_goal=True, return_timestamps=True,
@@ -104,6 +104,11 @@ def plot_far(ax, impl):
     ax.scatter(points[0, 0], points[0, 1], s=18, c="#202124", zorder=4)
     ax.scatter(points[-1, 0], points[-1, 1], marker="*", s=52,
                c="#7a5195", edgecolors="white", linewidths=0.5, zorder=5)
+    reference_points = np.column_stack((reference_flight[0][:, 1], reference_flight[0][:, 0]))
+    ax.plot(reference_points[:, 0], reference_points[:, 1], color="#d62828",
+            linewidth=2.0, alpha=0.48, zorder=4)
+    ax.scatter(reference_points[-1, 0], reference_points[-1, 1], marker="*", s=52,
+               c="#d62828", alpha=0.48, edgecolors="white", linewidths=0.5, zorder=6)
     ax.set_title("FAR Planner\nsuccess 100%", fontsize=8.2,
                  fontweight="semibold", pad=3)
     ax.set_xlabel("Mission progress $y$ (m)")
@@ -116,7 +121,8 @@ def plot_far(ax, impl):
     return flight
 
 
-def binned_mean_speed(flight, bins=20):
+def binned_mean_speed(flight, bin_seconds=2.0):
+    """Average speeds in elapsed-time bins, plotted at each interval's end."""
     speeds = np.asarray(flight[1], dtype=float)
     timestamps = np.asarray(flight[4], dtype=np.int64)
     if len(timestamps) < 2 or speeds.shape != timestamps.shape:
@@ -124,22 +130,28 @@ def binned_mean_speed(flight, bins=20):
     elapsed = (timestamps - timestamps[0]) / 1e9
     if np.any(np.diff(elapsed) <= 0) or not np.isfinite(speeds).all() or np.any(speeds < 0):
         raise ValueError("Expected increasing timestamps and finite nonnegative speeds")
-    time_pct = 100.0 * elapsed / elapsed[-1]
-    edges = np.linspace(0.0, 100.0, bins + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    indices = np.minimum(bins - 1, np.searchsorted(edges, time_pct, side="right") - 1)
+    if not math.isfinite(bin_seconds) or bin_seconds <= 0:
+        raise ValueError("Expected a positive finite bin width")
+    edges = np.append(np.arange(0.0, elapsed[-1], bin_seconds), elapsed[-1])
+    bins = len(edges) - 1
+    indices = np.minimum(bins - 1, np.searchsorted(edges, elapsed, side="right") - 1)
     counts = np.bincount(indices, minlength=bins)
     totals = np.bincount(indices, weights=speeds, minlength=bins)
     means = np.full(bins, np.nan)
     np.divide(totals, counts, out=means, where=counts > 0)
-    return centers, means, float(elapsed[-1])
+    return edges[1:], means, float(elapsed[-1])
 
 
 def speed_panel(axis, label, curves):
-    for name, flight, color in curves:
-        centers, means, duration = binned_mean_speed(flight)
-        axis.plot(centers, means, color=color, linewidth=1.6,
-                  label=f"{name} ({duration:.1f} s)")
+    for curve in curves:
+        name, flight, color = curve[:3]
+        alpha = curve[3] if len(curve) > 3 else 1.0
+        times, means, duration = binned_mean_speed(flight)
+        outcome = "complete" if flight[2] else "failed"
+        axis.plot(times, means, color=color, linewidth=1.6,
+                  marker="*" if flight[2] else "X", markevery=[-1],
+                  markersize=6, markeredgecolor="white", markeredgewidth=0.5,
+                  alpha=alpha, label=f"{name} ({duration:.1f} s, {outcome})")
     axis.set_title(f"{label}: mean speed", fontsize=8.5,
                    fontweight="semibold", pad=3)
     axis.legend(fontsize=5.8, ncol=1, frameon=False, loc="upper left",
@@ -166,14 +178,17 @@ def main():
             ("Standalone", baseline_flight, color),
             ("TopoGuide", guided_flight, "#d62828"),
         ]))
-    far_flight = plot_far(top_axes[-1], impl)
-    comparisons.append(("FAR Planner", [("FAR", far_flight, "#7a5195")]))
+    best_yopo_gcn = comparisons[0][1][1][1]
+    far_flight = plot_far(top_axes[-1], impl, best_yopo_gcn)
+    comparisons.append(("FAR Planner", [
+        ("FAR", far_flight, "#7a5195"),
+        ("YOPO+GCN", best_yopo_gcn, "#d62828", 0.48),
+    ]))
 
     speed_axes = []
     for index in range(4):
         axis = fig.add_axes(
             [left + index * (width + gap), bottom_y, width, bottom_h],
-            sharex=speed_axes[0] if speed_axes else None,
             sharey=speed_axes[0] if speed_axes else None,
         )
         speed_axes.append(axis)
@@ -184,13 +199,16 @@ def main():
         for axis in speed_axes for line in axis.lines
         if np.isfinite(line.get_ydata()).any()
     )
-    upper_speed = max(1.0, float(math.ceil(1.15 * peak_speed)))
+    upper_speed = max(1.0, float(math.ceil(1.25 * peak_speed)))
     for index, axis in enumerate(speed_axes):
-        axis.set_xlim(0, 100)
-        axis.set_xticks(np.arange(0, 101, 20))
+        max_duration = max(float(line.get_xdata()[-1]) for line in axis.lines)
+        upper_time = 10.0 * math.ceil(max_duration / 10.0)
+        tick_step = 10 if upper_time <= 70 else 20
+        axis.set_xlim(0, upper_time)
+        axis.set_xticks(np.arange(0, upper_time + 1, tick_step))
         axis.set_ylim(0, upper_speed)
         axis.set_yticks(np.arange(0, upper_speed + 1, 1))
-        axis.set_xlabel("Normalized flight time (%)")
+        axis.set_xlabel("Elapsed flight time (s)")
         axis.set_ylabel("Mean speed (m/s)" if index == 0 else "")
         axis.grid(True, color="#d9dde1", linewidth=0.45, alpha=0.8)
     for suffix in (".png", ".pdf"):

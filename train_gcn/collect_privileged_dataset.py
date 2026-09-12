@@ -63,11 +63,12 @@ def read_ascii_ply(path, stride=1):
     return out
 
 
-def build_static_occupancy(path, resolution=0.5, inflate=1.2, stride=1):
+def build_static_occupancy(path, resolution=0.5, inflate=1.2, stride=1,
+                           z_range=(0.1, 3.2)):
     """Voxelize a privileged static world map without clearing trajectories."""
     occupied = set()
     for x, y, z in read_ascii_ply(path, stride):
-        if 0.1 <= z <= 3.2:
+        if z_range[0] <= z <= z_range[1]:
             occupied.add((math.floor(x / resolution), math.floor(y / resolution)))
     radius = max(1, math.ceil(inflate / resolution))
     return {(x + dx, y + dy)
@@ -75,6 +76,16 @@ def build_static_occupancy(path, resolution=0.5, inflate=1.2, stride=1):
             for dx in range(-radius, radius + 1)
             for dy in range(-radius, radius + 1)
             if dx * dx + dy * dy <= radius * radius}
+
+
+def obstacle_distance_feature(x, y, occupied, resolution):
+    if not occupied:
+        return 1.0
+    distance = min(
+        math.hypot(x - (cell_x + 0.5) * resolution,
+                   y - (cell_y + 0.5) * resolution)
+        for cell_x, cell_y in occupied)
+    return min(distance, 80.0) / 80.0
 
 
 def parse_entries(session):
@@ -169,13 +180,13 @@ def label_path(path, start_xy, yaw, resolution, lookahead=35.0):
 
 
 def main():
-    p = argparse.ArgumentParser(); p.add_argument("--output", default="train_gcn/dataset_privileged.pt"); p.add_argument("--resolution", type=float, default=0.5); p.add_argument("--inflate", type=float, default=1.2); p.add_argument("--stride", type=int, default=20); p.add_argument("--lookahead", type=float, default=35.0); p.add_argument("--map-scope", choices=("global", "session"), default="global"); p.add_argument("--occupancy-cache", default="train_gcn/global_occupancy.pt"); p.add_argument("--map-ply", default="", help="privileged static ASCII PLY world map"); p.add_argument("--logs", nargs="*", default=None)
+    p = argparse.ArgumentParser(); p.add_argument("--output", default="train_gcn/dataset_privileged.pt"); p.add_argument("--resolution", type=float, default=0.5); p.add_argument("--inflate", type=float, default=1.2); p.add_argument("--stride", type=int, default=20); p.add_argument("--lookahead", type=float, default=35.0); p.add_argument("--map-scope", choices=("global", "session"), default="global"); p.add_argument("--occupancy-cache", default="train_gcn/global_occupancy.pt"); p.add_argument("--map-ply", default="", help="privileged static ASCII PLY world map"); p.add_argument("--z-range", type=float, nargs=2, default=(0.1, 3.2), metavar=("MIN", "MAX"), help="vertical slab retained from the static map"); p.add_argument("--logs", nargs="*", default=None)
     a = p.parse_args(); samples = []; skipped = 0
     sessions = a.logs or sorted(glob.glob("log_scalenav/session_*"))
     global_blocked = None
     if a.map_scope == "global":
         if a.map_ply:
-            global_blocked = build_static_occupancy(a.map_ply, a.resolution, a.inflate, a.stride)
+            global_blocked = build_static_occupancy(a.map_ply, a.resolution, a.inflate, a.stride, tuple(sorted(a.z_range)))
             print(f"loaded_static_map={a.map_ply} global_occupied_cells={len(global_blocked)}")
             if a.occupancy_cache:
                 os.makedirs(os.path.dirname(os.path.abspath(a.occupancy_cache)), exist_ok=True)
@@ -246,11 +257,16 @@ def main():
             gdx, gdy = float(frame_goal[0]) - float(position[0]), float(frame_goal[1]) - float(position[1])
             goal_body = torch.tensor([math.cos(pose_yaw) * gdx + math.sin(pose_yaw) * gdy,
                                       -math.sin(pose_yaw) * gdx + math.cos(pose_yaw) * gdy], dtype=data.x.dtype)
+            obstacle_distance = torch.tensor([
+                obstacle_distance_feature(float(x), float(y), global_blocked, a.resolution)
+                for x, y in zip(world_x.tolist(), world_y.tolist())
+            ], dtype=data.x.dtype)
             extra = torch.stack([body_x / 80.0, body_y / 80.0,
                                  torch.hypot(body_x, body_y) / 80.0,
                                  torch.atan2(body_y, body_x) / math.pi,
                                  goal_body[0].expand_as(body_x) / 140.0,
-                                 goal_body[1].expand_as(body_x) / 140.0], dim=1)
+                                 goal_body[1].expand_as(body_x) / 140.0,
+                                 obstacle_distance], dim=1)
             data.x = torch.cat([data.x, pose.expand(data.x.shape[0], -1), extra], dim=1)
             samples.append({"x": data.x.cpu(), "edge_index": data.edge_index.cpu(), "edge_weight": data.edge_weight.cpu(), "frontier_index": data.frontier_index.cpu(), "frontier_columns": data.frontier_columns.cpu(), "safe_columns": data.safe_columns.cpu(), "target": int(target), "planner_target": int(planner_target), "map_target": int(target), "session": os.path.basename(session), "seq": int(timing["seq"]), "position": list(position)})
         print(f"session={os.path.basename(session)} frames={len(frames)} collected={len(samples)}")

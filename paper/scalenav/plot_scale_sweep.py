@@ -21,8 +21,8 @@ DATA = HERE / "test_data/obstacle_scale_sweep.csv"
 OUT = HERE / "pics/experiments/scale_sweep"
 BLOCKS = (5, 10, 20, 40, 60, 100)
 METHODS = {
-    "yopo_simple": {"label": "YOPO-Simple", "color": "#356DAA", "marker": "s"},
-    "scalenav": {"label": "TopoGuide", "color": "#2D8C74", "marker": "o"},
+    "yopo_simple": {"label": "YOPO-Simple", "color": "#2f6db0", "marker": "s"},
+    "scalenav": {"label": "TopoGuide", "color": "#d62828", "marker": "o"},
 }
 INK = "#253642"
 MUTED = "#65747E"
@@ -164,7 +164,7 @@ def mark_timeouts(axis, rows: list[dict]) -> None:
             ]
             if failures:
                 axis.scatter(
-                    [index], [timeout], marker="X", s=30, color=FAIL,
+                    [index], [timeout], marker="X", s=30, color=style["color"],
                     edgecolors="white", linewidths=0.7, zorder=6,
                 )
 
@@ -172,29 +172,29 @@ def mark_timeouts(axis, rows: list[dict]) -> None:
 def make_figure(rows: list[dict], output: Path) -> None:
     plt.rcParams.update({
         "font.family": "DejaVu Sans",
-        "font.size": 7.0,
-        "axes.labelsize": 7.0,
+        "font.size": 11.5,
+        "axes.labelsize": 11.5,
         "figure.facecolor": "white",
         "savefig.facecolor": "white",
         "text.color": INK,
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
     })
-    figure = plt.figure(figsize=(3.6, 4.9))
+    figure = plt.figure(figsize=(10.7, 2.8))
     grid = figure.add_gridspec(
-        3, 1, left=0.155, right=0.97, top=0.94, bottom=0.085,
-        hspace=0.22,
+        1, 3, left=0.06, right=0.985, top=0.82, bottom=0.18,
+        wspace=0.30,
     )
-    axes = [figure.add_subplot(grid[row, 0]) for row in range(3)]
+    axes = [figure.add_subplot(grid[0, column]) for column in range(3)]
 
     handles = [
         Line2D([], [], color=style["color"], marker=style["marker"],
                linewidth=1.5, markersize=4.2, label=style["label"])
         for style in METHODS.values()
     ]
-    axes[0].legend(
-        handles=handles, loc="upper left",
-        ncol=1, frameon=False, fontsize=7.2, handlelength=1.8,
+    figure.legend(
+        handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.99),
+        ncol=2, frameon=False, fontsize=11.5, handlelength=1.8,
     )
 
     specs = [
@@ -203,8 +203,10 @@ def make_figure(rows: list[dict], output: Path) -> None:
         ("average_speed_mps", "Mean speed (m/s)", "(c) Mean speed"),
     ]
     for axis, (field, ylabel, title) in zip(axes, specs):
-        draw_metric(axis, rows, field, ylabel, show_xlabels=(axis is axes[-1]))
-        axis.set_title(title, loc="left", fontsize=8.2, fontweight="semibold", pad=4)
+        draw_metric(axis, rows, field, ylabel, show_xlabels=True)
+        axis.set_title(title, loc="left", fontsize=12.0, fontweight="semibold", pad=4)
+        axis.set_xlabel("Block length (m)", color=MUTED, labelpad=4)
+        axis.tick_params(axis="both", labelsize=10.5)
     mark_timeouts(axes[1], rows)
 
     axes[0].set_ylim(130, 285)
@@ -213,7 +215,6 @@ def make_figure(rows: list[dict], output: Path) -> None:
     axes[1].set_yticks([20, 40, 60, 80, 100])
     axes[2].set_ylim(2.5, 5.8)
     axes[2].set_yticks([3, 4, 5])
-    axes[2].set_xlabel("Block length (m)", color=MUTED, labelpad=4)
 
     yopo_path = np.mean(success_values(rows, "yopo_simple", 40, "path_m"))
     scale_path = np.mean(success_values(rows, "scalenav", 40, "path_m"))
@@ -221,10 +222,10 @@ def make_figure(rows: list[dict], output: Path) -> None:
     scale_time = np.mean(success_values(rows, "scalenav", 40, "duration_s"))
     axes[0].text(0.98, 0.92, f"40 m: {100 * (scale_path / yopo_path - 1):+.1f}%",
                  transform=axes[0].transAxes, ha="right",
-                 color=METHODS["scalenav"]["color"], fontsize=6.0)
+                 color=METHODS["scalenav"]["color"], fontsize=9.0)
     axes[1].text(0.98, 0.92, f"40 m: {100 * (scale_time / yopo_time - 1):+.1f}%",
                  transform=axes[1].transAxes, ha="right",
-                 color=METHODS["scalenav"]["color"], fontsize=6.0)
+                 color=METHODS["scalenav"]["color"], fontsize=9.0)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     for suffix in (".png", ".pdf"):

@@ -45,27 +45,71 @@ the runner accepts the start only after pose, speed, and heading stabilize.
 | `closed_loop/scalenav_no_semantic_20260911_095047` | `run_20260911_095047_2118305` | Map2 fixed-altitude ScaleNav, semantic disabled (`semantic=false`, launch `semantic=0`); two-trial backup batch | 2 success |
 | `closed_loop/gcn_semantic_no_persistent_map_20260911_101214` | `run_20260911_101214_2140124` | Map2 GCN with semantics; without full-history map persistence (user-labeled); two-trial backup batch | 2 success |
 | `closed_loop/gcn_semantic_persistent_map_20260911_101453` | `run_20260911_101453_2144759` | Map2 GCN with semantics; full-history map persistence (user-provided console: `persist_map=true`, radius 1000 m); two-trial backup batch | 2 success |
+| `closed_loop/gcn_semantic_memory_off_20260911_104200` | `run_20260911_104200_2168931` | Superseded Map2 GCN memory-disabled backup batch; retained for provenance | 2 success |
+| `closed_loop/gcn_semantic_memory_off_20260911_114420` | `run_20260911_114420_2214278` | **Selected** replacement Map2 GCN with semantics; memory disabled (user-confirmed) | 2 success |
+| `closed_loop/gcn_no_semantic_memory_on_20260911_115325` | `run_20260911_115325_2220771` | **Selected** Map2 GCN without semantics (`pearl=0`), memory enabled (user-corrected; see provenance below) | 10 success |
+| `closed_loop/gcn_semantic_memory_on_20260911_120150` | `run_20260911_120150_2234401` | **Selected replacement** Map2 GCN with semantics (`pearl=1`), memory enabled (user-corrected; see provenance below) | 10 success |
+| `closed_loop/gcn_map5_semantic_memory_pending_20260911_162440` | `run_20260911_162440_2391420` | Superseded Map5 GCN semantic batch; retained for provenance | 9 success, 1 timeout |
+| `closed_loop/gcn_map5_semantic_memory_pending_20260911_165518` | `run_20260911_165518_2454893` | **Selected replacement** Map5 GCN, semantic enabled, prompt `building, walls`; memory condition pending confirmation | 2 success |
+| `closed_loop/far_map5_no_semantic_20260911_165048` | `run_20260911_165048_2446092` | Map5 FAR Planner baseline, semantic disabled (`semantic=false`); two-trial batch | 2 success |
+| `closed_loop/far_map5_z140p6_no_semantic_20260911_172447` | `run_20260911_172447_2510463` | Map5 FAR Planner baseline at planning height `z=140.6`, semantic disabled; two-trial batch | 2 success |
+| `closed_loop/scalenav_map5_semantic_20260911_165737` | `run_20260911_165737_2460029` | Map5 ScaleNav, semantic enabled, prompt `building, walls`, local sliding graph; two-trial batch | 2 success |
+| `closed_loop/scalenav_map5_no_semantic_z140p6_20260911_182536` | `run_20260911_182536_3864939` | Map5 ScaleNav at planning height `z=140.6`, semantic disabled, local sliding graph; two-trial batch | 2 success |
+| `closed_loop/gcn_map5_z140p6_semantic_20260911_183259` | `run_20260911_183259_3884141` | Map5 GCN at planning height `z=140.6`, semantic enabled, prompt `buildings, walls, obstacles`; two-trial batch | 2 success |
+| `closed_loop/gcn_map5_z140p6_no_semantic_20260911_183455` | `run_20260911_183455_3889027` | Map5 GCN at planning height `z=140.6`, semantic disabled, prompt inactive; two-trial batch | 2 success |
+| `closed_loop/gcn_semantic_memory_on_20260911_104442` | `run_20260911_104442_2172019` | Superseded Map2 GCN memory-enabled backup batch; retained for provenance | 2 success |
+| `closed_loop/gcn_semantic_memory_on_20260911_105050` | `run_20260911_105050_2180000` | **Selected** replacement Map2 fixed-altitude GCN with semantics; memory enabled (user-confirmed) | 2 success |
 
 These backup batches are not included in `aggregate_metrics.csv` or the main
 paper tables and do not replace the existing ten-trial main or ablation
 batches. Each backup directory includes a README, aggregate metrics, and
 per-trial JSON records in addition to the files listed below.
 
-The September 11 GCN memory comparison has semantics enabled in both batches
+The September 11 GCN memory comparison has semantics enabled in all five batches
 (`semantic=true`, `pearl=1`, prompt `blocks, walls, box`). Memory-condition
 labels come from the user's experiment annotation and, for the persistent
 batch, the supplied launcher console output; the saved `config.json` files
 do not record map-persistence parameters. Without full-history persistence
 does not mean all graph, route, or semantic memory is disabled.
+The later `104200`, `104442`, and `105050` batches are labeled "memory
+disabled", "memory enabled", and "memory enabled", respectively, by the user;
+their exact memory-component settings are not recorded in `config.json`. They
+form a separate backup comparison and are not merged with or substituted for
+the earlier batches.
 
 | Memory condition | Success | Duration (s) | Path (m) | Path efficiency (%) |
 | --- | ---: | ---: | ---: | ---: |
 | Without full-history persistence | 2/2 | 34.387 +/- 0.403 | 178.918 +/- 0.775 | 78.249 +/- 0.339 |
 | With full-history persistence | 2/2 | 33.253 +/- 0.902 | 171.448 +/- 5.670 | 81.702 +/- 2.702 |
+| Memory disabled (replacement, `114420`) | 2/2 | 34.502 +/- 0.755 | 175.021 +/- 3.743 | 80.009 +/- 1.711 |
+| Memory enabled (replacement, `105050`) | 2/2 | 34.222 +/- 0.195 | 177.578 +/- 0.280 | 78.839 +/- 0.124 |
 
 Values are mean +/- sample standard deviation over successful trials. These
 two-trial batches are descriptive backup results, not evidence of a
 statistically established performance improvement.
+
+The `105050` batch is the selected memory-enabled result and replaces the
+earlier `104442` batch. The `114420` batch is the selected memory-disabled
+result and replaces the earlier `104200` batch. Superseded files remain
+archived for provenance and are not used in the selected comparison.
+
+The `115325` and `120150` batches form the selected ten-trial memory-enabled
+semantic ablation: both complete 10/10 trials. The semantic-on batch records
+`173.224 +/- 3.637 m` and `33.787 +/- 0.848 s`; the semantic-off batch records
+`173.988 +/- 9.336 m` and `32.825 +/- 2.302 s`.
+
+The user corrected both batches to memory enabled. Their original logs
+contain `history=NO_HISTORY`, while `config.json` does not record the memory
+switch. The user-confirmed condition is used for experiment labeling; the
+conflicting log text is preserved, and its cause remains unresolved. These
+batches are not evidence for a no-memory condition. Their semantic-ablation
+rows are already used in `root.tex`; `aggregate_metrics.csv` still contains
+the older batches and has not been regenerated.
+
+| Semantic input | History memory | Success | Duration (s) | Path (m) | Path efficiency (%) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Disabled | Enabled (user-corrected) | 10/10 | 32.825 +/- 2.302 | 173.988 +/- 9.336 | 80.663 +/- 4.100 |
+| Enabled | Enabled (user-corrected) | 10/10 | 33.787 +/- 0.848 | 173.224 +/- 3.637 | 80.852 +/- 1.705 |
 
 Each directory contains:
 

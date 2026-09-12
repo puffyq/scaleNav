@@ -1,0 +1,66 @@
+{
+  "stack": "gcn",
+  "attempts": 2,
+  "valid_flights": 2,
+  "outcomes": {
+    "success": 2
+  },
+  "success_rate_percent": 100.0,
+  "collision_rate_percent": 0.0,
+  "timeout_rate_percent": 0.0,
+  "successful_trials": [
+    1,
+    2
+  ],
+  "direct_distance_m": 200.0,
+  "successful": {
+    "duration_s": {
+      "mean": 41.337552010518266,
+      "sd": 0.30143169770048417,
+      "min": 41.12440761300968,
+      "max": 41.55069640802685
+    },
+    "path_m": {
+      "mean": 228.04975443008772,
+      "sd": 0.2094437860626671,
+      "min": 227.9016553086854,
+      "max": 228.19785355149
+    },
+    "average_speed_mps": {
+      "mean": 5.516934848644584,
+      "sd": 0.04529592906508181,
+      "min": 5.48490579004252,
+      "max": 5.548963907246648
+    },
+    "max_speed_mps": {
+      "mean": 6.3336582803005825,
+      "sd": 0.09571365788748029,
+      "min": 6.265978503756176,
+      "max": 6.401338056844989
+    },
+    "final_error_m": {
+      "mean": 0.04276677731092766,
+      "sd": 0.026512674704142526,
+      "min": 0.024019485240235432,
+      "max": 0.06151406938161988
+    },
+    "final_speed_mps": {
+      "mean": 0.24325282925103484,
+      "sd": 0.07182365016070981,
+      "min": 0.19246583917282667,
+      "max": 0.294039819329243
+    },
+    "path_efficiency_percent": {
+      "mean": 87.70019719952552,
+      "sd": 0.08054497311700184,
+      "min": 87.643243302844,
+      "max": 87.75715109620704
+    }
+  },
+  "failed_observed": {
+    "duration_s": null,
+    "path_m": null,
+    "average_speed_mps": null,
+    "max_speed_mps": null
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "outcome": "timeout",
+  "detail": "mission exceeded 90.0 s",
+  "duration_s": 90.00024087901693,
+  "path_m": 523.2917568653924,
+  "average_speed_mps": 5.814337292372681,
+  "max_speed_mps": 6.218747861930854,
+  "final_x": -51.76199300032513,
+  "final_y": 186.1369200954682,
+  "final_z": 170.5992930317833,
+  "final_error_m": 53.58627533524741,
+  "final_speed_mps": 5.963555938039416,
+  "odom_samples": 9962,
+  "collision": false,
+  "trial": 10,
+  "started_at": "2026-09-11T16:33:28.055+08:00",
+  "ended_at": "2026-09-11T16:35:04.903+08:00",
+  "goal": [
+    0.0,
+    200.0,
+    170.6
+  ],
+  "expected_start": [
+    0.0,
+    0.0,
+    170.6
+  ],
+  "position_tolerance_m": 0.5,
+  "speed_tolerance_mps": 0.3,
+  "timeout_s": 90.0,
+  "no_progress_timeout_s": 0.0,
+  "progress_distance_m": 0.5,
+  "session_dir": "/mnt/code/lab/yopo/OpenSeek/log_scalenav/session_20260911_163330_605",
+  "console_log": "/mnt/code/lab/yopo/OpenSeek/scalenav_ws/src/aut_test/results/run_20260911_162440_2391420/trial_0010_stack.log"
+}
