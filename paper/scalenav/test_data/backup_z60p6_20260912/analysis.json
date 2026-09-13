@@ -1,0 +1,207 @@
+{
+  "purpose": "Backup only; excluded from main tables and aggregate_metrics.csv",
+  "scene": "Scene identifier not recorded; do not infer Map2 or Map5 from mission coordinates",
+  "cloud": "Union of observed body-frame obstacle clouds transformed by nearest odometry; 0.2 s frame sampling, z=58.6..62.6 m, 0.25 m voxel deduplication; not ground truth",
+  "flights": [
+    {
+      "key": "scalenav_1",
+      "label": "ScaleNav trial 1",
+      "summary": {
+        "trial": "1",
+        "started_at": "2026-09-12T18:32:41.318+08:00",
+        "ended_at": "2026-09-12T18:33:20.454+08:00",
+        "outcome": "success",
+        "duration_s": "32.95571637300054",
+        "path_m": "168.34621326877033",
+        "average_speed_mps": "5.108255313384432",
+        "max_speed_mps": "6.158125882332023",
+        "final_x": "-0.050174818587761065",
+        "final_y": "140.03662120672095",
+        "final_z": "60.507018460903346",
+        "final_error_m": "0.11182214366929409",
+        "final_speed_mps": "0.2961570017383201",
+        "collision": "False",
+        "session_dir": "/mnt/code/lab/yopo/OpenSeek/log_scalenav/session_20260912_183244_170",
+        "console_log": "/mnt/code/lab/yopo/OpenSeek/scalenav_ws/src/aut_test/results/run_20260912_183241_179330/trial_0001_stack.log",
+        "detail": "goal position and settling-speed tolerances satisfied"
+      },
+      "archive": "paper/scalenav/test_data/closed_loop/scalenav_z60p6_semantic_20260912_183241",
+      "source_run": "run_20260912_183241_179330",
+      "source_sha256": {
+        "config.json": "4010a5a204a700ac040a2b0b4ead1ba000df19e02f8a67cf1ea6297e63c8d7c9",
+        "metrics.json": "ca80c79e737cd197bf4fa912bb1f3b73ed466d9afb773831ce8652789cb1132c",
+        "summary.csv": "8f8199c24a056e152ca179a72c7c82383281d9c8a6d74f69d51ec045577c3c11",
+        "trial_0001.json": "a56be74594082a391b29be5a84302d54025f91632463adb336e4c644151354fd",
+        "trial_0002.json": "228aa925d8e047c4764b7a36a7851f91a52b1edda58733478b51df8badbe5c81",
+        "trial_0001_stack.log": "80422cd2a9630dc8aa974c5c23a1735e0fb9532b64a369d24348165ba3bbe0d9",
+        "trial_0002_stack.log": "ff64995a4ab25866e73567b1a829917daa46ffea79cf487745e58d1d24c220f1"
+      },
+      "semantic": true,
+      "cloud": {
+        "sampled_frames": 148,
+        "retained_points": 5412,
+        "maximum_pose_sync_ms": 0.0
+      },
+      "plot_duration_s": 32.955573809,
+      "plot_path_m": 168.34635166733494,
+      "path_by_y_band_m": {
+        "y_0_40": 51.02188169342808,
+        "y_40_80": 42.33572812236352,
+        "y_80_120": 49.638044772273574,
+        "y_120_145": 25.350697079269754
+      },
+      "max_abs_x_m": 31.9987816,
+      "first_local_goal": [
+        9.31093693,
+        11.760376,
+        60.5096588
+      ],
+      "first_local_goal_delay_s": 1.64035798,
+      "first_obstacle_return_s": 3.170150387,
+      "direct_goal_first_diagnostic_s": 27.845794224,
+      "shortcut_log_count": 65,
+      "max_nodes_removed_in_logged_shortcut": 8,
+      "frontier_commands": [
+        "[ScaleNav frontier command] id=54 goal=(21.97,27.75,60.51) reason=INITIAL",
+        "[ScaleNav frontier command] id=143 goal=(27.53,33.25,60.51) reason=PROGRESS",
+        "[ScaleNav frontier command] id=177 goal=(32.87,40.76,60.51) reason=PROGRESS",
+        "[ScaleNav frontier command] id=239 goal=(35.16,59.64,60.51) reason=PROGRESS",
+        "[ScaleNav frontier command] id=293 goal=(28.53,71.41,60.51) reason=PROGRESS",
+        "[ScaleNav frontier command] id=355 goal=(35.10,85.61,60.51) reason=PROGRESS",
+        "[ScaleNav frontier command] id=474 goal=(9.58,104.33,60.51) reason=PROGRESS",
+        "[ScaleNav frontier command] id=526 goal=(-0.39,111.29,60.51) reason=PROGRESS",
+        "[ScaleNav frontier command] id=630 goal=(5.73,137.44,60.51) reason=PROGRESS",
+        "[ScaleNav frontier command] id=0 goal=(0.00,140.00,60.51) reason=MISSION_DIRECT"
+      ]
+    },
+    {
+      "key": "scalenav_2",
+      "label": "ScaleNav trial 2",
+      "summary": {
+        "trial": "2",
+        "started_at": "2026-09-12T18:33:23.479+08:00",
+        "ended_at": "2026-09-12T18:34:03.870+08:00",
+        "outcome": "success",
+        "duration_s": "34.39175306800007",
+        "path_m": "175.50342194947228",
+        "average_speed_mps": "5.1030670522221815",
+        "max_speed_mps": "6.610353589762045",
+        "final_x": "0.007229440287958628",
+        "final_y": "140.0537338338353",
+        "final_z": "60.556827898516374",
+        "final_error_m": "0.06930671000725978",
+        "final_speed_mps": "0.29329967323434764",
+        "collision": "False",
+        "session_dir": "/mnt/code/lab/yopo/OpenSeek/log_scalenav/session_20260912_183325_979",
+        "console_log": "/mnt/code/lab/yopo/OpenSeek/scalenav_ws/src/aut_test/results/run_20260912_183241_179330/trial_0002_stack.log",
+        "detail": "goal position and settling-speed tolerances satisfied"
+      },
+      "archive": "paper/scalenav/test_data/closed_loop/scalenav_z60p6_semantic_20260912_183241",
+      "source_run": "run_20260912_183241_179330",
+      "source_sha256": {
+        "config.json": "4010a5a204a700ac040a2b0b4ead1ba000df19e02f8a67cf1ea6297e63c8d7c9",
+        "metrics.json": "ca80c79e737cd197bf4fa912bb1f3b73ed466d9afb773831ce8652789cb1132c",
+        "summary.csv": "8f8199c24a056e152ca179a72c7c82383281d9c8a6d74f69d51ec045577c3c11",
+        "trial_0001.json": "a56be74594082a391b29be5a84302d54025f91632463adb336e4c644151354fd",
+        "trial_0002.json": "228aa925d8e047c4764b7a36a7851f91a52b1edda58733478b51df8badbe5c81",
+        "trial_0001_stack.log": "80422cd2a9630dc8aa974c5c23a1735e0fb9532b64a369d24348165ba3bbe0d9",
+        "trial_0002_stack.log": "ff64995a4ab25866e73567b1a829917daa46ffea79cf487745e58d1d24c220f1"
+      },
+      "semantic": true,
+      "cloud": {
+        "sampled_frames": 154,
+        "retained_points": 5213,
+        "maximum_pose_sync_ms": 0.0
+      },
+      "plot_duration_s": 34.391646576,
+      "plot_path_m": 175.5035599838304,
+      "path_by_y_band_m": {
+        "y_0_40": 51.21118772623368,
+        "y_40_80": 42.96908623085374,
+        "y_80_120": 57.65821905654629,
+        "y_120_145": 23.665066970196698
+      },
+      "max_abs_x_m": 39.5254527,
+      "first_local_goal": [
+        9.31093693,
+        11.760376,
+        60.5591164
+      ],
+      "first_local_goal_delay_s": 1.761602184,
+      "first_obstacle_return_s": 3.270156883,
+      "direct_goal_first_diagnostic_s": 29.465407665,
+      "shortcut_log_count": 52,
+      "max_nodes_removed_in_logged_shortcut": 9,
+      "frontier_commands": [
+        "[ScaleNav frontier command] id=54 goal=(21.97,27.75,60.56) reason=INITIAL",
+        "[ScaleNav frontier command] id=151 goal=(28.69,36.50,60.56) reason=PROGRESS",
+        "[ScaleNav frontier command] id=225 goal=(26.95,59.34,60.56) reason=PROGRESS",
+        "[ScaleNav frontier command] id=307 goal=(38.61,72.59,60.56) reason=PROGRESS",
+        "[ScaleNav frontier command] id=404 goal=(46.74,94.00,60.56) reason=PROGRESS",
+        "[ScaleNav frontier command] id=455 goal=(12.30,100.19,60.56) reason=PROGRESS",
+        "[ScaleNav frontier command] id=610 goal=(9.74,124.64,60.56) reason=PROGRESS",
+        "[ScaleNav frontier command] id=654 goal=(-7.06,121.77,60.56) reason=PROGRESS",
+        "[ScaleNav frontier command] id=721 goal=(-6.67,142.81,60.56) reason=PROGRESS",
+        "[ScaleNav frontier command] id=0 goal=(0.00,140.00,60.56) reason=MISSION_DIRECT"
+      ]
+    },
+    {
+      "key": "far_1",
+      "label": "FAR trial 1",
+      "summary": {
+        "trial": "1",
+        "started_at": "2026-09-12T18:34:09.186+08:00",
+        "ended_at": "2026-09-12T18:34:44.182+08:00",
+        "outcome": "success",
+        "duration_s": "28.919437065999773",
+        "path_m": "152.09857497954627",
+        "average_speed_mps": "5.259389200157243",
+        "max_speed_mps": "6.23611366253958",
+        "final_x": "0.03785804501986132",
+        "final_y": "140.0401584181563",
+        "final_z": "60.59633692914313",
+        "final_error_m": "0.05531137504749083",
+        "final_speed_mps": "0.2987005601325785",
+        "collision": "False",
+        "session_dir": "/mnt/code/lab/yopo/OpenSeek/log_scalenav/session_20260912_183411_823",
+        "console_log": "/mnt/code/lab/yopo/OpenSeek/scalenav_ws/src/aut_test/results/run_20260912_183409_184093/trial_0001_stack.log",
+        "detail": "goal position and settling-speed tolerances satisfied"
+      },
+      "archive": "paper/scalenav/test_data/closed_loop/far_z60p6_no_semantic_20260912_183409",
+      "source_run": "run_20260912_183409_184093",
+      "source_sha256": {
+        "config.json": "83c6651dfdd5dd7f0fd10263b89581fa8084431a235f24cb70c529799221f8c4",
+        "metrics.json": "07b3b3735c0b3246923d1217cdaeb717bec41648bf22a69aba0012b9a98eb5e9",
+        "summary.csv": "a3774931261b27460f9bdcf24e5768238cf575e8748f6260f483ad7fa27fbd81",
+        "trial_0001.json": "2f86c86c2b1ca19f0e390096233648f2aea9b8cd8573b56719a80954d320f4db",
+        "trial_0001_stack.log": "f80c3012f97e49b6df13a015f1aca0661b1c9f6ad09cd1ccb232b479b96c1f23"
+      },
+      "semantic": false,
+      "cloud": {
+        "sampled_frames": 138,
+        "retained_points": 10041,
+        "maximum_pose_sync_ms": 0.0
+      },
+      "plot_duration_s": 28.911361204,
+      "plot_path_m": 152.09857529654948,
+      "path_by_y_band_m": {
+        "y_0_40": 46.66518636533557,
+        "y_40_80": 40.27443782725325,
+        "y_80_120": 40.27581614807113,
+        "y_120_145": 24.883134955889506
+      },
+      "max_abs_x_m": 15.719099,
+      "first_local_goal": [
+        0.0,
+        140.0,
+        60.5999985
+      ],
+      "first_local_goal_delay_s": 0.009754084,
+      "first_obstacle_return_s": 2.600113789,
+      "direct_goal_first_diagnostic_s": null,
+      "shortcut_log_count": 0,
+      "max_nodes_removed_in_logged_shortcut": 0,
+      "frontier_commands": []
+    }
+  ]
+}

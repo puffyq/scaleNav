@@ -1,0 +1,23 @@
+{
+  "image": "/mnt/code/lab/yopo/OpenSeek/scalenav_ws/results/far_vs_scalenav_20260912/far_vs_scalenav_ue_top_view.png",
+  "scalenav_csv": "/mnt/code/lab/yopo/OpenSeek/scalenav_ws/results/far_vs_scalenav_20260912/scalenav.csv",
+  "far_csv": "/mnt/code/lab/yopo/OpenSeek/scalenav_ws/results/far_vs_scalenav_20260912/far.csv",
+  "scalenav_points": 4222,
+  "far_points": 4573,
+  "coordinate_conversion": "world_enu - origin_enu -> AirSim global NED",
+  "origin_enu_m": [
+    0.0,
+    0.0,
+    1.6
+  ],
+  "camera": {
+    "name": "0",
+    "fov_degrees": 90.0,
+    "height_above_center_m": 800.0,
+    "center_ned_m": [
+      390.658466777778,
+      -385.70377718916643,
+      0.0
+    ]
+  }
+}

@@ -39,8 +39,15 @@ the runner accepts the start only after pose, speed, and heading stabilize.
 
 ### Backup experiments (excluded from main tables)
 
+The September 12 z=60.6 m comparison archives all two ScaleNav flights and
+the single FAR flight. See `backup_z60p6_20260912/README.md` for analysis and
+the trajectory/observed-point-cloud figure. These runs do not contain a GCN
+condition and are not a paired semantic ablation.
+
 | Directory | Source run | Condition | Outcomes |
 | --- | --- | --- | --- |
+| `closed_loop/scalenav_z60p6_semantic_20260912_183241` | `run_20260912_183241_179330` | ScaleNav, semantic enabled, z=60.6 m, local sliding graph and map radii 40 m; backup only | 2 success |
+| `closed_loop/far_z60p6_no_semantic_20260912_183409` | `run_20260912_183409_184093` | FAR, semantic disabled, z=60.6 m; backup only | 1 success |
 | `closed_loop/gcn_no_semantic_20260911_094902` | `run_20260911_094902_2114755` | Map2 fixed-altitude GCN, semantic disabled (`semantic=false`, `pearl=0`); two-trial backup batch | 2 success |
 | `closed_loop/scalenav_no_semantic_20260911_095047` | `run_20260911_095047_2118305` | Map2 fixed-altitude ScaleNav, semantic disabled (`semantic=false`, launch `semantic=0`); two-trial backup batch | 2 success |
 | `closed_loop/gcn_semantic_no_persistent_map_20260911_101214` | `run_20260911_101214_2140124` | Map2 GCN with semantics; without full-history map persistence (user-labeled); two-trial backup batch | 2 success |

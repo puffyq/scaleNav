@@ -76,6 +76,18 @@ target_link_libraries(scalenav_graph_node ${PCL_LIBRARIES} OpenMP::OpenMP_CXX ik
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  foreach(mode IN ITEMS geometry semantic)
+    set(empty_cloud_args --free-rays)
+    if(mode STREQUAL "semantic")
+      list(APPEND empty_cloud_args --semantic)
+    endif()
+    add_test(NAME empty_cloud_online_${mode}
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/test/test_empty_cloud_online.py
+        --node-binary $<TARGET_FILE:scalenav_graph_node> ${empty_cloud_args})
+    set_tests_properties(empty_cloud_online_${mode} PROPERTIES
+      TIMEOUT 45 RUN_SERIAL TRUE)
+  endforeach()
   ament_add_gtest(test_route_memory test/test_route_memory.cpp)
   target_include_directories(test_route_memory PRIVATE include ${EIGEN3_INCLUDE_DIRS})
 

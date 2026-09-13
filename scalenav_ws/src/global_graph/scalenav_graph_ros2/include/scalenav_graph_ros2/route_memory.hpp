@@ -847,7 +847,7 @@ inline bool semanticRouteResetRequested(bool enabled, float before, float after,
 // passed validation. Failure of that provisional route is not evidence that a
 // separately validated incumbent became unsafe. A committed witness therefore
 // stays the incumbent even if the rolling graph currently looks unreachable
-// or a previous tick asked for a forced replan.
+// unless execution has explicitly invalidated it.
 inline bool shouldHoldIncumbentAfterCandidateFailure(
     bool candidate_selected, bool candidate_witness_valid,
     bool incumbent_available, bool incumbent_reachable,
@@ -855,8 +855,8 @@ inline bool shouldHoldIncumbentAfterCandidateFailure(
 {
   (void)incumbent_reachable;
   (void)incumbent_topology_executable;
-  (void)incumbent_forced_replan;
-  return candidate_selected && !candidate_witness_valid && incumbent_available;
+  return candidate_selected && !candidate_witness_valid && incumbent_available &&
+         !incumbent_forced_replan;
 }
 
 // Rolling-graph neighbor loss is not a corridor change. A committed
@@ -928,6 +928,48 @@ inline bool shouldHoldIncumbentAgainstHorizonExtension(
 {
   return prefix_can_guide && candidate_not_better;
 }
+
+class RouteProgressWatchdog
+{
+ public:
+  void reset()
+  {
+    route_.clear();
+  }
+
+  bool stalled(const std::vector<Eigen::Vector3f> &route,
+               const Eigen::Vector3f &position, double now_s,
+               double timeout_s, float minimum_progress_m)
+  {
+    if (route.size() < 2 || !position.allFinite() || !std::isfinite(now_s) ||
+        timeout_s <= 0.0 || minimum_progress_m <= 0.0F) {
+      reset();
+      return false;
+    }
+    const bool route_changed = route_.size() != route.size() ||
+      !std::equal(route_.begin(), route_.end(), route.begin(),
+        [](const Eigen::Vector3f &left, const Eigen::Vector3f &right) {
+          return left.isApprox(right, 1e-3F);
+        });
+    if (route_.empty() || route_changed || now_s < last_progress_s_) {
+      route_ = route;
+      progress_m_ = routeProgressAlongPath(route_, position);
+      last_progress_s_ = now_s;
+      return false;
+    }
+    const float progress = routeProgressAlongPath(route_, position);
+    if (progress >= progress_m_ + minimum_progress_m) {
+      progress_m_ = progress;
+      last_progress_s_ = now_s;
+    }
+    return now_s - last_progress_s_ >= timeout_s;
+  }
+
+ private:
+  std::vector<Eigen::Vector3f> route_;
+  float progress_m_ = 0.0F;
+  double last_progress_s_ = 0.0;
+};
 
 inline bool consecutiveUnsafeRouteRequiresReplan(
     bool route_available, bool witness_safe, int required_frames,

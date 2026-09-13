@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -27,6 +28,7 @@ def main():
     parser.add_argument("--domain-id", type=int, default=173)
     parser.add_argument("--semantic", action="store_true")
     parser.add_argument("--free-rays", action="store_true")
+    parser.add_argument("--gcn-model", type=Path)
     args = parser.parse_args()
     os.environ["ROS_DOMAIN_ID"] = str(args.domain_id)
     os.environ["ROS_LOCALHOST_ONLY"] = "1"
@@ -34,7 +36,7 @@ def main():
         os.environ["ROS_LOG_DIR"] = directory
         rclpy.init()
         node = rclpy.create_node("empty_cloud_regression")
-        odom_pub = node.create_publisher(Odometry, "/sim/odom", qos_profile_sensor_data)
+        odom_pub = node.create_publisher(Odometry, "/sim/odom", 20)
         cloud_pub = node.create_publisher(PointCloud2, "/depth/points", qos_profile_sensor_data)
         free_pub = node.create_publisher(PointCloud2, "/depth/free_rays", qos_profile_sensor_data)
         goal_pub = node.create_publisher(PoseStamped, "/goal", 10)
@@ -56,31 +58,56 @@ def main():
         node.create_subscription(MarkerArray, "/scalenav/graph", collect_graph, 10)
 
         def collect_cloud_timing(message):
-            if '"module":"cloud"' in message.data:
-                timings.append(json.loads(message.data))
+            if '"module":"cloud"' not in message.data and '"switch_reason"' not in message.data:
+                return
+            try:
+                record = json.loads(message.data)
+            except json.JSONDecodeError:
+                return
+            if record.get("module") == "cloud":
+                timings.append(record)
 
         node.create_subscription(String, "/scalenav/timing", collect_cloud_timing, 100)
         node.create_subscription(PoseStamped, "/scalenav/local_goal",
                                  lambda message: goals.append(message.pose.position.y), 100)
         command = [str(args.node_binary.resolve()), "--ros-args", "-p", "graph_fixed_layer:=true",
-                   "-p", "graph_layer_z:=40.6", "-p", "wait_for_initial_semantic:=false",
+                   "-p", "graph_layer_z:=60.6", "-p", "wait_for_initial_semantic:=false",
+                   "-p", "map_history_radius_m:=40.0",
                    "-p", "semantic_heatmap_topic:=/scalenav/text_heatmap_raw"]
+        if args.gcn_model:
+            command += ["-p", "gcn_frontier_column_topic:=/scalenav/gcn_frontier_column",
+                        "-p", "gcn_frontier_required:=true"]
         with open(Path(directory) / "node.log", "w+") as log:
             process = subprocess.Popen(command, cwd=directory, stdout=log, stderr=log)
+            policy = None
             try:
+                if args.gcn_model:
+                    policy_script = Path(__file__).resolve().parents[3] / "scalenav/gcn_frontier_policy_ros2.py"
+                    policy_env = os.environ.copy()
+                    policy_env["PYTHONPATH"] = os.pathsep.join(
+                        [str(policy_script.parents[3] / "train_gcn"),
+                         policy_env.get("PYTHONPATH", "")])
+                    policy = subprocess.Popen(
+                        [sys.executable, str(policy_script), "--model", str(args.gcn_model.resolve()),
+                         "--device", "cpu", "--mission-goal-topic", "/goal"],
+                        cwd=directory, stdout=log, stderr=log, env=policy_env)
                 started = time.monotonic()
                 goal_sent = False
                 last_semantic_time = -1.0
-                while time.monotonic() - started < 19.0:
+                while time.monotonic() - started < 22.0:
                     assert process.poll() is None, "graph node exited"
+                    if policy:
+                        assert policy.poll() is None, "GCN policy exited"
                     elapsed = time.monotonic() - started
                     odom = Odometry()
                     odom.header.stamp = node.get_clock().now().to_msg()
                     odom.header.frame_id = "world_enu"
                     odom.child_frame_id = "base_link"
-                    odom.pose.pose.position.y = min(80.0, max(0.0, elapsed - 2.0) * 5.0)
-                    odom.pose.pose.position.z = 40.6
-                    odom.twist.twist.linear.y = 5.0 if 2.0 < elapsed < 18.0 else 0.0
+                    odom.pose.pose.position.y = min(80.0, max(0.0, elapsed - 5.0) * 5.0)
+                    odom.pose.pose.position.z = 60.6
+                    odom.twist.twist.linear.y = 5.0 if 5.0 < elapsed < 21.0 else 0.0
+                    if args.free_rays and elapsed >= 5.0:
+                        assert goals, "no local goal while the vehicle was stationary"
                     odom.pose.pose.orientation.z = math.sqrt(0.5)
                     odom.pose.pose.orientation.w = math.sqrt(0.5)
                     odom_pub.publish(odom)
@@ -118,11 +145,13 @@ def main():
                                                    for column in range(160)]).tobytes()
                         semantic_pub.publish(heatmap)
                         last_semantic_time = elapsed
-                    if elapsed >= 1.0 and not goal_sent and goal_pub.get_subscription_count():
+                    expected_goal_subscribers = 2 if policy else 1
+                    if (elapsed >= 1.0 and not goal_sent and
+                            goal_pub.get_subscription_count() >= expected_goal_subscribers):
                         goal = PoseStamped()
                         goal.header = odom.header
                         goal.pose.position.y = 140.0
-                        goal.pose.position.z = 40.6
+                        goal.pose.position.z = 60.6
                         goal.pose.orientation.w = 1.0
                         goal_pub.publish(goal)
                         goal_sent = True
@@ -130,6 +159,14 @@ def main():
                     time.sleep(0.03)
                 cloud_updates = [item for item in timings if item.get("module") == "cloud"]
                 assert len(cloud_updates) > 20, f"only {len(cloud_updates)} empty cloud updates"
+                assert all(item["input_points"] == 0 and item["map_points"] == 0
+                           for item in cloud_updates), "free rays became obstacles"
+                if not args.free_rays:
+                    assert not skeleton, "graph created without geometric observations or free rays"
+                    assert not goals, "local goal published without a geometric graph"
+                    print(f"PASS: {len(cloud_updates)} empty frames processed; "
+                          "no route created without free-space evidence")
+                    return
                 assert goals and goals[-1] > 80.0, f"frontier stopped advancing: {goals[-5:]}"
                 assert any(point.y > 80.0 for point in skeleton), "no graph nodes ahead of final odom"
                 forward_nodes = [point for point in skeleton if 80.0 < point.y < 102.0]
@@ -140,17 +177,17 @@ def main():
                     assert any(point.x < -8.0 for point in forward_nodes)
                     assert any(point.x > 8.0 for point in forward_nodes)
                 if args.semantic:
-                    assert semantic_points, "no current semantic points"
-                    assert max(semantic_counts, default=0) >= 5, "five semantic alternatives never appeared"
-                    assert all(abs(point.z - 40.6) < 0.01 for point in semantic_points)
+                    assert not semantic_points, "virtual semantic frontier points are still published"
                 log.flush()
                 log.seek(0)
                 output = log.read()
                 assert "[background incremental]" in output, "topology never refreshed"
                 assert output.count("[ScaleNav free-space]") <= 2, "bootstrap goals override graph goals"
                 if args.semantic:
-                    assert "type=VIRTUAL_SEMANTIC" in output, "semantic points never eligible as frontiers"
-                    assert "measured=0 virtual=5" in output, "missing five beyond-range semantic rays"
+                    assert "virtual_frontiers=0" in output, "virtual semantic frontiers were not disabled"
+                    assert "measured=0 virtual=0" in output, "fixed-depth semantic points still exist"
+                if policy:
+                    assert "[ScaleNav GCN] frontier column=" in output, "no GCN direction received"
                 print(f"PASS: {len(cloud_updates)} empty frames processed; "
                       f"{len(skeleton)} graph nodes; {len(semantic_points)} semantic points; "
                       f"forward graph width={lateral_width:.2f} m; final local goal y={goals[-1]:.2f}")
@@ -160,6 +197,13 @@ def main():
                 print(log.read()[-6000:])
                 raise
             finally:
+                if policy and policy.poll() is None:
+                    policy.send_signal(signal.SIGINT)
+                    try:
+                        policy.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        policy.kill()
+                        policy.wait()
                 if process.poll() is None:
                     process.send_signal(signal.SIGINT)
                     try:

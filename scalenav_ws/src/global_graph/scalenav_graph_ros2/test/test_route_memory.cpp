@@ -540,10 +540,60 @@ TEST(RouteMemory, BlockedOrDisconnectedIncumbentStillHoldsAfterCandidateFailure)
     true, false, true, true, false, false));
   EXPECT_TRUE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
     true, false, true, false, true, false));
-  EXPECT_TRUE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
+  EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
     true, false, true, true, true, true));
   EXPECT_FALSE(scalenav_graph::shouldHoldIncumbentAfterCandidateFailure(
     true, false, false, true, true, false));
+}
+
+TEST(RouteProgressWatchdog, LateralOscillationDoesNotResetDeadline)
+{
+  scalenav_graph::RouteProgressWatchdog watchdog;
+  const std::vector<Eigen::Vector3f> route{point(0.0F), point(20.0F)};
+  EXPECT_FALSE(watchdog.stalled(route, point(5.0F), 0.0, 2.0, 0.75F));
+  EXPECT_FALSE(watchdog.stalled(route, point(5.1F, 1.0F), 1.0, 2.0, 0.75F));
+  EXPECT_TRUE(watchdog.stalled(route, point(4.9F, -1.0F), 2.0, 2.0, 0.75F));
+}
+
+TEST(RouteProgressWatchdog, BacktrackingCannotAccumulateForwardProgress)
+{
+  scalenav_graph::RouteProgressWatchdog watchdog;
+  const std::vector<Eigen::Vector3f> route{point(0.0F), point(20.0F)};
+  EXPECT_FALSE(watchdog.stalled(route, point(5.0F), 0.0, 2.0, 0.75F));
+  EXPECT_FALSE(watchdog.stalled(route, point(3.0F), 1.0, 2.0, 0.75F));
+  EXPECT_TRUE(watchdog.stalled(route, point(5.0F), 2.0, 2.0, 0.75F));
+}
+
+TEST(RouteProgressWatchdog, ForwardMotionRefreshesDeadline)
+{
+  scalenav_graph::RouteProgressWatchdog watchdog;
+  const std::vector<Eigen::Vector3f> route{point(0.0F), point(20.0F)};
+  for (int sample = 0; sample < 10; ++sample) {
+    EXPECT_FALSE(watchdog.stalled(route, point(static_cast<float>(sample)),
+      static_cast<double>(sample), 2.0, 0.75F));
+  }
+}
+
+TEST(RouteProgressWatchdog, GeometryRefreshCannotInventProgress)
+{
+  scalenav_graph::RouteProgressWatchdog watchdog;
+  const std::vector<Eigen::Vector3f> route{point(0.0F), point(20.0F)};
+  const std::vector<Eigen::Vector3f> rebuilt{
+    point(0.0F), point(0.0F, 10.0F), point(5.0F, 10.0F), point(5.0F), point(20.0F)};
+  EXPECT_FALSE(watchdog.stalled(route, point(5.0F), 0.0, 2.0, 0.75F));
+  EXPECT_FALSE(watchdog.stalled(rebuilt, point(5.0F), 2.0, 2.0, 0.75F));
+  watchdog.reset();
+  EXPECT_FALSE(watchdog.stalled(rebuilt, point(5.0F), 3.0, 2.0, 0.75F));
+}
+
+TEST(RouteProgressWatchdog, DetourAwayFromMissionStillCountsAsRouteProgress)
+{
+  scalenav_graph::RouteProgressWatchdog watchdog;
+  const std::vector<Eigen::Vector3f> route{
+    point(0.0F), point(-5.0F), point(-5.0F, 10.0F), point(20.0F, 10.0F)};
+  EXPECT_FALSE(watchdog.stalled(route, point(0.0F), 0.0, 2.0, 0.75F));
+  EXPECT_FALSE(watchdog.stalled(route, point(-3.0F), 2.0, 2.0, 0.75F));
+  EXPECT_FALSE(watchdog.stalled(route, point(-5.0F, 3.0F), 4.0, 2.0, 0.75F));
 }
 
 TEST(RouteMemory, AcceptedRouteNeedsTwoConsecutiveUnsafeChecks)

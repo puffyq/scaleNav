@@ -1,0 +1,56 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Plane: XY
+      Plane Cell Count: 200
+      Cell Size: 1
+      Color: 160; 160; 160
+      Alpha: 0.35
+    - Class: rviz_default_plugins/PointCloud2
+      Name: RayFronts Frontiers
+      Topic: /rayfronts/msg_serv/frontiers
+      Reliability Policy: Reliable
+      Durability Policy: Volatile
+      Style: Spheres
+      Size (Pixels): 5
+      Color Transformer: FlatColor
+      Color: 255; 170; 0
+    - Class: rviz_default_plugins/PointCloud2
+      Name: RayFronts Voxels
+      Topic: /rayfronts/msg_serv/voxels
+      Reliability Policy: Reliable
+      Durability Policy: Volatile
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: FlatColor
+      Color: 80; 180; 255
+    - Class: rviz_default_plugins/Path
+      Name: YOPO Planned Path
+      Topic: /scalenav/trajectory
+      Color: 0; 255; 0
+    - Class: rviz_default_plugins/Pose
+      Name: Local Goal
+      Topic: /scalenav/local_goal
+      Shape: Arrow
+      Color: 255; 0; 0
+  Enabled: true
+  Global Options:
+    Fixed Frame: world_enu
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Scale: 100
+      X: 0
+      Y: 40

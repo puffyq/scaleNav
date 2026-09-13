@@ -20,6 +20,9 @@ SEMANTIC_RATE="${GCN_SEMANTIC_RATE:-2}"
 SEMANTIC_COST_WEIGHT="${SEMANTIC_COST_WEIGHT:-2.0}"
 SEMANTIC_ROUTE_INFLUENCE_M="${SEMANTIC_ROUTE_INFLUENCE_M:-5.0}"
 SEMANTIC_POINT_INFLUENCE_M="${SEMANTIC_POINT_INFLUENCE_M:-5.0}"
+SEMANTIC_DEPTH_MAX_M="${SEMANTIC_DEPTH_MAX_M:-20.0}"
+SEMANTIC_VIRTUAL_DEPTH_M="${SEMANTIC_VIRTUAL_DEPTH_M:-35.0}"
+SEMANTIC_VIRTUAL_FRONTIERS_ENABLED="${SEMANTIC_VIRTUAL_FRONTIERS_ENABLED:-false}"
 GRAPH_FIXED_LAYER="${GRAPH_FIXED_LAYER:-true}"
 FIXED_ALTITUDE="${FIXED_ALTITUDE:-true}"
 
@@ -87,6 +90,9 @@ run ros2 launch scalenav_graph_ros2 scalenav_graph.launch.py \
   semantic_cost_weight:="$SEMANTIC_COST_WEIGHT" \
   semantic_route_influence_m:="$SEMANTIC_ROUTE_INFLUENCE_M" \
   semantic_point_influence_m:="$SEMANTIC_POINT_INFLUENCE_M" \
+  semantic_depth_max_m:="$SEMANTIC_DEPTH_MAX_M" \
+  semantic_virtual_depth_m:="$SEMANTIC_VIRTUAL_DEPTH_M" \
+  semantic_virtual_frontiers_enabled:="$SEMANTIC_VIRTUAL_FRONTIERS_ENABLED" \
   gcn_frontier_column_topic:=/scalenav/gcn_frontier_column \
   gcn_frontier_required:=true \
   flight_statistics_file:=/dev/null graph_log_file:=/dev/null
@@ -107,5 +113,5 @@ run "$PYTHON" "$SRC/scalenav/online_planner_ros2.py" \
   --maximum-trajectory-speed-mps "$MAX_SPEED" \
   --model-image-width 160 --model-image-height 96 --model-vertical-num 3
 
-echo "started online GCN frontier selector (required); model=$GCN_MODEL column=/scalenav/gcn_frontier_column local_goal=/scalenav/local_goal device=$DEVICE pearl=$GCN_SEMANTIC prompt=$SEMANTIC_PROMPT safe_distance=${GRAPH_SAFE_DISTANCE}m graph_fixed_layer=$GRAPH_FIXED_LAYER fixed_altitude=$FIXED_ALTITUDE"
+echo "started online GCN frontier selector (required); model=$GCN_MODEL column=/scalenav/gcn_frontier_column local_goal=/scalenav/local_goal device=$DEVICE pearl=$GCN_SEMANTIC prompt=$SEMANTIC_PROMPT semantic_depth_max_m=$SEMANTIC_DEPTH_MAX_M semantic_virtual_depth_m=$SEMANTIC_VIRTUAL_DEPTH_M semantic_virtual_frontiers=$SEMANTIC_VIRTUAL_FRONTIERS_ENABLED safe_distance=${GRAPH_SAFE_DISTANCE}m graph_fixed_layer=$GRAPH_FIXED_LAYER fixed_altitude=$FIXED_ALTITUDE"
 wait -n "${PIDS[@]}"

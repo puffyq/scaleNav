@@ -114,6 +114,7 @@ def generate_launch_description():
         DeclareLaunchArgument("wait_for_initial_semantic", default_value="true"),
         DeclareLaunchArgument("initial_semantic_wait_timeout_ms", default_value="5000.0"),
         DeclareLaunchArgument("semantic_virtual_depth_m", default_value="35.0"),
+        DeclareLaunchArgument("semantic_virtual_frontiers_enabled", default_value="false"),
         DeclareLaunchArgument("semantic_points_enabled", default_value="true"),
         DeclareLaunchArgument("semantic_point_min_score", default_value="0.20"),
         DeclareLaunchArgument("semantic_point_separation_m", default_value="1.5"),
@@ -263,6 +264,8 @@ def generate_launch_description():
                 "initial_semantic_wait_timeout_ms": LaunchConfiguration(
                     "initial_semantic_wait_timeout_ms"),
                 "semantic_virtual_depth_m": LaunchConfiguration("semantic_virtual_depth_m"),
+                "semantic_virtual_frontiers_enabled": LaunchConfiguration(
+                    "semantic_virtual_frontiers_enabled"),
                 "semantic_points_enabled": LaunchConfiguration("semantic_points_enabled"),
                 "semantic_point_min_score": LaunchConfiguration("semantic_point_min_score"),
                 "semantic_point_separation_m": LaunchConfiguration(

@@ -138,11 +138,11 @@ def parse_args() -> argparse.Namespace:
         default=3.0,
         help="pause between trials in seconds (default: 3)",
     )
-    parser.add_argument("--goal-x", type=float, default=0.0)
+    parser.add_argument("--goal-x", type=float, default=-800.0)
     # argparse applies ``type`` only to values supplied on the command line;
     # defaults are kept as-is.  ROS2 geometry messages require native Python
     # floats, so an integer default here fails when publishing the goal.
-    parser.add_argument("--goal-y", type=float, default=140.0)
+    parser.add_argument("--goal-y", type=float, default=800.0)
     parser.add_argument("--goal-z", type=float, default=1.6)
     parser.add_argument("--start-x", type=float, default=0.0)
     parser.add_argument("--start-y", type=float, default=0.0)
@@ -220,6 +220,23 @@ def parse_args() -> argparse.Namespace:
         type=finite_nonnegative,
         default=5.0,
         help="far-field semantic-node influence radius in metres (default: 5.0)",
+    )
+    parser.add_argument(
+        "--semantic-depth-max-m",
+        type=finite_positive,
+        default=20.0,
+        help="maximum measured depth used for semantic projection (default: 20)",
+    )
+    parser.add_argument(
+        "--semantic-virtual-depth-m",
+        type=finite_positive,
+        default=35.0,
+        help="fixed depth for optional virtual semantic frontiers (default: 35)",
+    )
+    parser.add_argument(
+        "--semantic-virtual-frontiers",
+        action="store_true",
+        help="enable fixed-depth virtual semantic frontier projections",
     )
     parser.add_argument(
         "--dry-run",
@@ -436,6 +453,11 @@ def start_stack(
         environment["SEMANTIC_ROUTE_INFLUENCE_M"] = str(args.semantic_route_influence_m)
         environment["SEMANTIC_POINT_INFLUENCE_M"] = str(args.semantic_point_influence_m)
         environment["GCN_SEMANTIC"] = "0" if args.no_semantic else "1"
+        environment["SEMANTIC_DEPTH_MAX_M"] = str(args.semantic_depth_max_m)
+        environment["SEMANTIC_VIRTUAL_DEPTH_M"] = str(args.semantic_virtual_depth_m)
+        environment["SEMANTIC_VIRTUAL_FRONTIERS_ENABLED"] = (
+            "true" if args.semantic_virtual_frontiers else "false"
+        )
     elif args.stack in {"scalenav_ego", "scalenav_super"}:
         environment["PROMPT"] = args.prompt
         environment["SEMANTIC_COST_WEIGHT"] = str(args.semantic_cost_weight)
@@ -446,6 +468,11 @@ def start_stack(
         environment["SEMANTIC_COST_WEIGHT"] = str(args.semantic_cost_weight)
         environment["SEMANTIC_ROUTE_INFLUENCE_M"] = str(args.semantic_route_influence_m)
         environment["SEMANTIC_POINT_INFLUENCE_M"] = str(args.semantic_point_influence_m)
+        environment["SEMANTIC_DEPTH_MAX_M"] = str(args.semantic_depth_max_m)
+        environment["SEMANTIC_VIRTUAL_DEPTH_M"] = str(args.semantic_virtual_depth_m)
+        environment["SEMANTIC_VIRTUAL_FRONTIERS_ENABLED"] = (
+            "true" if args.semantic_virtual_frontiers else "false"
+        )
     console = console_path.open("w", encoding="utf-8", buffering=1)
     process = subprocess.Popen(
         command,
@@ -643,7 +670,6 @@ class MissionMonitor:
     def wait_for_stable_start(self, args: argparse.Namespace) -> None:
         deadline = time.monotonic() + args.startup_timeout
         stable_since: float | None = None
-        target_yaw = math.atan2(args.goal_y - args.start_y, args.goal_x - args.start_x)
         while time.monotonic() < deadline and not STOP_REQUESTED:
             stack_error = self.stack_error()
             if stack_error:
@@ -653,13 +679,7 @@ class MissionMonitor:
             position_error = math.dist(
                 position, (args.start_x, args.start_y, args.start_z)
             )
-            yaw_error = abs(
-                math.atan2(
-                    math.sin(self.odom_yaw() - target_yaw),
-                    math.cos(self.odom_yaw() - target_yaw),
-                )
-            )
-            stable = position_error <= 0.10 and speed <= 0.10 and yaw_error <= 0.10
+            stable = position_error <= 0.10 and speed <= 0.10
             now = time.monotonic()
             if stable:
                 if stable_since is None:
@@ -671,7 +691,7 @@ class MissionMonitor:
         if STOP_REQUESTED:
             raise InterruptedError("test interrupted")
         raise TimeoutError(
-            "timed out waiting for a stable start pose, speed, and mission heading"
+            "timed out waiting for a stable start pose and speed"
         )
 
     def publish_goal(self, args: argparse.Namespace) -> None:
@@ -1102,6 +1122,9 @@ def configuration(args: argparse.Namespace) -> dict[str, Any]:
         "semantic_cost_weight": args.semantic_cost_weight,
         "semantic_route_influence_m": args.semantic_route_influence_m,
         "semantic_point_influence_m": args.semantic_point_influence_m,
+        "semantic_depth_max_m": args.semantic_depth_max_m,
+        "semantic_virtual_depth_m": args.semantic_virtual_depth_m,
+        "semantic_virtual_frontiers": args.semantic_virtual_frontiers,
         "log_root": str(args.log_root.resolve()),
         "results_root": str(args.results_root.resolve()),
     }

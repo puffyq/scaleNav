@@ -7,6 +7,9 @@ SEMANTIC=1                    # 1=text heatmap on, 0=geometry only
 SEMANTIC_COST_WEIGHT="${SEMANTIC_COST_WEIGHT:-2.0}"    # A* semantic repulsion; 0=off
 SEMANTIC_ROUTE_INFLUENCE_M="${SEMANTIC_ROUTE_INFLUENCE_M:-8.0}"
 SEMANTIC_POINT_INFLUENCE_M="${SEMANTIC_POINT_INFLUENCE_M:-8.0}"
+SEMANTIC_DEPTH_MAX_M="${SEMANTIC_DEPTH_MAX_M:-20.0}"
+SEMANTIC_VIRTUAL_DEPTH_M="${SEMANTIC_VIRTUAL_DEPTH_M:-35.0}"
+SEMANTIC_VIRTUAL_FRONTIERS_ENABLED="${SEMANTIC_VIRTUAL_FRONTIERS_ENABLED:-false}"
 FRONTIER_GOAL_DISTANCE_WEIGHT="${FRONTIER_GOAL_DISTANCE_WEIGHT:-2.0}"
 FRONTIER_SEMANTIC_DETOUR_BUDGET_M="${FRONTIER_SEMANTIC_DETOUR_BUDGET_M:-45.0}"
 FRONTIER_SEMANTIC_FRAME_BUDGET_M="${FRONTIER_SEMANTIC_FRAME_BUDGET_M:-12.0}"
@@ -155,6 +158,9 @@ run ros2 launch scalenav_graph_ros2 scalenav_graph.launch.py \
   semantic_cost_weight:="$SEMANTIC_COST_WEIGHT" \
   semantic_route_influence_m:="$SEMANTIC_ROUTE_INFLUENCE_M" \
   semantic_point_influence_m:="$SEMANTIC_POINT_INFLUENCE_M" \
+  semantic_depth_max_m:="$SEMANTIC_DEPTH_MAX_M" \
+  semantic_virtual_depth_m:="$SEMANTIC_VIRTUAL_DEPTH_M" \
+  semantic_virtual_frontiers_enabled:="$SEMANTIC_VIRTUAL_FRONTIERS_ENABLED" \
   wait_for_initial_semantic:="$WAIT_FOR_INITIAL_SEMANTIC" \
   frontier_goal_distance_weight:="$FRONTIER_GOAL_DISTANCE_WEIGHT" \
   frontier_semantic_detour_budget_m:="$FRONTIER_SEMANTIC_DETOUR_BUDGET_M" \
@@ -193,5 +199,5 @@ else
   start_planner
 fi
 
-echo "started; goal=/goal_pose semantic=$SEMANTIC prompt=$PROMPT semantic_cost_weight=$SEMANTIC_COST_WEIGHT semantic_route_influence_m=$SEMANTIC_ROUTE_INFLUENCE_M semantic_point_influence_m=$SEMANTIC_POINT_INFLUENCE_M graph_fixed_layer=$GRAPH_FIXED_LAYER fixed_altitude=$FIXED_ALTITUDE local_sliding_graph=$LOCAL_SLIDING_GRAPH local_sliding_graph_radius_m=$LOCAL_SLIDING_GRAPH_RADIUS_M map_history_radius_m=$MAP_HISTORY_RADIUS_M reuse_graph_on_goal=$REUSE_GRAPH_ON_GOAL maximum_trajectory_speed_mps=$MAXIMUM_TRAJECTORY_SPEED_MPS plan_from_reference=true ignore_collision=$IGNORE_COLLISION airsim_reset=$AIRSIM_RESET_ON_START recorded_logs=$LOG_ROOT"
+echo "started; goal=/goal_pose semantic=$SEMANTIC prompt=$PROMPT semantic_cost_weight=$SEMANTIC_COST_WEIGHT semantic_route_influence_m=$SEMANTIC_ROUTE_INFLUENCE_M semantic_point_influence_m=$SEMANTIC_POINT_INFLUENCE_M semantic_depth_max_m=$SEMANTIC_DEPTH_MAX_M semantic_virtual_depth_m=$SEMANTIC_VIRTUAL_DEPTH_M semantic_virtual_frontiers=$SEMANTIC_VIRTUAL_FRONTIERS_ENABLED graph_fixed_layer=$GRAPH_FIXED_LAYER fixed_altitude=$FIXED_ALTITUDE local_sliding_graph=$LOCAL_SLIDING_GRAPH local_sliding_graph_radius_m=$LOCAL_SLIDING_GRAPH_RADIUS_M map_history_radius_m=$MAP_HISTORY_RADIUS_M reuse_graph_on_goal=$REUSE_GRAPH_ON_GOAL maximum_trajectory_speed_mps=$MAXIMUM_TRAJECTORY_SPEED_MPS plan_from_reference=true ignore_collision=$IGNORE_COLLISION airsim_reset=$AIRSIM_RESET_ON_START recorded_logs=$LOG_ROOT"
 wait -n $PIDS

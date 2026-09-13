@@ -313,7 +313,9 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       static_cast<int>(declare_parameter<int>("semantic_patch_cols", 5)), 1, 32);
     semantic_patch_rows_ = std::clamp(
       static_cast<int>(declare_parameter<int>("semantic_patch_rows", 3)), 1, 32);
-    semantic_virtual_depth_m_ = declare_parameter<double>("semantic_virtual_depth_m", 30.0);
+    semantic_virtual_depth_m_ = declare_parameter<double>("semantic_virtual_depth_m", 35.0);
+    semantic_virtual_frontiers_enabled_ = declare_parameter<bool>(
+      "semantic_virtual_frontiers_enabled", false);
     semantic_points_enabled_ = declare_parameter<bool>("semantic_points_enabled", true);
     // PEARL scores are calibrated contrast scores, not obstacle clearance.
     // Retain weak but useful semantic evidence; geometric collision checks
@@ -431,9 +433,11 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       static_cast<int>(get_parameter("bubble_topo/semantic_edge_candidate_limit").as_int()),
       diagnostic_log_period_ms_);
     RCLCPP_INFO(get_logger(),
-      "ScaleNav semantic projection: enabled=%d max_nodes=%d separation=%.2f m virtual_depth=%.2f m",
+      "ScaleNav semantic projection: enabled=%d max_nodes=%d separation=%.2f m "
+      "virtual_frontiers=%d virtual_depth=%.2f m",
       static_cast<int>(semantic_points_enabled_), semantic_point_max_nodes_,
-      semantic_point_separation_m_, semantic_virtual_depth_m_);
+      semantic_point_separation_m_, static_cast<int>(semantic_virtual_frontiers_enabled_),
+      semantic_virtual_depth_m_);
     RCLCPP_INFO(get_logger(), "ScaleNav graph snapshots: file=%s period=%d ms",
       graph_log_file_.c_str(), diagnostic_log_period_ms_);
 
@@ -1320,8 +1324,10 @@ class ScaleNavGraphNode final : public rclcpp::Node {
           append_projection(measured_depth_m, false);
           ++semantic_measured_count;
         }
-        append_projection(static_cast<float>(semantic_virtual_depth_m_), true);
-        ++semantic_virtual_count;
+        if (semantic_virtual_frontiers_enabled_) {
+          append_projection(static_cast<float>(semantic_virtual_depth_m_), true);
+          ++semantic_virtual_count;
+        }
       }
       semantic_point_count = frame.points_world.size();
       semantic_frame_baseline = frame_baseline;
@@ -1420,6 +1426,9 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       // still be retained, but no previous route is reused for planning.
       accepted_route_.clear();
       frontier_command_.clear();
+      route_progress_watchdog_.reset();
+      have_stuck_replan_time_ = false;
+      have_last_stuck_replan_time_ = false;
       blocked_shortcuts_.clear();
       mission_committed_route_ = false;
       mission_direct_goal_latched_ = false;
@@ -1497,7 +1506,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     const auto decode_start = callback_start;
     pcl::PointCloud<fast_planner::PointType> cloud_body;
     pcl::fromROSMsg(*message, cloud_body);
-    if (cloud_body.empty() || !have_odom_) {
+    if (!have_odom_) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
         "[ScaleNav input] dropped cloud: points=%zu have_odom=%d",
@@ -1535,11 +1544,13 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     pcl::VoxelGrid<fast_planner::PointType> voxel_filter;
     const float voxel_size = static_cast<float>(std::max(map_voxel_size_, 0.05));
     voxel_filter.setLeafSize(voxel_size, voxel_size, voxel_size);
-    voxel_filter.setInputCloud(cloud_world.makeShared());
-    voxel_filter.filter(*voxel_cloud);
+    if (!cloud_world.empty()) {
+      voxel_filter.setInputCloud(cloud_world.makeShared());
+      voxel_filter.filter(*voxel_cloud);
+    }
     const double voxel_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - voxel_start).count();
-    if (voxel_cloud->empty()) {
+    if (!cloud_body.empty() && voxel_cloud->empty()) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
         "[ScaleNav input] dropped cloud after voxel filtering: input=%zu leaf=%.3f m",
@@ -1589,8 +1600,32 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       voxel_size);
   }
 
-  void onFreeRays(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &)
+  void onFreeRays(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &message)
   {
+    if (!have_odom_) return;
+    TimedPose capture_pose;
+    double pose_sync_ms = 0.0;
+    if (!poseForCloud(message->header.stamp, capture_pose, pose_sync_ms)) return;
+    pcl::PointCloud<fast_planner::PointType> rays_body;
+    pcl::fromROSMsg(*message, rays_body);
+    pcl::PointCloud<fast_planner::PointType> rays_world;
+    rays_world.reserve(rays_body.size());
+    for (const auto &point : rays_body.points) {
+      const Eigen::Vector3f body(point.x, point.y, point.z);
+      if (!body.allFinite()) continue;
+      const Eigen::Vector3f world =
+        capture_pose.position + capture_pose.orientation * body;
+      rays_world.push_back(fast_planner::PointType(world.x(), world.y(), world.z()));
+    }
+    fast_planner::LIOInterface::Ptr active_map;
+    {
+      std::lock_guard<std::mutex> lock(graph_mutex_);
+      active_map = map_;
+    }
+    if (active_map->updateFreeRaysWorld(
+        rays_world, capture_pose.position, capture_pose.orientation)) {
+      map_changed_.store(true);
+    }
   }
 
   static std::int64_t stampNanoseconds(const builtin_interfaces::msg::Time &stamp)
@@ -2676,8 +2711,14 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     const bool route_ahead = accepted_witness_usable &&
       (local_goal_distance >= static_cast<float>(stuck_replan_min_goal_distance_m_) ||
        accepted_route_remaining >= static_cast<float>(stuck_replan_min_goal_distance_m_));
+    if (!route_ahead) route_progress_watchdog_.reset();
+    const bool no_route_progress = route_ahead && route_progress_watchdog_.stalled(
+      accepted_route_.witness_path, position_,
+      std::chrono::duration<double>(now_steady.time_since_epoch()).count(),
+      stuck_replan_timeout_ms_ * 0.001,
+      static_cast<float>(std::max(0.1, local_goal_min_advance_m_)));
     if (accepted_witness_usable && route_ahead &&
-        speed_mps_ <= static_cast<float>(stuck_replan_speed_mps_)) {
+        (no_route_progress || speed_mps_ <= static_cast<float>(stuck_replan_speed_mps_))) {
       if (!have_stuck_replan_time_) {
         stuck_replan_start_time_ = now_steady;
         have_stuck_replan_time_ = true;
@@ -2687,9 +2728,15 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       const double since_last_s = have_last_stuck_replan_time_ ?
         std::chrono::duration<double>(now_steady - last_stuck_replan_time_).count() :
         std::numeric_limits<double>::infinity();
-      if (stopped_ms >= stuck_replan_timeout_ms_ &&
+      if ((no_route_progress || stopped_ms >= stuck_replan_timeout_ms_) &&
           since_last_s >= stuck_replan_cooldown_s_) {
         accepted_route_.clear();
+        frontier_command_.clear();
+        polynomial_guide_path_.clear();
+        polynomial_curve_ = scalenav_graph::WitnessParametricCurve();
+        polynomial_curve_valid_ = false;
+        have_previous_local_goal_ = false;
+        route_progress_watchdog_.reset();
         accepted_witness_usable = false;
         force_local_goal_reset_ = true;
         map_changed_.store(true);
@@ -2702,10 +2749,11 @@ class ScaleNavGraphNode final : public rclcpp::Node {
           get_logger(),
           "[ScaleNav route] executor stalled on accepted route; forcing fresh "
           "odom-rooted A* position=(%.2f,%.2f,%.2f) local_goal_distance=%.2f "
-          "route_remaining=%.2f stopped_ms=%.0f",
+          "route_remaining=%.2f stopped_ms=%.0f no_route_progress=%d speed=%.2f",
           position_.x(), position_.y(), position_.z(),
           static_cast<double>(local_goal_distance),
-          static_cast<double>(accepted_route_remaining), stopped_ms);
+          static_cast<double>(accepted_route_remaining), stopped_ms,
+          static_cast<int>(no_route_progress), static_cast<double>(speed_mps_));
       }
     } else if (speed_mps_ > static_cast<float>(stuck_replan_speed_mps_) ||
                !accepted_witness_usable || !route_ahead) {
@@ -3218,8 +3266,18 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     bool candidate_witness_rejected = false;
     const bool candidate_selected_before_publish = candidate_accepted && found &&
       !using_accepted_route;
-    if (candidate_selected_before_publish &&
-        !candidateExecutionPathPreflight(active_topo, path_nodes)) {
+    bool candidate_preflight_valid = !candidate_selected_before_publish ||
+      candidateExecutionPathPreflight(active_topo, path_nodes);
+    if (!candidate_preflight_valid && path_nodes != candidate_topology_path &&
+        candidateExecutionPathPreflight(active_topo, candidate_topology_path)) {
+      path_nodes = candidate_topology_path;
+      candidate_shortcut_chords.clear();
+      shortcut_count = 0;
+      candidate_preflight_valid = true;
+      RCLCPP_WARN(get_logger(),
+        "[ScaleNav route] shortcut preflight failed; using validated original A* path");
+    }
+    if (!candidate_preflight_valid) {
       candidate_witness_rejected = true;
       const bool incumbent_topology_executable = incumbentTopologyStillExecutable();
       const bool hold_incumbent =
@@ -3351,6 +3409,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
       accepted_route_.valid = proposed_have_frontier_goal;
       if (accepted_route_.valid) mission_committed_route_ = true;
       if (frontier_goal_changed || candidate_accepted) {
+        route_progress_watchdog_.reset();
         accepted_route_.frontier_goal_initial_route_length_m =
           scalenav_graph::routeLength(accepted_route_.witness_path);
         accepted_route_.frontier_goal_progress_m = 0.0F;
@@ -4323,6 +4382,8 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         view.min_heatmap_score = static_cast<float>(semantic_point_min_score_);
         view.min_radius_m = static_cast<float>(semantic_annotation_min_radius_m_);
         view.max_radius_m = static_cast<float>(semantic_annotation_max_radius_m_);
+        view.ground_z_m = graph_fixed_layer_ ? static_cast<float>(graph_layer_z_) :
+          frame->origin.z();
         semantic_reverse_annotated = topo->annotateVerifiedNodesFromHeatmap(
           view, frame->stamp_ns);
         semantic_nodes_updated += semantic_reverse_annotated;
@@ -5353,6 +5414,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
 
   void preserveAcceptedTopologyPath() {
     if (accepted_route_.topology_path.size() < 2) return;
+    const auto previous_witness = accepted_route_.witness_path;
     accepted_route_.execution_path = accepted_route_.topology_path;
     accepted_route_.witness_path.clear();
     accepted_route_.witness_path.reserve(accepted_route_.topology_path.size());
@@ -5367,9 +5429,22 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     }
     accepted_route_.shortcut_chords.clear();
     accepted_route_.unsafe_prediction_frames = 0;
+    const bool geometry_changed = previous_witness.size() != accepted_route_.witness_path.size() ||
+      !std::equal(previous_witness.begin(), previous_witness.end(),
+        accepted_route_.witness_path.begin(),
+        [](const Eigen::Vector3f &previous, const Eigen::Vector3f &current) {
+          return previous.isApprox(current, 1e-6F);
+        });
+    if (geometry_changed) {
+      refitPolynomialGuideFromNodes(accepted_route_.witness_path);
+    }
     const float route_length = scalenav_graph::routeLength(accepted_route_.witness_path);
-    const float progress = scalenav_graph::routeProgressAlongPath(
-      accepted_route_.witness_path, position_);
+    float curve_progress = 0.0F;
+    const bool curve_progress_valid = polynomial_curve_valid_ &&
+      scalenav_graph::routeProgressTAlongCurve(
+        polynomial_curve_, position_, 0.0F, curve_progress);
+    const float progress = curve_progress_valid ? curve_progress * route_length :
+      scalenav_graph::routeProgressAlongPath(accepted_route_.witness_path, position_);
     if (std::isfinite(route_length) && route_length > 1e-3F && std::isfinite(progress)) {
       accepted_route_.frontier_goal_progress_m = std::clamp(progress, 0.0F, route_length);
       accepted_route_.frontier_goal_progress_t =
@@ -5504,6 +5579,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   double semantic_visualization_max_score_ = 0.4;
   double semantic_baseline_quantile_ = 0.25;
   double semantic_virtual_depth_m_ = 30.0;
+  bool semantic_virtual_frontiers_enabled_ = false;
   bool semantic_points_enabled_ = true;
   double semantic_point_min_score_ = 0.20;
   double semantic_point_separation_m_ = 1.5;
@@ -5570,6 +5646,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   std::chrono::steady_clock::time_point stuck_replan_start_time_{};
   std::chrono::steady_clock::time_point last_stuck_replan_time_{};
   bool have_stuck_replan_time_ = false;
+  scalenav_graph::RouteProgressWatchdog route_progress_watchdog_;
   bool have_last_stuck_replan_time_ = false;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr free_ray_sub_;

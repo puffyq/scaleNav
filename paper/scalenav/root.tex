@@ -49,8 +49,8 @@
        \vspace{1.6em}}}\endgroup}}
 
 \title{\LARGE \bf
-TopoGuide: A Plug-and-Play Topological Route Layer\\
-for Language-Guided Aerial Navigation
+TopoGuide: Open-Vocabulary Semantic Route Guidance\\
+for Aerial Obstacle Avoidance
 }
 
 % Author block anonymized for the double-anonymous review process.
@@ -123,13 +123,13 @@ sensing horizon \cite{yamauchi,sptm,ving,epic,bubble}.
 \centering
 \safefig[width=\columnwidth]{pics/teaser_candidate_v4.png}
 \caption{Schematic of the proposed TopoGuide route layer.
-(a)~RGB, PEARL response, and depth at graph time $t^*$;
-white depth pixels are no-returns beyond $20$~m.
-(b)~Verified graph nodes and edges (blue-gray), far-field
-semantic observations (red/gray crosses), the GCN-selected central
-direction C ($0^\circ$, purple), the accepted A* path (teal), its
-polynomial fit (orange dashed), the frontier goal (orange star), and
-the moving local goal (magenta diamond).}
+(a)~RGB, PEARL response, and depth at graph time $t^*$; white depth
+pixels are no-returns beyond $20$~m.
+(b)~Verified graph nodes and edges (blue-gray), far-field semantic
+observations (red/gray crosses), the GCN-selected direction (purple),
+the accepted A* path (teal), its polynomial fit (orange dashed), the
+frontier goal (orange star), and the moving local goal (magenta
+diamond).}
 \label{fig:teaser}
 \end{figure}
 
@@ -201,13 +201,12 @@ The main contributions are:
 
 \begin{figure*}[!t]
 \centering
-\safefig[width=0.98\textwidth]{pics/system_architecture_topology_v3.pdf}
+\safefig[width=0.98\textwidth]{pics/system_architecture_pipeline.pdf}
 \vspace{-2pt}
-\caption{TopoGuide as a plug-and-play route layer.  Depth and odometry maintain
-persistent verified topology; RGB and text shape route cost, and a topology
-GCN ranks frontier directions.  A* and collision checks accept a
-route before the moving-goal interface drives a goal-conditioned local
-executor, which receives only depth, state, and the local goal.}
+\caption{TopoGuide pipeline on logged data from one dense-block flight
+(the same $t^*$ as Fig.~\ref{fig:teaser}).  Semantics and the GCN rank
+candidate directions; verified geometry authorizes the route; only the
+moving local goal reaches the executor.}
 \label{fig:system_architecture}
 \end{figure*}
 
@@ -228,7 +227,7 @@ across local replanning.
 Sparse topological representations complement such planners with
 route memory.  Frontier-based exploration retains frontier and
 explored-space structure \cite{yamauchi}; bubble-based structures
-support local replanning \cite{bubble}; and skeleton-based
+support local replanning \cite{bubble}; skeleton-based
 topological graphs organize exploration in complex environments
 \cite{epic}; and a persistent visibility graph enables
 route recall and backtracking in partially known environments
@@ -252,7 +251,11 @@ generally lower than those of the local controller, and they do not
 directly provide collision-certified executable trajectories: in the
 cited systems, semantic evidence is primarily used for frontier or
 goal selection, while collision-certified route costs are handled
-separately.  RAVEN transfers open-set semantic memory to aerial robots
+separately.  Dense voxel maps also accumulate over a mission; the
+route layer here instead persists only a sparse verified skeleton and
+searches a local working set, so the online cost does not grow with
+mission length (Sec.~\ref{sec:protocol}).  RAVEN transfers open-set
+semantic memory to aerial robots
 \cite{raven}, but uses beyond-range semantics to approach targets while
 collision avoidance remains purely geometric.
 We
@@ -434,10 +437,10 @@ Eq.~\eqref{eq:node_score}.
 \centering
 \safefig[width=\columnwidth]{pics/semantic_node_projection.pdf}
 \caption{Node scoring and virtual semantic frontiers in the block scene.
-(a)~Verified free-space nodes scored through the projected Gaussian
-support (colored dots); stars are the five fixed-depth virtual semantic
-frontiers, attached to the verified backbone by dashed links.  (b)~The
-same heatmap: high response on the block faces, low on the open route.}
+(a)~Verified nodes scored through the projected Gaussian support
+(colored dots); stars are fixed-depth virtual semantic frontiers on
+dashed links.  (b)~The same heatmap: high response on the block faces,
+low on the open route.}
 \label{fig:semantic_projection}
 \end{figure}
 
@@ -517,7 +520,7 @@ search falls back to the verified frontier closest to the mission goal.
 \paragraph{Goal interface}
 The selected route is the polyline through the accepted vertex centers.
 The route remains active until
-the traversed fraction exceeds a fixed threshold, or until an underlying
+the traversed fraction exceeds a threshold, or until an underlying
 edge witness fails the collision recheck, in which case a new search is
 issued.  Route commitment is therefore enforced by the route layer
 rather than by the local policy.
@@ -587,14 +590,14 @@ convolution layer.
 \caption{FrontierGCN route-direction policy and its offline supervision.  (a)~Two
 weighted graph-convolution layers encode the online skeleton and five virtual
 candidates, producing a five-way route proposal.  (b)~Offline label
-construction: from the global map overview, to the expert A* path, to the
-direction target in the same local window.}
+construction: global map overview, expert A* path, and direction target
+in the same local window.}
 \label{fig:gcn_model}
 \end{figure}
 
 Training labels are privileged.  For the planar policy, A* on the
-inflated ground-truth raster returns the direction of the first
-sufficiently distant path point, while the volumetric policy is labeled
+inflated ground-truth raster returns the direction of the first path
+point at least $35$~m ahead, while the volumetric policy is labeled
 by A* in the inflated mesh volume.  Ground-truth geometry serves only to
 construct these offline labels and is not available to the deployed
 policy; session-level splits keep adjacent frames out of both the
@@ -604,19 +607,24 @@ separately in Sec.~\ref{sec:heuristic_eval}.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{EXPERIMENTS}
 \label{sec:experiments}
-The evaluation covers a cross-executor plug-in comparison on a mission
-mixing a dense small-obstacle field with a single large block, ablations
-of the semantic cost and the learned frontier policy together with an
-offline classification analysis, and a volumetric power-line mission
-through a grove.
-Closed-loop and profiling trials are conducted in Unreal Engine 5.7 with
-Colosseum, an AirSim-compatible simulator \cite{airsim}, using synchronized
-RGB-D and odometry.  The semantic and GCN interface is additionally
-validated in closed-loop real-world flights
-(Fig.~\ref{fig:gcn_real_views}).  Unless noted otherwise, the primary experiments use a
-1.6-m planning layer and one-way mission from $(0,0,1.6)$ to
-$(0,140,1.6)$~m; neither the obstacle layout nor the nominal start and goal is
-randomized across methods.
+The evaluation covers a cross-executor plug-in comparison, ablations of
+the semantic cost and the learned frontier policy together with an
+offline classification analysis, an obstacle-scale sweep, and a
+volumetric power-line mission.
+Closed-loop and profiling trials run in Unreal Engine 5.7 with
+Colosseum, an AirSim-compatible simulator \cite{airsim}, on synchronized
+RGB-D and odometry.  Four scenes are used: a primary dense-block
+course---a 140-m one-way mission from $(0,0,1.6)$ to $(0,140,1.6)$~m at
+a 1.6-m planning layer, mixing a dense small-obstacle field with a
+single ${\approx}60$-m block (query ``blocks, wall''), with no layout or
+endpoint randomization across methods; a single-block course with the
+same endpoints and the block length varied from $5$ to $100$~m; a
+power-line grove with endpoints $(0,0,3.5)$ and $(0,140,3.5)$~m (query
+``line''); and an unseen urban scene with tall structures, a 200-m
+mission at building height (query ``building, walls'').  The semantic
+and GCN interface is additionally validated in closed-loop real-world
+flights over a building site and tree rows
+(Fig.~\ref{fig:gcn_real_views}).
 
 \subsection{Cross-Executor Closed-Loop Evaluation}
 \label{sec:protocol}
@@ -624,11 +632,11 @@ randomized across methods.
 \centering
 \safefig[width=0.99\textwidth]{pics/experiments/map2_0_140_1p6/figure4_integrated_topoguide.pdf}
 \vspace{-2pt}
-\caption{Integrated cross-executor evaluation.  Upper row: each standalone
-executor (blue, orange, green) and FAR Planner (purple) overlaid with its
-TopoGuide counterpart (red) on the same obstacle backdrop.  Lower row: mean
-speed over elapsed flight time for the same representative flights.  Stars
-mark completed goals; crosses mark incomplete flights.}
+\caption{Integrated cross-executor evaluation.  Upper row: standalone
+executors (blue, orange, green) and FAR Planner (purple) overlaid with
+their TopoGuide counterparts (red).  Lower row: mean speed over elapsed
+flight time for the same flights.  Stars mark completed goals; crosses
+mark incomplete flights.}
 \label{fig:integrated_results}
 \end{figure*}
 
@@ -678,17 +686,14 @@ online.  Matched language trials use the query ``blocks, wall.''
 
 \emph{Results.}  Figure~\ref{fig:integrated_results} combines representative trajectory
 overlays, closed-loop outcome rates, and mean-speed time series.  Each
-of the first three upper panels overlays one standalone executor with its TopoGuide-guided
-counterpart in a common world frame.  The aligned lower panel compares their
-binned mean speeds over the same observed flight intervals.  The fourth
-column adds the FAR trajectory and its odometry-derived speed profile.
-All four speed panels use actual odometry timestamps and a common speed range,
-but independent time ranges determined by each group's longest observed flight.
-Time is measured from each observed flight's start, with curves ending at
-their recorded termination times.
+of the first three columns pairs one standalone executor with its
+TopoGuide-guided counterpart; the fourth adds FAR Planner.  Speed
+panels use odometry timestamps, a common speed range, and per-group
+time ranges ending at the recorded termination of the longest observed
+flight.
 
-All three standalone configurations terminated without a successful mission,
-whereas
+On the dense-block mission, all three standalone configurations
+terminated without a successful mission, whereas
 the TopoGuide-guided YOPO, EGO-Planner, and SUPER variants completed $100\%$,
 $70\%$, and $90\%$ of trials.  This demonstrates that the same topological goal
 contract is executable by three different planner cores.  Values marked
@@ -702,12 +707,12 @@ correspondingly longer budget.
 
 The TopoGuide (YOPO) run produced no collision or timeout events: all trials
 reached the goal and satisfied the final position and settling-speed
-tolerances.  Relative to the 140-m straight-line mission, its mean path of
+tolerances.  Relative to the 140-m dense-block straight line, its mean path of
 $173.2$~m corresponds to a $23.7\%$ path overhead, with a mean terminal
 position error of $0.081\pm0.028$~m and a mean terminal speed of
 $0.291\pm0.006$~m/s.
 
-\emph{Global-planning references.}  On the same
+\emph{Global-planning references.}  On the dense-block
 mission, FAR Planner \cite{farplanner} completes all its flights but with
 longer paths ($200.33$~m) and slower flights ($42.54$~s) than both
 TopoGuide stacks, while a coarse global A* on a low-resolution accumulated
@@ -720,17 +725,17 @@ window: retaining the explored backbone does not enlarge the planning tick.
 At
 approximately 500 nodes and 3,200 directed edges, GCN inference on an
 NVIDIA GeForce RTX 3090 adds 0.83~ms mean latency (0.60~ms at P50, 1.97~ms
-at P95).  These inference measurements characterize one component of the
-incremental route layer, not total executor compute.
+at P95), three orders of magnitude below 1080p semantic inference
+(Fig.~\ref{fig:powerline3d}, top).  These inference measurements
+characterize one component of the incremental route layer, not total
+executor compute.
 
 \subsection{Obstacle-Scale Evaluation}
 \label{sec:scale_sweep}
 To separate the contribution of obstacle scale from the fixed layout, we
-repeat the mission on a single-block course with the block length varied
-from $5$~m to $100$~m, holding the start, goal, and planning layer fixed,
-and compare the standalone executor with the TopoGuide-guided stack
-(hand-designed ranking) at
-each scale (Fig.~\ref{fig:scale_sweep}).  The standalone executor remains
+compare the standalone executor with the TopoGuide-guided stack
+(hand-designed ranking) on the single-block course
+(Fig.~\ref{fig:scale_sweep}).  The standalone executor remains
 competitive up to a 60-m block but pays a rapidly growing detour
 (234.2~m, 76.2~s), and fails outright at 100~m; TopoGuide's cost grows
 mildly and it completes every scale.
@@ -738,27 +743,23 @@ mildly and it completes every scale.
 \begin{figure}[!t]
 \centering
 \safefig[width=0.98\columnwidth]{pics/experiments/scale_sweep.pdf}
-\caption{Obstacle-scale sweep on the single-block course.  The standalone
-executor's path length and flight time grow steeply with block length and
-it times out at 100~m; TopoGuide completes every scale with a mild cost
-increase.  From left to right: completed path length, completion time,
-and mean speed.  Blue denotes YOPO-Simple and red denotes TopoGuide.}
+\caption{Obstacle-scale sweep on the single-block course: completed
+path length, completion time, and mean speed versus block length.
+Blue denotes YOPO-Simple and red denotes TopoGuide.}
 \label{fig:scale_sweep}
 \end{figure}
 
 \subsection{Ablations and Policy Analysis}
 \label{sec:heuristic_eval}
 \emph{Semantic influence.}  To test whether the route benefit depends on semantic evidence beyond the
-depth envelope, we repeated the GCN stack with the same fixed mission,
-90-s timeout, graph configuration, and query, while disabling PEARL,
+depth envelope, we repeated the GCN stack on the dense-block mission with
+the same 90-s timeout, graph configuration, and query, while disabling PEARL,
 semantic nodes, and semantic edge cost.  The resulting flight metrics are
 reported in Table~\ref{tab:closed_loop}.
 
 \begin{table}[t]
-\caption{Route-layer ablations on the dense-block mission.  Semantic-off
-removes PEARL heatmaps, far-field nodes, and semantic edge cost; the
-frontier-policy group replaces only the ranking policy.  Continuous values
-are computed over successful flights.}
+\caption{Route-layer ablations on the dense-block mission; continuous
+values are computed over successful flights.}
 \label{tab:closed_loop}
 \centering
 \footnotesize
@@ -774,7 +775,7 @@ Irrelevant query & 80 & 20 & 0 & $175.8\pm6.1$ & $35.0\pm1.7$ \\
 \midrule
 \multicolumn{6}{l}{\emph{Frontier-policy ablation}}\\
 Hand-designed & 88.9 & 11.1 & 0 & $199.1\pm14.1$ & $38.5\pm3.1$ \\
-GCN & 100.0 & 0.0 & 0.0 & $173.2\pm3.6$ & $33.8\pm0.8$ \\
+GCN & 100 & 0 & 0 & $173.2\pm3.6$ & $33.8\pm0.8$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -813,13 +814,22 @@ hand-designed frontier policy matches $22.2\%$ of the strict 35-m labels.
 Figure~\ref{fig:gcn_real_views} shows the deployed interface in
 closed-loop real-world flights: the PEARL heatmap, the selected GCN
 column, and the mission-goal direction are computed online on the real
-fisheye frames.
+fisheye frames.  All reported flights run PEARL; the SCLIP panels in
+Fig.~\ref{fig:powerline3d} (bottom) are post-hoc qualitative overlays
+on logged frames without unified score normalization and enter no
+closed-loop result.  Both open-vocabulary front-ends respond off the
+obstacle on some frames; because
+the response enters only as a soft route cost, such errors do not
+commit the route, and where the response is spatially uniform---as
+over the tree rows in the forest flight
+(Fig.~\ref{fig:gcn_real_views}, right)---distance and the
+mission-goal direction dominate the frontier choice.
 
 \subsection{Volumetric Navigation}
 \label{sec:3d_eval}
-We further evaluate the volumetric mode in a separate power-line mission
-through a grove.  The start and goal are $(0,0,3.5)$ and $(0,140,3.5)$~m, placing the
-nominal flight height through the power-line corridor.  Both the fixed
+We further evaluate the volumetric mode on the power-line grove mission,
+whose endpoints place the nominal flight height through the power-line
+corridor.  Both the fixed
 planning layer and YOPO's fixed-altitude constraint are disabled.  A dedicated
 15-direction checkpoint, trained on 2,200 graph states labeled by
 26-connected A* in the privileged 3-D mesh volume, ranks three pitch rows and
@@ -831,17 +841,17 @@ $0.05$ and the corridor disappears from the semantic stream
 
 \begin{figure}[!t]
 \centering
-\safefig[width=\columnwidth]{pics/candidates/fig8_resolution_resource.png}
-\caption{Resolution sensitivity of the semantic cue and its online cost.
-Top: online wall time per invocation (log scale); PEARL dominates and
-scales steeply with input resolution, while the route layer remains two
-orders of magnitude cheaper.  Bottom: the same frames at $160{\times}96$
-and at 1080p on two views; the peak wire response rises from $0.054$ to
-$0.678$ and from $0.030$ to $0.903$.}
+\safefig[width=\columnwidth]{pics/candidates/fig8_semantic_frontend.png}
+\caption{Semantic front-end cost and response quality.
+Top: online wall time per invocation (log scale).  Middle: the same
+frame at $160{\times}96$ and 1080p, heatmap inset at the lower right;
+the peak wire response rises from $0.054$ to $0.678$.  Bottom: offline
+PEARL/SCLIP overlay comparison on logged real-flight frames; SCLIP is
+not used in any flight.}
 \label{fig:powerline3d}
 \end{figure}
 
-TopoGuide completes $80\%$ of the trials without timeout,
+On the grove mission, TopoGuide completes $80\%$ of the trials,
 with a mean path of $167.40\pm13.83$~m and a mean flight time of
 $36.98\pm5.30$~s.  Every successful
 flight changes altitude substantially: the per-flight vertical span ranges
@@ -853,7 +863,12 @@ branch selection.
 
 \subsection{Generalization to an Unseen Scene}
 \label{sec:generalization}
-We transfer the system to an unseen urban scene with tall structures. The mission is 200 m long, flown at building height, with the query "building, walls." Neither the route layer nor the GCN checkpoint is retrained or retuned. The checkpoint is trained on privileged A* labels from the geometry-obstacle map. Both TopoGuide variants complete the mission without collisions: the GCN policy in 231.0 m and 42.6 s, the hand-designed ranking in 229.1 m and 42.5 s. The route layer transfers zero-shot.
+We transfer the system to the unseen urban scene without retraining or
+retuning the route layer or the GCN checkpoint, which is trained on
+privileged A* labels from the geometry-obstacle map.  Both
+TopoGuide variants complete the urban mission without collisions: the
+GCN policy in 231.0 m and 42.6 s, the hand-designed ranking in 229.1 m
+and 42.5 s---zero-shot.
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -863,14 +878,14 @@ TopoGuide is a topological route layer rather than another local planner:
 it turns depth and odometry into persistent witness-verified structure,
 combines language-conditioned route preference with a learned frontier
 policy, and exposes only a moving local goal.  The same implementation
-drove three heterogeneous executors without retraining, supporting the
-central claim: route memory and language-conditioned route choice
+drove three heterogeneous executors without retraining: route memory
+and language-conditioned route choice
 can be added above interchangeable short-horizon executors.  The
 interface binds to neither a specific semantic model nor a specific scene
 or object category: the semantic front end is interchangeable, and the
-same deployment transferred to the city scene without modification.
+same deployment transferred to the city scene unmodified.
 Semantic projections remain hypotheses checked only against known
-obstacles; final execution safety stays with the verified geometry and
+obstacles; execution safety stays with the verified geometry and
 the local executor.
 
 
@@ -1010,8 +1025,7 @@ S. Shah, D. Dey, C. Lovett, and A. Kapoor,
 ``AirSim: High-Fidelity Visual and Physical Simulation for Autonomous
 Vehicles,'' in \emph{Field and Service Robotics}, 2018, pp. 621--635.
 \bibitem{raven}
-O. Alama, A. Bhattacharya, H. He, S. Kim, Y. Qiu, W. Wang, C. Ho,
-N. Keetha, and S. Scherer,
+O. Alama \emph{et al.},
 ``RAVEN: Resilient Aerial Navigation via Open-Set Semantic Memory and
 Behavior Adaptation,'' in \emph{Proc. IEEE Int. Conf. Robot. Autom.},
 2026.

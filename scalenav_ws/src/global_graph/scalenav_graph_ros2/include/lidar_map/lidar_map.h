@@ -190,10 +190,19 @@ class LIOInterface {
     return changed || needs_prune;
   }
 
-  bool updateFreeRaysWorld(const pcl::PointCloud<PointType> &,
+  bool updateFreeRaysWorld(const pcl::PointCloud<PointType> &rays_world,
                            const Eigen::Vector3f &,
                            const Eigen::Quaternionf &) {
-    return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const bool changed = !free_rays_.empty() || !rays_world.empty();
+    free_rays_.clear();
+    free_rays_.reserve(rays_world.size());
+    for (const auto &point : rays_world.points) {
+      if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)) {
+        free_rays_.push_back(point);
+      }
+    }
+    return changed;
   }
 
   pcl::PointCloud<PointType> accumulatedCloudSnapshot() const {
@@ -212,15 +221,17 @@ class LIOInterface {
   }
 
   pcl::PointCloud<PointType> freeSpaceSnapshot() const {
-    return pcl::PointCloud<PointType>{};
+    std::lock_guard<std::mutex> lock(mutex_);
+    return free_rays_;
   }
 
   void loadSnapshot(const pcl::PointCloud<PointType> &accumulated_world,
                     const pcl::PointCloud<PointType> &latest_world,
-                    const pcl::PointCloud<PointType> &,
+                    const pcl::PointCloud<PointType> &free_rays,
                     const Eigen::Vector3f &pose,
                     const Eigen::Quaternionf &orientation) {
     loadSnapshot(accumulated_world, latest_world, pose, orientation);
+    updateFreeRaysWorld(free_rays, pose, orientation);
   }
 
   void loadSnapshot(const pcl::PointCloud<PointType> &accumulated_world,
@@ -233,6 +244,7 @@ class LIOInterface {
     ld_->lidar_pose_ = pose;
     ld_->lidar_q_ = orientation;
     ld_->lidar_cloud_ = latest_world;
+    free_rays_.clear();
     cloud_ = std::make_shared<pcl::PointCloud<PointType>>(accumulated_world);
     rebuildOccupiedIndexLocked();
     last_prune_pose_ = pose;
@@ -458,6 +470,7 @@ class LIOInterface {
   std::size_t last_carved_voxels_ = 0;
   mutable std::mutex mutex_;
   pcl::PointCloud<PointType>::Ptr cloud_;
+  pcl::PointCloud<PointType> free_rays_;
   std::unordered_map<VoxelKey, std::size_t, VoxelKeyHash> occupied_index_;
   std::unique_ptr<KD_TREE<PointType>> ikd_Tree_map;
   std::unique_ptr<KD_TREE<PointType>> ikd_Tree_layer;

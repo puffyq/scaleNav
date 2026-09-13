@@ -240,12 +240,12 @@ TEST(LidarMapContract, TcM1013OneHundredTwentyFreeRayFramesDoNotCreateObstacles)
   const double initial_distance = map.getDisToOcc(Eigen::Vector3f(4.0F, 0.0F, 0.0F));
 
   for (int frame = 0; frame < 120; ++frame) {
-    EXPECT_FALSE(map.updateFreeRaysWorld(
+    EXPECT_TRUE(map.updateFreeRaysWorld(
       free_rays, pose, Eigen::Quaternionf::Identity()));
   }
 
   EXPECT_EQ(map.pointCount(), initial_count);
-  EXPECT_TRUE(map.freeSpaceSnapshot().empty());
+  EXPECT_EQ(map.freeSpaceSnapshot().size(), free_rays.size());
   EXPECT_NEAR(map.getDisToOcc(Eigen::Vector3f(4.0F, 0.0F, 0.0F)),
               initial_distance, 1.0e-5);
 }
@@ -310,19 +310,43 @@ TEST(LidarMapOccupied, RepeatedFrameIsAHotPathNoOp)
   EXPECT_EQ(map.accumulatedCloudSnapshot().size(), 1U);
 }
 
-TEST(LidarMapOccupied, FreeRaysAreIgnored)
+TEST(LidarMapOccupied, FreeRaysSelectRegionsWithoutChangingOccupancy)
 {
   LIOInterface map;
   map.configureStorage(0.25F, 100.0F, 1000, 100.0F);
   const auto hit = cloud({PointType(2.0F, 0.0F, 0.0F)});
   ASSERT_TRUE(map.updateCloudWorld(
     hit, Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity()));
-  EXPECT_FALSE(map.updateFreeRaysWorld(
+  EXPECT_TRUE(map.updateFreeRaysWorld(
     cloud({PointType(4.0F, 0.0F, 0.0F)}),
     Eigen::Vector3f::Zero(), Eigen::Quaternionf::Identity()));
   ASSERT_EQ(map.accumulatedCloudSnapshot().size(), 1U);
   EXPECT_NEAR(map.accumulatedCloudSnapshot().front().x, 2.0F, 1e-6F);
+  ASSERT_EQ(map.freeSpaceSnapshot().size(), 1U);
+  EXPECT_NEAR(map.freeSpaceSnapshot().front().x, 4.0F, 1e-6F);
+}
+
+TEST(LidarMapOccupied, FreeRaySnapshotsReplaceEvidenceAndPreserveObstacles)
+{
+  LIOInterface map;
+  const Eigen::Vector3f pose(0.0F, 0.0F, 60.6F);
+  const auto orientation = Eigen::Quaternionf::Identity();
+  const auto hit = cloud({PointType(2.0F, 0.0F, 60.6F)});
+  map.updateCloudWorld(hit, pose, orientation);
+  map.updateFreeRaysWorld(cloud({PointType(20.0F, 0.0F, 60.6F)}), pose, orientation);
+  map.updateFreeRaysWorld(cloud({PointType(20.0F, 8.0F, 60.6F)}), pose, orientation);
+  LIOInterface snapshot;
+  snapshot.loadSnapshot(map.accumulatedCloudSnapshot(), map.latestCloudSnapshot(),
+                        map.freeSpaceSnapshot(), pose, orientation);
+  ASSERT_EQ(snapshot.freeSpaceSnapshot().size(), 1U);
+  EXPECT_FLOAT_EQ(snapshot.freeSpaceSnapshot().front().y, 8.0F);
+  EXPECT_EQ(snapshot.pointCount(), 1U);
+  EXPECT_NEAR(snapshot.getDisToOcc(Eigen::Vector3f(2.0F, 0.0F, 60.6F)), 0.0, 1e-6);
+  EXPECT_TRUE(map.updateFreeRaysWorld({}, pose, orientation));
   EXPECT_TRUE(map.freeSpaceSnapshot().empty());
+  EXPECT_EQ(map.pointCount(), 1U);
+  EXPECT_FALSE(map.updateFreeRaysWorld({}, pose, orientation));
+  EXPECT_EQ(snapshot.freeSpaceSnapshot().size(), 1U);
 }
 
 TEST(LidarMapOccupied, PlanarClearanceIgnoresGroundBelowLayer)

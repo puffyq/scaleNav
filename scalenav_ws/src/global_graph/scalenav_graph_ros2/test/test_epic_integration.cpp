@@ -143,9 +143,9 @@ TEST(EpicIntegration, TenHertzDepthUpdatesPreserveTheOccupiedMap)
   }
 
   EXPECT_GE(depth_updates, 1);
-  EXPECT_EQ(free_ray_updates, 0);
+  EXPECT_EQ(free_ray_updates, 51);
   EXPECT_EQ(map.accumulatedCloudSnapshot().size(), 1U);
-  EXPECT_TRUE(map.freeSpaceSnapshot().empty());
+  EXPECT_EQ(map.freeSpaceSnapshot().size(), 1U);
   EXPECT_NEAR(map.getDisToOcc(p(20.0F, 0.0F)), 0.0, 1e-5);
 }
 
