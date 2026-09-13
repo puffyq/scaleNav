@@ -78,10 +78,10 @@ odom_topic = /sim/odom
 ```text
 semantic_depth_topic = /camera/depth/image
 semantic_depth_tolerance_ms = 50.0
-semantic_depth_max_m = 20.0
+semantic_depth_max_m = 35.0
 ```
 
-深度必须是小端 `32FC1`。只有有限、正数且小于 `semantic_depth_max_m - 1e-4` 的采样才被视为 measured depth。无匹配深度时，当前帧仍可生成 virtual projection。
+深度必须是小端 `32FC1`。只有有限、正数且小于 `semantic_depth_max_m - 1e-4` 的采样才被视为 measured depth。无匹配深度时，只有显式开启 `semantic_virtual_frontiers_enabled` 才会生成固定距离的 virtual projection；默认关闭。
 
 ## 4. 当前 patch 处理
 

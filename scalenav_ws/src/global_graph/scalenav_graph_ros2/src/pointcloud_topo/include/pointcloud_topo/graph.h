@@ -233,6 +233,7 @@ struct SemanticHeatmapAnnotation {
   float min_heatmap_score = 0.20F;
   float min_radius_m = 1.0F;
   float max_radius_m = 20.0F;
+  float max_depth_m = 35.0F;
   // Verified nodes are a ground-plane map in front of the camera. Project
   // (x, y, ground_z) rather than the flight-layer z, otherwise a level
   // camera collapses every node onto the horizon line.

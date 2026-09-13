@@ -2691,7 +2691,8 @@ size_t TopoGraph::annotateVerifiedNodesFromHeatmap(
           normalized_u, normalized_v, optical_depth_m) ||
         normalized_u < 0.0F || normalized_u > 1.0F ||
         normalized_v < 0.0F || normalized_v > 1.0F ||
-        optical_depth_m < 0.5F) {
+        optical_depth_m < 0.5F ||
+        (view.max_depth_m > 0.0F && optical_depth_m >= view.max_depth_m)) {
       continue;
     }
 

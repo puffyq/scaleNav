@@ -294,7 +294,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
     semantic_depth_tolerance_ms_ = std::max(0.0, declare_parameter<double>(
       "semantic_depth_tolerance_ms", 50.0));
     semantic_depth_max_m_ = std::max(0.1, declare_parameter<double>(
-      "semantic_depth_max_m", 20.0));
+      "semantic_depth_max_m", 35.0));
     semantic_max_age_ms_ = declare_parameter<double>("semantic_max_age_ms", 1500.0);
     semantic_risk_memory_ms_ = std::max(semantic_max_age_ms_, declare_parameter<double>(
       "semantic_risk_memory_ms", 5000.0));
@@ -4382,6 +4382,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
         view.min_heatmap_score = static_cast<float>(semantic_point_min_score_);
         view.min_radius_m = static_cast<float>(semantic_annotation_min_radius_m_);
         view.max_radius_m = static_cast<float>(semantic_annotation_max_radius_m_);
+        view.max_depth_m = static_cast<float>(semantic_depth_max_m_);
         view.ground_z_m = graph_fixed_layer_ ? static_cast<float>(graph_layer_z_) :
           frame->origin.z();
         semantic_reverse_annotated = topo->annotateVerifiedNodesFromHeatmap(
@@ -5621,7 +5622,7 @@ class ScaleNavGraphNode final : public rclcpp::Node {
   double semantic_camera_tz_ = -0.1;
   std::string semantic_depth_topic_;
   double semantic_depth_tolerance_ms_ = 50.0;
-  double semantic_depth_max_m_ = 20.0;
+  double semantic_depth_max_m_ = 35.0;
   double semantic_horizontal_fov_deg_ = 90.0;
   double semantic_vertical_fov_deg_ = 60.0;
   int semantic_patch_cols_ = 5;

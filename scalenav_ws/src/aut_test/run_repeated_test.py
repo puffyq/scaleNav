@@ -224,8 +224,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--semantic-depth-max-m",
         type=finite_positive,
-        default=20.0,
-        help="maximum measured depth used for semantic projection (default: 20)",
+        default=35.0,
+        help="maximum measured depth used for semantic projection (default: 35)",
     )
     parser.add_argument(
         "--semantic-virtual-depth-m",

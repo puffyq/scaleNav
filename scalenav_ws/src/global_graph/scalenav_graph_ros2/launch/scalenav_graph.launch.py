@@ -107,7 +107,7 @@ def generate_launch_description():
         DeclareLaunchArgument("odom_connect_timeout_ms", default_value="3.0"),
         DeclareLaunchArgument("semantic_pose_tolerance_ms", default_value="250.0"),
         DeclareLaunchArgument("semantic_depth_tolerance_ms", default_value="50.0"),
-        DeclareLaunchArgument("semantic_depth_max_m", default_value="20.0"),
+        DeclareLaunchArgument("semantic_depth_max_m", default_value="35.0"),
         DeclareLaunchArgument("semantic_max_age_ms", default_value="1500.0"),
         DeclareLaunchArgument("semantic_risk_memory_ms", default_value="5000.0"),
         DeclareLaunchArgument("semantic_risk_accumulation_alpha", default_value="0.25"),
